@@ -1,0 +1,26 @@
+[project]
+name = "prokaryotes"
+version = "0.1.0"
+description = "Denizens of the primoridal soup"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "openai",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --cov=prokaryotes"
+testpaths = [
+    "tests",
+]
