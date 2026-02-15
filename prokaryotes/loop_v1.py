@@ -4,7 +4,7 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-class Loop:
+class AgentLoop:
     def __init__(self, async_openai: AsyncOpenAI):
         self.async_openai = async_openai
 

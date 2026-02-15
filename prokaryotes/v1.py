@@ -7,12 +7,12 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from prokaryotes.loop.v1 import Loop
+from prokaryotes.loop_v1 import AgentLoop
 
 logger = logging.getLogger(__name__)
 
 async_openai = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-agent_loop = Loop(async_openai)
+agent_loop = AgentLoop(async_openai)
 
 class ChatMessage(BaseModel):
     role: str
@@ -66,25 +66,9 @@ async def health():
 
 
 if __name__ == "__main__":
-    import logging.config
     import uvicorn
 
-    logging.config.dictConfig({
-        "version": 1,
-        "formatters": {
-            "default": {"format": "%(levelname)s:     %(asctime)s - %(message)s"},
-        },
-        "handlers": {
-            "console": {
-                "class": "logging.StreamHandler",
-                "formatter": "default",
-            },
-        },
-        "loggers": {
-            "": {
-                "level": os.getenv("LOG_LEVEL", "INFO"),
-                "handlers": ["console"],
-            },
-        }
-    })
+    from prokaryotes.utils import setup_logging
+
+    setup_logging()
     uvicorn.run(app)

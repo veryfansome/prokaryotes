@@ -4,8 +4,11 @@ version = "0.1.0"
 description = "Denizens of the primoridal soup"
 requires-python = ">=3.12"
 dependencies = [
+    "certifi",
     "fastapi",
+    "imapclient",
     "openai",
+    "python-dotenv",
     "uvicorn",
 ]
 
