@@ -1,0 +1,199 @@
+networks:
+  prokaryotes: {}
+
+volumes:
+  elastic-data: {}
+  neo4j-data: {}
+  postgres-data: {}
+  redis-data: {}
+
+services:
+
+  # Databases
+
+  elasticsearch:
+    networks: [prokaryotes]
+    container_name: prokaryotes-elasticsearch
+    image: elasticsearch:9.3.0
+    ports:
+      - "9200:9200"
+    volumes:
+      - elastic-data:/usr/share/elasticsearch/data
+    environment:
+      "discovery.type": single-node
+      "logger.level": ERROR
+      "xpack.security.enabled": false
+    healthcheck:
+      test: [ "CMD", "curl", "http://localhost:9200/_cluster/health?wait_for_status=green&timeout=2s" ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    stop_grace_period: 1m
+
+  neo4j:
+    networks: [prokaryotes]
+    container_name: prokaryotes-neo4j
+    image: neo4j:4.4
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+    environment:
+      NEO4J_AUTH: neo4j/Ma9icMicr0be
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "-t=1", "http://localhost:7474" ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    stop_grace_period: 1m
+
+  neo4j-migrate:
+    networks: [prokaryotes]
+    container_name: prokaryotes-neo4j-migrate
+    image: migrate/migrate:latest
+    volumes:
+      - ./database/neo4j:/migrations
+    command: [
+      "-path=/migrations/",
+      "-database=neo4j://neo4j:Ma9icMicr0be@prokaryotes-neo4j:7687/neo4j?x-multi-statement=true",
+      "up",
+    ]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  postgres:
+    networks: [prokaryotes]
+    container_name: prokaryotes-postgres
+    image: postgres:18-alpine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    environment:
+      POSTGRES_DB: prokaryotes
+      POSTGRES_PASSWORD: Ma9icMicr0be
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "postgres" ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    stop_grace_period: 1m
+
+  postgres-migrate:
+    networks: [prokaryotes]
+    container_name: prokaryotes-postgres-migrate
+    image: migrate/migrate:latest
+    volumes:
+      - ./database/postgres:/migrations
+    command: [
+      "-path=/migrations/",
+      "-database=postgresql://postgres:Ma9icMicr0be@prokaryotes-postgres:5432/prokaryotes?sslmode=disable",
+      "up",
+    ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    networks: [prokaryotes]
+    container_name: prokaryotes-redis
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    restart: always
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    stop_grace_period: 1m
+
+  # Tests
+
+  unit-tests:
+    container_name: prokaryotes-unit-tests
+    image: "prokaryotes:latest"
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    working_dir: /app
+    volumes:
+      - ./tests:/app/tests:ro
+      - ~/.cache/huggingface:/root/.cache/huggingface:ro
+      - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
+    environment: &common-model-env
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    command: ["pytest", "-vvv"]
+
+  # Apps
+
+  elasticsearch-init:
+    networks: [prokaryotes]
+    container_name: prokaryotes-elasticsearch-init
+    image: "prokaryotes:latest"
+    pull_policy: build
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env:ro
+    command: ["python", "-m", "scripts.search_init"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  emb:
+    networks: [prokaryotes]
+    container_name: prokaryotes-emb
+    image: "prokaryotes:latest"
+    pull_policy: build
+    ports:
+      - "8001:8001" # HTTP
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env:ro
+      - ~/.cache/huggingface:/root/.cache/huggingface:ro
+      - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
+    environment: *common-model-env
+    command: ["uvicorn", "scripts.emb:v1.app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      unit-tests:
+        condition: service_completed_successfully
+
+  web:
+    networks: [prokaryotes]
+    container_name: prokaryotes-web
+    image: "prokaryotes:latest"
+    pull_policy: build
+    ports:
+      - "8000:8000" # HTTP
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env:ro
+    environment:
+      WEB_HARNESS_IMPL: "anthropic"
+      #WEB_HARNESS_IMPL: "openai"
+    command: ["uvicorn", "scripts.web:harness.app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
+      neo4j:
+        condition: service_healthy
+      neo4j-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      unit-tests:
+        condition: service_completed_successfully
+    stop_grace_period: 1m

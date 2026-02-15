@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Prokaryotes - Login</title>
+    <link rel="icon" type="image/png" href="/logo.png">
+    <link rel="stylesheet" href="/common.css">
+    <link rel="stylesheet" href="/common-auth.css">
+    <style>
+        .form-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .check {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #374151;
+            font-size: 0.95rem;
+        }
+
+        .check input {
+            width: 1rem;
+            height: 1rem;
+            accent-color: #111827;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <!--<img class="header-logo" src="/logo.png" alt="Prokaryotes logo">-->
+            <h1>prokaryotes</h1>
+        </div>
+    </header>
+
+    <main class="page">
+        <section class="auth-card" aria-labelledby="login-title">
+            <h2 class="auth-title" id="login-title">Hello!</h2>
+            <p class="auth-subtitle">Sign in to continue.</p>
+            <div id="statusMessage" class="status-message" hidden></div>
+
+            <form action="/login" method="post">
+                <div class="form-group">
+                    <label class="form-label" for="email">Email</label>
+                    <input class="form-input" id="email" name="email" type="email" placeholder="you@example.com" required>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="password">Password</label>
+                    <input class="form-input" id="password" name="password" type="password" placeholder="Enter your password" required>
+                </div>
+
+                <div class="form-row">
+                    <label class="check" for="remember">
+                        <input id="remember" name="remember" type="checkbox">
+                        Remember me
+                    </label>
+                    <a class="link" href="#">Forgot password?</a>
+                </div>
+
+                <button class="submit-button" type="submit">Log in</button>
+            </form>
+
+            <p class="switch-text">
+                New here?
+                <a class="link" href="/register">Create an account</a>
+            </p>
+        </section>
+    </main>
+    <script src="/common-auth.js"></script>
+</body>
+</html>

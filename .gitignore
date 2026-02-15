@@ -1,0 +1,10 @@
+*.egg-info
+.DS_Store
+.coverage
+.env
+.idea
+.venv
+__pycache__/
+coverage/
+neo4j.dump
+node_modules/

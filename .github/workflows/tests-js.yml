@@ -1,0 +1,34 @@
+name: tests-js
+
+on:
+  push: &repo_trigger
+    branches:
+      - main
+    paths:
+      - .github/workflows/tests-js.yml
+      - package.json
+      - package-lock.json
+      - vitest.config.js
+      - scripts/static/**/*.js
+      - scripts/static/**/*.html
+      - tests/**/*.js
+  pull_request: *repo_trigger
+
+jobs:
+  tests-js:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run JS tests
+        run: npm run test:js
