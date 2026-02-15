@@ -1,0 +1,90 @@
+[project]
+name = "prokaryotes"
+version = "0.1.0"
+description = "Denizens of the primoridal soup"
+requires-python = ">=3.12"
+dependencies = [
+    "aiofiles",
+    "anthropic",
+    "async-lru",
+    "asyncpg",
+    "bcrypt",
+    "beautifulsoup4",
+    "certifi",
+    "elasticsearch[async]",
+    "fastapi",
+    "imapclient",
+    "itsdangerous",
+    "lxml",
+    "mistune",
+    "neo4j",
+    "openai",
+    "psutil",
+    "python-dotenv",
+    "python-multipart",
+    "redis[hiredis]",
+    "sentence-transformers",
+    "starsessions[redis]",
+    "torch==2.10.0+cpu; sys_platform == 'linux'",
+    "torch==2.10.0; sys_platform == 'darwin'",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.coverage.run]
+source = ["prokaryotes"]
+omit = [
+    "tests/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --cov=prokaryotes"
+testpaths = [
+    "tests",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+indent-width = 4
+
+[tool.ruff.format]
+# Like Black, use double quotes and respect the line length
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+ignore = []
+select = ["E", "F", "I", "UP", "B"]
+unfixable = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["prokaryotes"]
+
+[tool.setuptools.packages.find]
+include = ["prokaryotes*"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+"torch" = { index = "pytorch-cpu" }

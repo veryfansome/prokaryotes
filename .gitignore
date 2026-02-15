@@ -1,0 +1,11 @@
+*.egg-info
+.DS_Store
+.claude
+.coverage
+.env
+.idea
+.venv
+__pycache__/
+coverage/
+neo4j.dump
+node_modules/
