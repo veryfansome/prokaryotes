@@ -1,12 +1,13 @@
 import asyncio
 import logging
-from openai import AsyncOpenAI
+
+from prokaryotes.llm_v1 import LLM
 
 logger = logging.getLogger(__name__)
 
 class AgentLoop:
-    def __init__(self, async_openai: AsyncOpenAI):
-        self.async_openai = async_openai
+    def __init__(self, llm: LLM):
+        self.llm = llm
 
     async def run(self):
         logger.info("Starting loop")

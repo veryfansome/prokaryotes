@@ -6,16 +6,10 @@ import ssl
 from email import policy
 from email.parser import BytesParser
 from imapclient import IMAPClient
-from pydantic import BaseModel
+
+from prokaryotes.models_v1 import EmailMessage
 
 logger = logging.getLogger(__name__)
-
-class EmailMessage(BaseModel):
-    id: int
-    subject: str
-    sender: str
-    timestamp: str
-    body: str
 
 class EmailReader:
     def __init__(self, imap_host: str, imap_username: str, imap_password: str):
