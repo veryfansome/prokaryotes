@@ -5,16 +5,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from prokaryotes.base import ProkaryotesBase
-from prokaryotes.llm_v1 import LLM, get_llm
 from prokaryotes.loop_v1 import AgentLoop
 from prokaryotes.models_v1 import ChatRequest
 
 logger = logging.getLogger(__name__)
 
 class ProkaryoteV1(ProkaryotesBase):
-    def __init__(self, llm: LLM):
-        self.agent_loop = AgentLoop(llm)
-        self.llm = llm
+    def __init__(self):
+        self.agent_loop = AgentLoop()
 
         self.app = FastAPI(lifespan=self.lifespan)
         self.app.add_api_route("/", self.root, methods=["GET"])
@@ -43,5 +41,5 @@ if __name__ == "__main__":
     load_dotenv()
     setup_logging()
 
-    v1 = ProkaryoteV1(llm=get_llm())
+    v1 = ProkaryoteV1()
     uvicorn.run(v1.app)

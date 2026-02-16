@@ -6,7 +6,7 @@ def setup_logging():
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
-            "default": {"format": "%(levelname)s:     %(asctime)s - %(message)s"},
+            "default": {"format": "%(levelname)s:     %(asctime)s - %(name)s - %(message)s"},
         },
         "handlers": {
             "console": {
@@ -18,6 +18,11 @@ def setup_logging():
             "root": {
                 "level": os.getenv("LOG_LEVEL", "INFO"),
                 "handlers": ["console"],
+            },
+            "imapclient": {
+                "level": os.getenv("IMAPCLIENT_LOG_LEVEL", "INFO"),
+                "handlers": ["console"],
+                "propagate": False,
             },
         }
     })
