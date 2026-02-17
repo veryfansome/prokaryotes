@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from prokaryotes.base import ProkaryotesBase
 from prokaryotes.loop_v1 import AgentLoop
+from prokaryotes.llm_v1 import get_llm
 from prokaryotes.models_v1 import ChatRequest
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 class ProkaryoteV1(ProkaryotesBase):
     def __init__(self):
         self.agent_loop = AgentLoop()
+        self.llm = get_llm()
 
         self.app = FastAPI(lifespan=self.lifespan)
         self.app.add_api_route("/", self.root, methods=["GET"])

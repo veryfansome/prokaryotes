@@ -1,9 +1,12 @@
+import asyncio
 import base64
 import certifi
 import logging
 import os
 import quopri
 import ssl
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from email.parser import HeaderParser
@@ -43,89 +46,13 @@ class Message:
     in_reply_to: str | None = None
     references: list[str] = None
 
-class EmailReader:
+class IMAPClientFactory:
     def __init__(self, imap_host: str, imap_username: str, imap_password: str):
         self.imap_host = imap_host
         self.imap_password = imap_password
         self.imap_username = imap_username
 
-    def fetch_messages(self, folder="INBOX", criteria="ALL", limit: int = 1) -> list[Message]:
-        fetched_messages = []
-        try:
-            with self.imap_client as server:
-                server.select_folder(folder)
-                unseen_messages = server.search([criteria])
-                unseen_messages_len = len(unseen_messages)
-                logger.info(f"Found {unseen_messages_len} unseen messages")
-                if unseen_messages_len == 0:
-                    return fetched_messages
-
-                header_fields = b"HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID IN-REPLY-TO REFERENCES)"
-                body_structure_field = b"BODYSTRUCTURE"
-                response = server.fetch(unseen_messages[:limit], [
-                    b"BODY.PEEK[%s]" % header_fields,
-                    body_structure_field
-                ])
-                for uid, body_data in response.items():
-                    headers = parse_header(bytes2str(body_data[b"BODY[%s]" % header_fields]))
-                    logger.debug((uid, headers, body_data[body_structure_field]))
-                    try:
-                        (
-                            html_parts,
-                            plain_parts,
-                            calendar_parts,
-                            attachment_parts
-                        ) = classify_parts(
-                            folder, uid, body_data[body_structure_field],
-                        )
-                        body_part = choose_largest_part(html_parts) if html_parts else (
-                            choose_largest_part(plain_parts) if plain_parts else None
-                        )
-                        msg = Message(
-                            folder=folder,
-                            uid=uid,
-                            message_id=headers["message-id"],
-                            subject=headers["subject"],
-                            sender=headers["from"],
-                            timestamp=parsedate_to_datetime(headers["date"]),
-                            body=body_part,
-                            calendar_invites=calendar_parts,
-                            attachments=attachment_parts,
-                            in_reply_to=headers.get("in-reply-to"),
-                            references=parse_references(headers.get("references")),
-                        )
-                        logger.debug(msg)
-                        fetched_messages.append(msg)
-                    except Exception:
-                        logger.exception(f"Could not process message {uid}")
-        except Exception:
-            logger.exception("Could not fetch unseen messages")
-        return fetched_messages
-
-    def fetch_part_ref(self, part: MessagePartRef) -> bytes | None:
-        try:
-            with self.imap_client as server:
-                server.select_folder(part.folder)
-                response = server.fetch([part.uid], [f"BODY.PEEK[{part.section}]"])
-                data = response[part.uid][f"BODY[{part.section}]".encode("ascii")]
-                return decode_transfer_encoding(data, part.encoding)
-        except Exception:
-            logger.exception(f"Failed to fetch part ref {part}")
-
-    def list_folders(self) -> list[Folder]:
-        try:
-            with self.imap_client as server:
-                return [Folder(
-                    flags=[bytes2str(f) for f in folder_data[0]],
-                    delimiter=bytes2str(folder_data[1]),
-                    name=folder_data[2],
-                ) for folder_data in server.list_folders()]
-        except Exception:
-            logger.exception(f"Failed to list folders")
-        return []
-
-    @property
-    def imap_client(self):
+    def get_client(self):
         imap_client = IMAPClient(
             self.imap_host, ssl=True, ssl_context=ssl.create_default_context(cafile=certifi.where())
         )
@@ -135,6 +62,9 @@ class EmailReader:
 
 def bytes2str(b: bytes) -> str:
     return b.decode("utf-8", "replace")
+
+def choose_largest_part(parts: list[MessagePartRef]) -> MessagePartRef:
+    return max(parts, key=lambda m: m.size if m.size is not None else 0)
 
 def classify_parts(folder: str, uid: int, body_structure) -> (
         tuple[list[MessagePartRef], list[MessagePartRef], list[MessagePartRef], list[MessagePartRef]]
@@ -155,7 +85,7 @@ def classify_parts(folder: str, uid: int, body_structure) -> (
             uid=uid,
             section=section,
             content_type=content_type,
-            charset=params.get("charset").lower(),
+            charset=params["charset"].lower() if 'charset' in params else None,
             encoding=(bytes2str(part[5]).lower() if len(part) > 5 and part[5] else None),
             size=int(part[6]) if len(part) > 6 and isinstance(part[6], int) else None,
             filename=filename,
@@ -172,9 +102,6 @@ def classify_parts(folder: str, uid: int, body_structure) -> (
             attachment_parts.append(ref)
     return html_parts, plain_parts, calendar_parts, attachment_parts
 
-def choose_largest_part(parts: list[MessagePartRef]) -> MessagePartRef:
-    return max(parts, key=lambda m: m.size if m.size is not None else 0)
-
 def decode_transfer_encoding(data: bytes, encoding: str | None) -> bytes:
     if not encoding:
         return data
@@ -186,13 +113,78 @@ def decode_transfer_encoding(data: bytes, encoding: str | None) -> bytes:
     # 7bit/8bit/binary typically require no decoding
     return data
 
-def get_email_reader() -> EmailReader:
+def fetch_messages(client: IMAPClient, criteria: list[str] = None, folder: str = "INBOX") -> list[Message] | None:
+    try:
+        fetched_messages = []
+        client.select_folder(folder)
+        unseen_messages = client.search(criteria if criteria else ["UNSEEN"])
+        unseen_messages_len = len(unseen_messages)
+        logger.info(f"Found {unseen_messages_len} unseen messages")
+        if unseen_messages_len == 0:
+            return fetched_messages
+
+        header_fields = b"HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID IN-REPLY-TO REFERENCES)"
+        body_structure_field = b"BODYSTRUCTURE"
+        response = client.fetch(unseen_messages, [
+            b"BODY.PEEK[%s]" % header_fields,
+            body_structure_field
+        ])
+        for uid, body_data in response.items():
+            headers = parse_header(bytes2str(body_data[b"BODY[%s]" % header_fields]))
+            logger.debug((uid, headers, body_data[body_structure_field]))
+            try:
+                (
+                    html_parts,
+                    plain_parts,
+                    calendar_parts,
+                    attachment_parts
+                ) = classify_parts(
+                    folder, uid, body_data[body_structure_field],
+                )
+                body_part = choose_largest_part(html_parts) if html_parts else (
+                    choose_largest_part(plain_parts) if plain_parts else None
+                )
+                message = Message(
+                    folder=folder,
+                    uid=uid,
+                    message_id=headers["message-id"],
+                    subject=headers["subject"],
+                    sender=headers["from"],
+                    timestamp=parsedate_to_datetime(headers["date"]),
+                    body=body_part,
+                    calendar_invites=calendar_parts,
+                    attachments=attachment_parts,
+                    in_reply_to=headers.get("in-reply-to"),
+                    references=parse_references(headers.get("references")),
+                )
+                logger.debug(message)
+                fetched_messages.append(message)
+            except Exception:
+                logger.exception(f"Could not process message {uid}")
+        return fetched_messages
+    except Exception:
+        logger.exception(f"Could not fetch {criteria} messages from {folder}")
+
+def fetch_part_ref(client: IMAPClient, part: MessagePartRef) -> bytes | None:
+    try:
+        client.select_folder(part.folder)
+        response = client.fetch([part.uid], [f"BODY.PEEK[{part.section}]"])
+        data = response[part.uid][f"BODY[{part.section}]".encode("ascii")]
+        return decode_transfer_encoding(data, part.encoding)
+    except Exception:
+        logger.exception(f"Failed to fetch part ref {part}")
+
+def get_imap_client_factory() -> IMAPClientFactory:
     imap_host = os.environ.get('IMAP_HOST')
     imap_username = os.environ.get('IMAP_USERNAME')
     imap_password = os.environ.get('IMAP_PASSWORD')
     if imap_host and imap_username and imap_password:
-        return EmailReader(imap_host, imap_username, imap_password)
+        return IMAPClientFactory(imap_host, imap_username, imap_password)
     raise RuntimeError("Unable to initialize EmailReader")
+
+def idle(client: IMAPClient, folder):
+    client.select_folder(folder)
+    client.idle()
 
 def iter_leaf_parts(body_structure, prefix: str = ""):
     if body_structure and isinstance(body_structure, tuple) and isinstance(body_structure[0], list):
@@ -203,6 +195,16 @@ def iter_leaf_parts(body_structure, prefix: str = ""):
     else:
         # leaf
         yield prefix or "TEXT", body_structure
+
+def list_folders(client: IMAPClient) -> list[Folder] | None:
+    try:
+        return [Folder(
+            flags=[bytes2str(f) for f in folder_data[0]],
+            delimiter=bytes2str(folder_data[1]),
+            name=folder_data[2],
+        ) for folder_data in client.list_folders()]
+    except Exception:
+        logger.exception(f"Failed to list folders")
 
 def parse_disposition(disposition) -> tuple[str | None, dict[str, str]]:
     # disposition is usually None or (b'ATTACHMENT', (b'FILENAME', b'x.pdf')) or (b'INLINE', (...))
@@ -235,6 +237,62 @@ def parse_references(blob: str) -> list[str]:
     references_parts = [r.strip() for r in blob.split()]
     return [r for r in references_parts if r]
 
+async def watch(
+        client: IMAPClient,
+        signal: asyncio.Event,
+        folder: str = "INBOX",
+        idle_check_timeout: int = 60,
+        idle_restart_seconds: int = 60 * 25
+):
+    while True:
+        in_idle = False
+        try:
+            await asyncio.to_thread(idle, client, folder)
+            in_idle = True
+            time_started = time.monotonic()
+            while True:
+                responses = await asyncio.to_thread(client.idle_check, timeout=idle_check_timeout)
+                # Restart IDLE periodically
+                if time.monotonic() - time_started > idle_restart_seconds:
+                    break
+                if responses and any(r[1] == b'EXISTS' for r in responses):
+                    signal.set()
+                    break
+        finally:
+            if in_idle:
+                with suppress(Exception):
+                    await asyncio.to_thread(client.idle_done)
+
+async def main(factory: IMAPClientFactory):
+    # Wire up for eyeball check
+    idle_client = await asyncio.to_thread(factory.get_client)
+    read_client = await asyncio.to_thread(factory.get_client)
+    signal = asyncio.Event()
+    watcher = None
+    try:
+        logger.info(await asyncio.to_thread(list_folders, read_client))
+        while True:
+            msgs = await asyncio.to_thread(fetch_messages, read_client, criteria=["UNSEEN"], folder="INBOX")
+            logger.info(msgs)
+            for msg in msgs:
+                if not msg.body or not msg.body.charset:
+                    logger.warning(f"Skipping {msg}")
+                    continue
+                body = await asyncio.to_thread(fetch_part_ref, read_client, msg.body)
+                logger.info(body.decode(msg.body.charset).strip())
+                break
+            # Wait for change signal to fetch again
+            if not watcher or watcher.done():  # Restart if prematurely exited
+                watcher = asyncio.create_task(watch(idle_client, signal))
+            await signal.wait()
+            signal.clear()
+    finally:
+        if watcher:
+            watcher.cancel()
+        with suppress(Exception):
+            await asyncio.to_thread(idle_client.logout)
+            await asyncio.to_thread(read_client.logout)
+
 if __name__ == "__main__":
     from dotenv import load_dotenv
     from prokaryotes.utils import setup_logging
@@ -242,11 +300,4 @@ if __name__ == "__main__":
     load_dotenv()
     setup_logging()
 
-    reader = get_email_reader()
-    logger.info(reader.list_folders())
-    messages = reader.fetch_messages(criteria="UNSEEN")
-    logger.info(messages)
-    if messages:
-        msg = messages.pop()
-        body_data = reader.fetch_part_ref(msg.body)
-        logger.info(body_data.decode(msg.body.charset).strip())
+    asyncio.run(main(get_imap_client_factory()))
