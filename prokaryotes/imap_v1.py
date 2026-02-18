@@ -1,9 +1,12 @@
 import asyncio
 import base64
 import certifi
+import contextvars
+import imaplib
 import logging
 import os
 import quopri
+import socket
 import ssl
 import time
 from contextlib import suppress
@@ -11,9 +14,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.parser import HeaderParser
 from email.utils import parsedate_to_datetime
+from enum import Enum
 from imapclient import IMAPClient
 
+from prokaryotes.llm_v1 import LLM, get_llm
+
 logger = logging.getLogger(__name__)
+
+CONNECTION_ERRORS = (imaplib.IMAP4.abort, ssl.SSLError)
 
 @dataclass(frozen=True)
 class Folder:
@@ -59,6 +67,78 @@ class IMAPClientFactory:
         imap_client.use_uid = True
         imap_client.login(self.imap_username, self.imap_password)
         return imap_client
+
+class Signal(Enum):
+    A = 1
+    B = 2
+    C = 3
+
+class IMAPAgent:
+    def __init__(self):
+        self._imap_manager_client: IMAPClient | None = None
+        self._running = False
+        self.event_loop = contextvars.ContextVar("event_loop")
+        self.imap_client_factory = get_imap_client_factory()
+        self.llm: LLM = get_llm()
+        self.queue: asyncio.Queue[Signal] = asyncio.Queue()
+
+    def imap_manager(
+            self,
+            folder: str = "INBOX",
+            idle_check_timeout: int = 60,
+            idle_restart_seconds: int = 60 * 25
+    ):
+        event_loop = self.event_loop.get()
+        while self._running:
+            try:
+                self._imap_manager_client = client = self.imap_client_factory.get_client()
+                with client:
+                    idle(client, folder)
+                    time_started = time.monotonic()
+                    while self._running:
+                        responses = client.idle_check(timeout=idle_check_timeout)
+                        time_elapsed = time.monotonic() - time_started
+                        logger.info(f"Idled for {time_elapsed} seconds: {responses}")
+                        # Restart IDLE periodically
+                        if time.monotonic() - time_started > idle_restart_seconds:
+                            logger.info(f"Restarting idle")
+                            break
+                        if responses and any(r[1] == b'EXISTS' for r in responses):
+                            event_loop.call_soon_threadsafe(self.signal_safely, Signal.A)
+                            break
+                    with suppress(Exception):
+                        logger.info(f"Idle done")
+                        client.idle_done()
+            except CONNECTION_ERRORS:
+                logger.exception("connection error, reconnecting")
+
+    async def run(self):
+        logger.info("Starting agent loop")
+        self._running = True
+        self.event_loop.set(asyncio.get_running_loop())
+        imap_manager_task = asyncio.create_task(asyncio.to_thread(self.imap_manager))
+        while True:
+            try:
+                signal = await self.queue.get()
+                match signal:
+                    case Signal.A:
+                        logger.info("Got Signal.A")
+                    case Signal.B:
+                        logger.info("Got Signal.B")
+                    case Signal.C:
+                        logger.info("Got Signal.C")
+            except asyncio.CancelledError:
+                logger.info("Stopping agent loop")
+                self._running = False
+                self._imap_manager_client.socket().shutdown(socket.SHUT_RDWR)  # Break out of idle_check
+                await imap_manager_task
+                break
+
+    def signal_safely(self, signal: Signal):
+        try:
+            self.queue.put_nowait(signal)
+        except asyncio.QueueFull:
+            logger.warning(f"Queue full, dropped {signal}")
 
 def bytes2str(b: bytes) -> str:
     return b.decode("utf-8", "replace")
@@ -237,62 +317,6 @@ def parse_references(blob: str) -> list[str]:
     references_parts = [r.strip() for r in blob.split()]
     return [r for r in references_parts if r]
 
-async def watch(
-        client: IMAPClient,
-        signal: asyncio.Event,
-        folder: str = "INBOX",
-        idle_check_timeout: int = 60,
-        idle_restart_seconds: int = 60 * 25
-):
-    while True:
-        in_idle = False
-        try:
-            await asyncio.to_thread(idle, client, folder)
-            in_idle = True
-            time_started = time.monotonic()
-            while True:
-                responses = await asyncio.to_thread(client.idle_check, timeout=idle_check_timeout)
-                # Restart IDLE periodically
-                if time.monotonic() - time_started > idle_restart_seconds:
-                    break
-                if responses and any(r[1] == b'EXISTS' for r in responses):
-                    signal.set()
-                    break
-        finally:
-            if in_idle:
-                with suppress(Exception):
-                    await asyncio.to_thread(client.idle_done)
-
-async def main(factory: IMAPClientFactory):
-    # Wire up for eyeball check
-    idle_client = await asyncio.to_thread(factory.get_client)
-    read_client = await asyncio.to_thread(factory.get_client)
-    signal = asyncio.Event()
-    watcher = None
-    try:
-        logger.info(await asyncio.to_thread(list_folders, read_client))
-        while True:
-            msgs = await asyncio.to_thread(fetch_messages, read_client, criteria=["UNSEEN"], folder="INBOX")
-            logger.info(msgs)
-            for msg in msgs:
-                if not msg.body or not msg.body.charset:
-                    logger.warning(f"Skipping {msg}")
-                    continue
-                body = await asyncio.to_thread(fetch_part_ref, read_client, msg.body)
-                logger.info(body.decode(msg.body.charset).strip())
-                break
-            # Wait for change signal to fetch again
-            if not watcher or watcher.done():  # Restart if prematurely exited
-                watcher = asyncio.create_task(watch(idle_client, signal))
-            await signal.wait()
-            signal.clear()
-    finally:
-        if watcher:
-            watcher.cancel()
-        with suppress(Exception):
-            await asyncio.to_thread(idle_client.logout)
-            await asyncio.to_thread(read_client.logout)
-
 if __name__ == "__main__":
     from dotenv import load_dotenv
     from prokaryotes.utils import setup_logging
@@ -300,4 +324,13 @@ if __name__ == "__main__":
     load_dotenv()
     setup_logging()
 
-    asyncio.run(main(get_imap_client_factory()))
+    with get_imap_client_factory().get_client() as read_client:
+        msgs = fetch_messages(read_client, criteria=["UNSEEN"], folder="INBOX")
+        logger.info(msgs)
+        for msg in msgs:
+            if not msg.body or not msg.body.charset:
+                logger.warning(f"Skipping {msg}")
+                continue
+            body = fetch_part_ref(read_client, msg.body)
+            logger.info(body.decode(msg.body.charset).strip())
+            break  # Show one for eyeballing
