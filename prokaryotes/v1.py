@@ -1,11 +1,9 @@
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from prokaryotes.base import ProkaryotesBase
-from prokaryotes.imap_v1 import IMAPAgent
 from prokaryotes.llm_v1 import get_llm
 from prokaryotes.models_v1 import ChatRequest
 
@@ -13,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 class ProkaryoteV1(ProkaryotesBase):
     def __init__(self):
-        self.imap_agent = IMAPAgent()
         self.llm = get_llm()
 
         self.app = FastAPI(lifespan=self.lifespan)
@@ -29,9 +26,9 @@ class ProkaryoteV1(ProkaryotesBase):
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
-        agent_loop_task = asyncio.create_task(self.imap_agent.run())
+        logger.info("Entering lifespan")
         yield
-        agent_loop_task.cancel()
+        logger.info("Exiting lifespan")
 
 
 if __name__ == "__main__":

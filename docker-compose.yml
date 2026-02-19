@@ -1,0 +1,28 @@
+networks:
+  prokaryotes: {}
+
+services:
+  imap-ingest:
+    container_name: prokaryotes-imap-ingest
+    networks: [prokaryotes]
+    image: "prokaryotes:latest"
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env
+    entrypoint: uv
+    command: ["run", "python", "-m", "scripts.imap_ingest"]
+    depends_on:
+      tests:
+        condition: service_completed_successfully
+
+  tests:
+    container_name: prokaryotes-tests
+    image: "prokaryotes:latest"
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    working_dir: /app
+    volumes:
+      - ./tests:/app/tests
+    entrypoint: uv
+    command: ["run", "pytest"]

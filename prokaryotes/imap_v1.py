@@ -1,14 +1,14 @@
-import asyncio
 import base64
 import certifi
-import contextvars
 import imaplib
 import logging
 import os
+import queue
 import quopri
 import socket
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,11 +17,31 @@ from email.utils import parsedate_to_datetime
 from enum import Enum
 from imapclient import IMAPClient
 
-from prokaryotes.llm_v1 import LLM, get_llm
-
 logger = logging.getLogger(__name__)
 
-CONNECTION_ERRORS = (imaplib.IMAP4.abort, ssl.SSLError)
+CONNECTION_ERRORS = (ConnectionError, imaplib.IMAP4.abort, ssl.SSLError)
+
+class ControlSignalType(Enum):
+    EXISTS = 1
+    FETCH = 2
+    SHUTDOWN = 3
+
+@dataclass(frozen=True)
+class ControlSignal:
+    data: tuple | None
+    signal_type: ControlSignalType
+
+    @classmethod
+    def exists(cls):
+        return cls(data=None, signal_type=ControlSignalType.EXISTS)
+
+    @classmethod
+    def fetch(cls, data: tuple):
+        return cls(data=data, signal_type=ControlSignalType.FETCH)
+
+    @classmethod
+    def shutdown(cls):
+        return cls(data=None, signal_type=ControlSignalType.SHUTDOWN)
 
 @dataclass(frozen=True)
 class Folder:
@@ -68,30 +88,30 @@ class IMAPClientFactory:
         imap_client.login(self.imap_username, self.imap_password)
         return imap_client
 
-class Signal(Enum):
-    A = 1
-    B = 2
-    C = 3
-
-class IMAPAgent:
+class IngestController:
     def __init__(self):
-        self._imap_manager_client: IMAPClient | None = None
+        self._imap_client_factory = get_imap_client_factory()
+        self._idle_manager_client: IMAPClient | None = None
+        self._idle_manager_executor = ThreadPoolExecutor(max_workers=1)
+        self._queue: queue.Queue[ControlSignal] = queue.Queue()
         self._running = False
-        self.event_loop = contextvars.ContextVar("event_loop")
-        self.imap_client_factory = get_imap_client_factory()
-        self.llm: LLM = get_llm()
-        self.queue: asyncio.Queue[Signal] = asyncio.Queue()
 
-    def imap_manager(
+    def graceful_shutdown(self, sig, frame):
+        logger.info(f"Received {sig}, shutting down")
+        self._running = False
+        self._idle_manager_client.socket().shutdown(socket.SHUT_RDWR)  # Break out of idle_check
+        self._idle_manager_executor.shutdown()
+        self.safe_put_nowait(ControlSignal.shutdown())
+
+    def idle_manager(
             self,
             folder: str = "INBOX",
             idle_check_timeout: int = 60,
-            idle_restart_seconds: int = 60 * 25
+            idle_restart_seconds: int = 60 * 10
     ):
-        event_loop = self.event_loop.get()
         while self._running:
             try:
-                self._imap_manager_client = client = self.imap_client_factory.get_client()
+                self._idle_manager_client = client = self._imap_client_factory.get_client()
                 with client:
                     idle(client, folder)
                     time_started = time.monotonic()
@@ -99,46 +119,43 @@ class IMAPAgent:
                         responses = client.idle_check(timeout=idle_check_timeout)
                         time_elapsed = time.monotonic() - time_started
                         logger.info(f"Idled for {time_elapsed} seconds: {responses}")
+                        # Looks like:
+                        # - [(9484, b'EXISTS')]
+                        # - [(9467, b'FETCH', (b'UID', 73958, b'FLAGS', (b'\\Seen',)))]
+                        if responses and any(r[1] == b'EXISTS' for r in responses):
+                            self.safe_put_nowait(ControlSignal.exists())
+                        for r in responses:
+                            if r[1] == b'FETCH':
+                                self.safe_put_nowait(ControlSignal.fetch(r[2]))
                         # Restart IDLE periodically
                         if time.monotonic() - time_started > idle_restart_seconds:
-                            logger.info(f"Restarting idle")
-                            break
-                        if responses and any(r[1] == b'EXISTS' for r in responses):
-                            event_loop.call_soon_threadsafe(self.signal_safely, Signal.A)
-                            break
-                    with suppress(Exception):
-                        logger.info(f"Idle done")
-                        client.idle_done()
+                            logger.info(f"Refreshing idle connection")
+                            client.idle_done()
+                            client.noop()
+                            client.idle()
+                            time_started = time.monotonic()
             except CONNECTION_ERRORS:
                 logger.exception("connection error, reconnecting")
 
-    async def run(self):
+    def run(self):
         logger.info("Starting agent loop")
         self._running = True
-        self.event_loop.set(asyncio.get_running_loop())
-        imap_manager_task = asyncio.create_task(asyncio.to_thread(self.imap_manager))
-        while True:
-            try:
-                signal = await self.queue.get()
-                match signal:
-                    case Signal.A:
-                        logger.info("Got Signal.A")
-                    case Signal.B:
-                        logger.info("Got Signal.B")
-                    case Signal.C:
-                        logger.info("Got Signal.C")
-            except asyncio.CancelledError:
-                logger.info("Stopping agent loop")
-                self._running = False
-                self._imap_manager_client.socket().shutdown(socket.SHUT_RDWR)  # Break out of idle_check
-                await imap_manager_task
-                break
+        self._idle_manager_executor.submit(self.idle_manager)
+        while self._running:
+            control_signal = self._queue.get()
+            match control_signal.signal_type:
+                case ControlSignalType.EXISTS:
+                    logger.info(f"Got {control_signal}")
+                case ControlSignalType.FETCH:
+                    logger.info(f"Got {control_signal}")
+                case ControlSignalType.SHUTDOWN:
+                    break
 
-    def signal_safely(self, signal: Signal):
+    def safe_put_nowait(self, control_signal: ControlSignal):
         try:
-            self.queue.put_nowait(signal)
-        except asyncio.QueueFull:
-            logger.warning(f"Queue full, dropped {signal}")
+            self._queue.put_nowait(control_signal)
+        except queue.Full:
+            logger.warning(f"Queue full, dropped {control_signal}")
 
 def bytes2str(b: bytes) -> str:
     return b.decode("utf-8", "replace")
@@ -155,7 +172,7 @@ def classify_parts(folder: str, uid: int, body_structure) -> (
     attachment_parts: list[MessagePartRef] = []
     for section, part in iter_leaf_parts(body_structure):
         # As per https://datatracker.ietf.org/doc/html/rfc3501#section-7.4.2
-        # leaf tuple: (type, subtype, params, id, desc, encoding, size, lines, md5, disposition, language, location)
+        # Leaf tuple: (type, subtype, params, id, desc, encoding, size, lines, md5, disposition, language, location)
         content_type = f"{bytes2str(part[0]).lower()}/{bytes2str(part[1]).lower()}"
         params = parse_params(part[2] if len(part) > 2 else None)
         disposition, disposition_params = parse_disposition(part[9] if len(part) > 9 else None)
@@ -260,7 +277,7 @@ def get_imap_client_factory() -> IMAPClientFactory:
     imap_password = os.environ.get('IMAP_PASSWORD')
     if imap_host and imap_username and imap_password:
         return IMAPClientFactory(imap_host, imap_username, imap_password)
-    raise RuntimeError("Unable to initialize EmailReader")
+    raise RuntimeError("Unable to initialize IMAPClientFactory")
 
 def idle(client: IMAPClient, folder):
     client.select_folder(folder)
@@ -287,7 +304,7 @@ def list_folders(client: IMAPClient) -> list[Folder] | None:
         logger.exception(f"Failed to list folders")
 
 def parse_disposition(disposition) -> tuple[str | None, dict[str, str]]:
-    # disposition is usually None or (b'ATTACHMENT', (b'FILENAME', b'x.pdf')) or (b'INLINE', (...))
+    # Disposition is usually None or (b'ATTACHMENT', (b'FILENAME', b'x.pdf')) or (b'INLINE', (...))
     if not disposition:
         return None, {}
     if isinstance(disposition, tuple) and disposition:
@@ -301,7 +318,7 @@ def parse_header(blob: str) -> dict[str, str]:
     return {k.lower(): v for k, v in headers.items()}
 
 def parse_params(params: tuple) -> dict[str, str]:
-    # params looks like (b'CHARSET', b'UTF-8', b'NAME', b'file.txt') or None
+    # Params looks like (b'CHARSET', b'UTF-8', b'NAME', b'file.txt') or None
     param_struct: dict[str, str] = {}
     if not params:
         return param_struct
@@ -319,6 +336,7 @@ def parse_references(blob: str) -> list[str]:
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
+
     from prokaryotes.utils import setup_logging
 
     load_dotenv()
