@@ -107,7 +107,7 @@ class IngestController:
             self,
             folder: str = "INBOX",
             idle_check_timeout: int = 60,
-            idle_restart_seconds: int = 60 * 5
+            idle_restart_seconds: int = 60 * 4
     ):
         while self._running:
             try:
