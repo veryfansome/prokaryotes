@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>NanoChat</title>
+    <title>Prokaryotes</title>
     <link rel="icon" type="image/svg+xml" href="/logo.svg">
     <style>
         :root {
@@ -85,9 +85,14 @@
 
         .message {
             display: flex;
+            flex-direction: column;
+            align-items: flex-start;
             justify-content: flex-start;
-            margin-bottom: 0.5rem;
-            color: #0d0d0d;
+        }
+
+        .message-actions {
+            align-self: flex-start;
+            margin-top: 0.35rem;
         }
 
         .message.assistant {
@@ -95,7 +100,8 @@
         }
 
         .message.user {
-            justify-content: flex-end;
+            align-items: flex-end;
+            justify-content: flex-start;
         }
 
         .message-content {
@@ -104,10 +110,20 @@
             max-width: 100%;
         }
 
+        .message.assistant .message-actions {
+            justify-content: flex-start;
+            margin-left: -0.25rem;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+        }
+
+        .message.assistant:hover .message-actions {
+            opacity: 1;
+        }
+
         .message.assistant .message-content {
             background: transparent;
             border: none;
-            padding: 0.25rem 0;
             cursor: pointer;
             border-radius: 0.5rem;
             padding: 0.5rem;
@@ -117,6 +133,32 @@
 
         .message.assistant .message-content:hover {
             background-color: #f9fafb;
+        }
+
+        .icon-btn {
+            width: 28px;
+            height: 28px;
+            padding: 0;
+            border: 0;
+            border-radius: 9999px;
+            background-color: #ffffff;
+            color: #6b7280;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .icon-btn:hover:not(:disabled) {
+            background-color: #f3f4f6;
+            border-color: #d1d5db;
+            color: #374151;
+        }
+
+        .icon-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
         }
 
         .message.user .message-content {
@@ -323,22 +365,48 @@
                 });
             }
 
-            // Add click handler for assistant messages to enable regeneration
+            messageDiv.appendChild(contentDiv);
+
+            // Add message actions with regen button
+            let regenBtn = null;
             if (role === 'assistant' && messageIndex !== null) {
-                contentDiv.setAttribute('data-message-index', messageIndex);
-                contentDiv.setAttribute('title', 'Click to regenerate this response');
-                contentDiv.addEventListener('click', function() {
+                const actionsDiv = document.createElement('div');
+                actionsDiv.className = 'message-actions';
+
+                regenBtn = document.createElement('button');
+                regenBtn.type = 'button';
+                regenBtn.className = 'icon-btn';
+                regenBtn.setAttribute('aria-label', 'Regenerate response');
+                regenBtn.title = 'Regenerate this response';
+
+                // Simple "refresh" icon
+                regenBtn.innerHTML = `
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.36-2.64"/>
+                        <path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.36 2.64"/>
+                        <path d="M21 3v6h-6"/>
+                        <path d="M3 21v-6h6"/>
+                    </svg>
+                `;
+
+                regenBtn.disabled = isGenerating;
+
+                regenBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
                     if (!isGenerating) {
                         regenerateMessage(messageIndex);
                     }
                 });
+
+                actionsDiv.appendChild(regenBtn);
+                messageDiv.appendChild(actionsDiv);
             }
 
-            messageDiv.appendChild(contentDiv);
             chatWrapper.appendChild(messageDiv);
 
             chatContainer.scrollTop = chatContainer.scrollHeight;
-            return contentDiv;
+            return { contentDiv, regenBtn };
         }
 
         function editMessage(messageIndex) {
@@ -371,8 +439,11 @@
             isGenerating = true;
             sendButton.disabled = true;
 
-            const assistantContent = addMessage('assistant', '');
+            const assistantMessageIndex = messages.length;
+            const { contentDiv: assistantContent, regenBtn } = addMessage('assistant', '', assistantMessageIndex);
+
             assistantContent.innerHTML = '<span class="typing-indicator"></span>';
+            if (regenBtn) regenBtn.disabled = true;
 
             try {
                 const response = await fetch(`${API_URL}/chat`, {
@@ -392,29 +463,22 @@
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let fullResponse = '';
-                assistantContent.textContent = '';
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
 
-                    fullResponse += decoder.decode(value);
+                    if (fullResponse === '') {
+                        assistantContent.textContent = '';
+                    }
+
+                    fullResponse += decoder.decode(value, { stream: true });
                     assistantContent.textContent = fullResponse;
                     chatContainer.scrollTop = chatContainer.scrollHeight;
                 }
 
-                const assistantMessageIndex = messages.length;
                 messages.push({ role: 'assistant', content: fullResponse });
-
-                // Add click handler to regenerate this assistant message
-                assistantContent.setAttribute('data-message-index', assistantMessageIndex);
-                assistantContent.setAttribute('title', 'Click to regenerate this response');
-                assistantContent.addEventListener('click', function() {
-                    if (!isGenerating) {
-                        regenerateMessage(assistantMessageIndex);
-                    }
-                });
-
+                if (regenBtn) regenBtn.disabled = false;
             } catch (error) {
                 console.error('Error:', error);
                 assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;

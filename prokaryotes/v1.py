@@ -22,7 +22,7 @@ class ProkaryoteV1(ProkaryotesBase):
         """Chat completion."""
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
-        return StreamingResponse(self.llm.stream_chat_completion_response(request.messages), media_type="text/event-stream")
+        return StreamingResponse(self.llm.stream_response(request.messages), media_type="text/event-stream")
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
