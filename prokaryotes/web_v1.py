@@ -18,12 +18,23 @@ class ProkaryoteV1(ProkaryotesBase):
         self.app.add_api_route("/chat", self.chat, methods=["POST"])
         self.app.add_api_route("/health", self.health, methods=["GET"])
 
-    async def chat(self, request: ChatRequest, time_zone: str = Query(None)):
+    async def chat(
+            self,
+            request: ChatRequest,
+            latitude: float = Query(None),
+            longitude: float = Query(None),
+            time_zone: str = Query(None),
+    ):
         """Chat completion."""
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
         return StreamingResponse(
-            self.llm.stream_response(request.messages, time_zone=time_zone),
+            self.llm.stream_response(
+                request.messages,
+                latitude=latitude,
+                longitude=longitude,
+                time_zone=time_zone,
+            ),
             media_type="text/event-stream",
         )
 

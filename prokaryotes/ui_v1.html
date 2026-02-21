@@ -315,8 +315,26 @@
 
     <script>
         const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        let latitude = null;
+        let longitude = null;
+        if ("geolocation" in navigator) {
+            navigator.geolocation.getCurrentPosition(
+                position => {
+                    latitude = position.coords.latitude
+                    longitude = position.coords.longitude
+                },
+                error => {
+                    console.error(`Failed to get geolocation (${error.code}): ${error.message}`);
+                },
+                {
+                    enableHighAccuracy: true, // GPS if available
+                    maximumAge: 0, // No cache
+                    timeout: 60000,
+                }
+            );
+        }
 
-        const API_URL = '';
+        const apiUrl = '';
         const chatContainer = document.getElementById('chatContainer');
         const chatWrapper = document.getElementById('chatWrapper');
         const chatInput = document.getElementById('chatInput');
@@ -448,7 +466,12 @@
             if (regenBtn) regenBtn.disabled = true;
 
             try {
-                const response = await fetch(`${API_URL}/chat?time_zone=${timeZone}`, {
+                const queryParams = new URLSearchParams({ time_zone: timeZone });
+                if (latitude !== null && longitude !== null) {
+                    queryParams.append("latitude", latitude)
+                    queryParams.append("longitude", longitude)
+                }
+                const response = await fetch(`${apiUrl}/chat?${queryParams.toString()}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -529,7 +552,7 @@
         // Autofocus the chat input on page load
         chatInput.focus();
 
-        fetch(`${API_URL}/health`)
+        fetch(`${apiUrl}/health`)
             .then(response => response.json())
             .then(data => {
                 console.log('Engine status:', data);

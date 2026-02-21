@@ -14,6 +14,8 @@ class LLM(Protocol):
     def stream_response(
             self,
             messages: list[ChatMessage],
+            latitude: float = None,
+            longitude: float = None,
             time_zone: str = None,
     ) -> AsyncGenerator[str, Any]:
         pass
@@ -49,24 +51,41 @@ class OpenAIClient(LLM):
     ]
 
     @classmethod
-    def developer_message(cls, time_zone: str = None):
+    def developer_message(
+            cls,
+            latitude: float = None,
+            longitude: float = None,
+            time_zone: str = None,
+    ):
         time_zone = ZoneInfo("UTC" if not time_zone else time_zone)
-        return f"""
-Current time: {datetime.now(tz=time_zone).strftime("%Y-%m-%d %H:%M")} {time_zone}
-""".strip()
+        message_parts = [f"Current time: {datetime.now(tz=time_zone).strftime("%Y-%m-%d %H:%M")} {time_zone}"]
+        if latitude and longitude:
+            message_parts.append(f"User location: {latitude:.4f}, {longitude:.4f}")
+        logger.debug(f"Developer message parts: {message_parts}")
+        return "\n".join(message_parts)
 
     def __init__(self, openai_api_key: str):
         self.async_openai = AsyncOpenAI(api_key=openai_api_key)
 
-    async def stream_response(self, messages: list[ChatMessage], time_zone: str = None):
+    async def stream_response(
+            self,
+            messages: list[ChatMessage],
+            latitude: float = None,
+            longitude: float = None,
+            time_zone: str = None,
+    ):
         context_window = [{
             "role": "developer",
-            "content": self.developer_message(time_zone=time_zone),
+            "content": self.developer_message(
+                latitude=latitude,
+                longitude=longitude,
+                time_zone=time_zone,
+            ),
         }]
         # TODO: roll long contexts off but in a way that can be recalled
         context_window.extend(m.model_dump() for m in messages)
         response = await self.async_openai.responses.create(
-            model="gpt-5",
+            model="gpt-5.1",
             input=context_window,
             tools=self.tools_spec,
             stream=True,
