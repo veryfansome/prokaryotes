@@ -6,7 +6,7 @@ class ProkaryotesBase(ABC):
 
     @classmethod
     def ui_filename(cls) -> str:
-        return "ui.html"
+        raise NotImplementedError(f"Method 'ui_filename' not implemented for {cls.__name__}")
 
     @classmethod
     async def root(cls):

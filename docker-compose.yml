@@ -2,18 +2,21 @@ networks:
   prokaryotes: {}
 
 services:
-  imap-ingest:
-    container_name: prokaryotes-imap-ingest
+  neo4j:
     networks: [prokaryotes]
-    image: "prokaryotes:latest"
-    working_dir: /app
+    container_name: prokaryotes-neo4j
+    image: neo4j:latest
+    ports:
+      - "7474:7474" # HTTP
+      - "7687:7687" # Bolt
     volumes:
-      - ./.env:/app/.env
-    entrypoint: uv
-    command: ["run", "python", "-m", "scripts.imap_ingest"]
-    depends_on:
-      tests:
-        condition: service_completed_successfully
+      - ./database_dump/neo4j:/dump:rw
+      - ./scripts/neo4j-start.sh:/neo4j-start.sh
+    environment:
+      NEO4J_AUTH: &neo4j-auth neo4j/${NEO4J_PASSWORD:-Ma9icMicr0be}
+      NEO4J_server_jvm_additional: "--add-modules jdk.incubator.vector"
+    command: [ "/neo4j-start.sh" ]
+    stop_grace_period: 1m
 
   tests:
     container_name: prokaryotes-tests
@@ -26,3 +29,35 @@ services:
       - ./tests:/app/tests
     entrypoint: uv
     command: ["run", "pytest"]
+
+  imap-ingest:
+    container_name: prokaryotes-imap-ingest
+    networks: [prokaryotes]
+    image: "prokaryotes:latest"
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env
+    environment:
+      NEO4J_AUTH: *neo4j-auth
+    entrypoint: uv
+    command: ["run", "python", "-m", "scripts.imap_ingest"]
+    depends_on:
+      tests:
+        condition: service_completed_successfully
+
+  web:
+    container_name: prokaryotes-web
+    networks: [prokaryotes]
+    image: "prokaryotes:latest"
+    ports:
+      - "8000:8000" # HTTP
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env
+    environment:
+      NEO4J_AUTH: *neo4j-auth
+    entrypoint: uv
+    command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      tests:
+        condition: service_completed_successfully

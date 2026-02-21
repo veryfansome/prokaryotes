@@ -1,6 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from prokaryotes.base import ProkaryotesBase
@@ -18,11 +18,14 @@ class ProkaryoteV1(ProkaryotesBase):
         self.app.add_api_route("/chat", self.chat, methods=["POST"])
         self.app.add_api_route("/health", self.health, methods=["GET"])
 
-    async def chat(self, request: ChatRequest):
+    async def chat(self, request: ChatRequest, time_zone: str = Query(None)):
         """Chat completion."""
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
-        return StreamingResponse(self.llm.stream_response(request.messages), media_type="text/event-stream")
+        return StreamingResponse(
+            self.llm.stream_response(request.messages, time_zone=time_zone),
+            media_type="text/event-stream",
+        )
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -30,15 +33,6 @@ class ProkaryoteV1(ProkaryotesBase):
         yield
         logger.info("Exiting lifespan")
 
-
-if __name__ == "__main__":
-    import uvicorn
-    from dotenv import load_dotenv
-
-    from prokaryotes.utils import setup_logging
-
-    load_dotenv()
-    setup_logging()
-
-    v1 = ProkaryoteV1()
-    uvicorn.run(v1.app)
+    @classmethod
+    def ui_filename(cls) -> str:
+        return "ui_v1.html"

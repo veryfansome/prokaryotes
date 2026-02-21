@@ -314,6 +314,8 @@
     </div>
 
     <script>
+        const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
         const API_URL = '';
         const chatContainer = document.getElementById('chatContainer');
         const chatWrapper = document.getElementById('chatWrapper');
@@ -446,7 +448,7 @@
             if (regenBtn) regenBtn.disabled = true;
 
             try {
-                const response = await fetch(`${API_URL}/chat`, {
+                const response = await fetch(`${API_URL}/chat?time_zone=${timeZone}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
