@@ -7,6 +7,7 @@ dependencies = [
     "certifi",
     "fastapi",
     "imapclient",
+    "neo4j",
     "openai",
     "python-dotenv",
     "uvicorn",
@@ -27,3 +28,6 @@ addopts = "--strict-markers --cov=prokaryotes"
 testpaths = [
     "tests",
 ]
+
+[tool.setuptools.packages.find]
+include = ["prokaryotes*"]

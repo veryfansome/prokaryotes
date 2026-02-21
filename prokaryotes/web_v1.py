@@ -10,7 +10,8 @@ from prokaryotes.models_v1 import ChatRequest
 logger = logging.getLogger(__name__)
 
 class ProkaryoteV1(ProkaryotesBase):
-    def __init__(self):
+    def __init__(self, ui_filename: str):
+        self._ui_filename = ui_filename
         self.llm = get_llm()
 
         self.app = FastAPI(lifespan=self.lifespan)
@@ -44,6 +45,5 @@ class ProkaryoteV1(ProkaryotesBase):
         yield
         logger.info("Exiting lifespan")
 
-    @classmethod
-    def ui_filename(cls) -> str:
-        return "ui_v1.html"
+    def ui_filename(self) -> str:
+        return self._ui_filename

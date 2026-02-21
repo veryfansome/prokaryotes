@@ -6,4 +6,4 @@ from prokaryotes.web_v1 import ProkaryoteV1
 load_dotenv()
 setup_logging()
 
-v1 = ProkaryoteV1()
+v1 = ProkaryoteV1("scripts/ui_v1.html")

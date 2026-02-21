@@ -1,17 +1,16 @@
-import os
-from abc import ABC
+from abc import ABC, abstractmethod
 from fastapi.responses import HTMLResponse
+from pathlib import Path
 
 class ProkaryotesBase(ABC):
 
-    @classmethod
-    def ui_filename(cls) -> str:
-        raise NotImplementedError(f"Method 'ui_filename' not implemented for {cls.__name__}")
+    @abstractmethod
+    def ui_filename(self):
+        raise NotImplementedError(f"Method 'ui_filename' not implemented for {self.__class__.__name__}")
 
-    @classmethod
-    async def root(cls):
+    async def root(self):
         """Serve the chat UI."""
-        ui_html_path = os.path.join("prokaryotes", cls.ui_filename())
+        ui_html_path = Path(self.ui_filename())
         with open(ui_html_path, "r", encoding="utf-8") as f:
             html_content = f.read()
         return HTMLResponse(content=html_content)
