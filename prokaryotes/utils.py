@@ -19,8 +19,18 @@ def setup_logging():
                 "level": os.getenv("LOG_LEVEL", "INFO"),
                 "handlers": ["console"],
             },
+            "httpcore": {
+                "level": os.getenv("HTTPCORE_LOG_LEVEL", "INFO"),
+                "handlers": ["console"],
+                "propagate": False,
+            },
             "imapclient": {
                 "level": os.getenv("IMAPCLIENT_LOG_LEVEL", "INFO"),
+                "handlers": ["console"],
+                "propagate": False,
+            },
+            "openai": {
+                "level": os.getenv("OPENAI_LOG_LEVEL", "INFO"),
                 "handlers": ["console"],
                 "propagate": False,
             },
