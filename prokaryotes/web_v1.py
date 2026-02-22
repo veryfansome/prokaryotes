@@ -6,9 +6,9 @@ from fastapi.responses import StreamingResponse
 from openai.types.responses import FunctionToolParam, WebSearchToolParam
 from zoneinfo import ZoneInfo
 
-from prokaryotes.base import ProkaryotesBase
 from prokaryotes.llm_v1 import get_llm
 from prokaryotes.models_v1 import ChatMessage, ChatRequest
+from prokaryotes.web_base import ProkaryotesBase
 
 logger = logging.getLogger(__name__)
 

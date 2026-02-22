@@ -9,7 +9,6 @@ import socket
 import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from email.parser import HeaderParser

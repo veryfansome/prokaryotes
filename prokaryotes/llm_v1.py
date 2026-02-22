@@ -19,7 +19,6 @@ class LLM(Protocol):
         pass
 
 class OpenAIClient(LLM):
-
     def __init__(self, openai_api_key: str):
         self.async_openai = AsyncOpenAI(api_key=openai_api_key)
 

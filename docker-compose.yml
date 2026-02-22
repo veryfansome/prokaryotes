@@ -27,6 +27,9 @@ services:
     working_dir: /app
     volumes:
       - ./tests:/app/tests
+    environment: &common-env
+      NEO4J_AUTH: *neo4j-auth
+      NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
     entrypoint: uv
     command: ["run", "pytest"]
 
@@ -37,8 +40,7 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env
-    environment:
-      NEO4J_AUTH: *neo4j-auth
+    environment: *common-env
     entrypoint: uv
     command: ["run", "python", "-m", "scripts.imap_ingest"]
     depends_on:
@@ -54,8 +56,7 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env
-    environment:
-      NEO4J_AUTH: *neo4j-auth
+    environment: *common-env
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
