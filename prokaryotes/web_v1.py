@@ -71,6 +71,8 @@ class ProkaryoteV1(ProkaryotesBase):
             request: ChatRequest,
             latitude: float = Query(None),
             longitude: float = Query(None),
+            model: str = Query("gpt-5.1"),
+            reasoning_effort: str = Query(None),
             time_zone: str = Query(None),
     ):
         """Chat completion."""
@@ -91,7 +93,8 @@ class ProkaryoteV1(ProkaryotesBase):
         context_window.extend(request.messages)
         return StreamingResponse(
             self.llm.stream_response(
-                context_window, "gpt-5.1",
+                context_window, model,
+                reasoning_effort=reasoning_effort,
                 tool_spec=self.tools_spec,
             ),
             media_type="text/event-stream",

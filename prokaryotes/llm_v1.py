@@ -13,6 +13,7 @@ class LLM(Protocol):
             self,
             messages: list[ChatMessage],
             model: str,
+            reasoning_effort: str = None,
             tool_spec: list[ToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
         pass
@@ -26,9 +27,10 @@ class OpenAIClient(LLM):
             self,
             messages: list[ChatMessage],
             model: str,
+            reasoning_effort: str = None,
             tool_spec: list[ToolParam] = None,
     ):
-        reasoning_config = {"effort": "none"}
+        reasoning_config = {"effort": reasoning_effort if reasoning_effort else "none"}
         response = await self.async_openai.responses.create(
             model=model,
             input=[m.model_dump() for m in messages],
@@ -41,6 +43,13 @@ class OpenAIClient(LLM):
                 yield event.delta
             elif event.type == "response.output_item.done" and event.item.type == "function_call":
                 logger.info((event.item.name, event.item.arguments))
+                # TODO: implement function calling and continuation
+                #async for chunk in self.stream_response(
+                #        messages, model,
+                #        reasoning_effort=reasoning_effort,
+                #        tool_spec=tool_spec,
+                #):
+                #    yield chunk
             elif event.type.startswith("response.web_search_call"):
                 logger.info(event)
             else:
