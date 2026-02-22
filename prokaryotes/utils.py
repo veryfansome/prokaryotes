@@ -1,6 +1,13 @@
 import logging.config
 import os
 
+logger = logging.getLogger(__name__)
+
+def log_future_exception(future):
+    exception = future.exception()
+    if exception:
+        logger.exception("Thread crashed", exc_info=exception)
+
 def setup_logging():
     logging.config.dictConfig({
         "version": 1,

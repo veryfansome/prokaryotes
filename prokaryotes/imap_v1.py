@@ -5,8 +5,10 @@ import logging
 import os
 import queue
 import quopri
+import signal as system_signal
 import socket
 import ssl
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -15,6 +17,8 @@ from email.parser import HeaderParser
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from imapclient import IMAPClient
+
+from prokaryotes.utils import log_future_exception
 
 logger = logging.getLogger(__name__)
 
@@ -78,43 +82,63 @@ class IMAPClientFactory:
         self.imap_host = imap_host
         self.imap_password = imap_password
         self.imap_username = imap_username
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def get_client(self):
-        imap_client = IMAPClient(
-            self.imap_host, ssl=True, ssl_context=ssl.create_default_context(cafile=certifi.where())
-        )
+        imap_client = IMAPClient(self.imap_host, ssl=True, ssl_context=self.ssl_context)
         imap_client.use_uid = True
         imap_client.login(self.imap_username, self.imap_password)
         return imap_client
 
 class IngestController:
-    def __init__(self):
-        self._imap_client_factory = get_imap_client_factory()
-        self._idle_manager_client: IMAPClient | None = None
-        self._idle_manager_executor = ThreadPoolExecutor(max_workers=1)
-        self._queue: queue.Queue[ControlSignal] = queue.Queue()
-        self._running = False
+    def __init__(
+            self,
+            folder: str,
+            imap_host: str,
+            imap_username: str,
+            imap_password: str,
+            max_queue_size: int = 100_000,
+            max_workers: int = 1,
+    ):
+        self.folder = folder
+        self.idle_manager_client: IMAPClient | None = None
+        self.idle_manager_executor = ThreadPoolExecutor(max_workers=1)
+        self.imap_client_factory = IMAPClientFactory(imap_host, imap_username, imap_password)
+        self.max_workers = max_workers
+        self.queue: queue.Queue[ControlSignal] = queue.Queue(maxsize=max_queue_size)
+        self.stop_event = threading.Event()
+        self.worker_clients: list[IMAPClient] = [None] * max_workers
+        self.worker_executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def graceful_shutdown(self, sig, frame):
-        logger.info(f"Received {sig}, shutting down")
-        self._running = False
-        self._idle_manager_client.socket().shutdown(socket.SHUT_RDWR)  # Break out of idle_check
-        self._idle_manager_executor.shutdown()
-        self.safe_put_nowait(ControlSignal.shutdown())
+        logger.info(f"Received {sig}, shutting down IMAP ingestion")
+        self.stop_event.set()
+        if self.idle_manager_client:
+            self.idle_manager_client.socket().shutdown(socket.SHUT_RDWR) # Break out of idle_check
+        for _ in range(self.max_workers):
+            self.queue.put(ControlSignal.shutdown())
+        self.idle_manager_executor.shutdown()
+        self.worker_executor.shutdown()
 
-    def idle_manager(
-            self,
-            folder: str = "INBOX",
-            idle_check_timeout: int = 60,
-            idle_restart_seconds: int = 60 * 4
-    ):
-        while self._running:
+    def run(self):
+        logger.info("Starting IMAP ingestion")
+        system_signal.signal(system_signal.SIGINT, self.graceful_shutdown)
+        system_signal.signal(system_signal.SIGTERM, self.graceful_shutdown)
+
+        idle_manager_task = self.idle_manager_executor.submit(self.run_idle_manager)
+        idle_manager_task.add_done_callback(log_future_exception)
+        for idx in range(self.max_workers):
+            worker_task = self.worker_executor.submit(self.run_worker, idx)
+            worker_task.add_done_callback(log_future_exception)
+
+    def run_idle_manager(self, idle_check_timeout: int = 60, idle_restart_seconds: int = 60 * 4):
+        while not self.stop_event.is_set():
             try:
-                self._idle_manager_client = client = self._imap_client_factory.get_client()
+                self.idle_manager_client = client = self.imap_client_factory.get_client()
                 with client:
-                    idle(client, folder)
+                    idle(client, self.folder)
                     time_started = time.monotonic()
-                    while self._running:
+                    while not self.stop_event.is_set():
                         responses = client.idle_check(timeout=idle_check_timeout)
                         time_elapsed = time.monotonic() - time_started
                         logger.info(f"Idled for {time_elapsed} seconds: {responses}")
@@ -130,29 +154,36 @@ class IngestController:
                         if time.monotonic() - time_started > idle_restart_seconds:
                             logger.info(f"Refreshing idle connection")
                             client.idle_done()
-                            client.noop()
                             client.idle()
                             time_started = time.monotonic()
             except CONNECTION_ERRORS:
                 logger.exception("connection error, reconnecting")
+                self.idle_manager_client = None
 
-    def run(self):
-        logger.info("Starting agent loop")
-        self._running = True
-        self._idle_manager_executor.submit(self.idle_manager)
-        while self._running:
-            control_signal = self._queue.get()
-            match control_signal.signal_type:
-                case ControlSignalType.EXISTS:
-                    logger.info(f"Got {control_signal}")
-                case ControlSignalType.FETCH:
-                    logger.info(f"Got {control_signal}")
-                case ControlSignalType.SHUTDOWN:
-                    break
+    def run_worker(self, idx: int, queue_get_timeout: int = 60 * 4):
+        while not self.stop_event.is_set():
+            try:
+                self.worker_clients[idx] = client = self.imap_client_factory.get_client()
+                with client:
+                    client.select_folder(self.folder)
+                    while not self.stop_event.is_set():
+                        try:
+                            control_signal = self.queue.get(timeout=queue_get_timeout)
+                            match control_signal.signal_type:
+                                case ControlSignalType.EXISTS:
+                                    logger.info(f"Got {control_signal}")
+                                case ControlSignalType.FETCH:
+                                    logger.info(f"Got {control_signal}")
+                                case ControlSignalType.SHUTDOWN:
+                                    break
+                        except queue.Empty:
+                            client.noop()
+            except CONNECTION_ERRORS:
+                logger.exception("connection error, reconnecting")
 
     def safe_put_nowait(self, control_signal: ControlSignal):
         try:
-            self._queue.put_nowait(control_signal)
+            self.queue.put_nowait(control_signal)
         except queue.Full:
             logger.warning(f"Queue full, dropped {control_signal}")
 
@@ -270,14 +301,6 @@ def fetch_part_ref(client: IMAPClient, part: MessagePartRef) -> bytes | None:
     except Exception:
         logger.exception(f"Failed to fetch part ref {part}")
 
-def get_imap_client_factory() -> IMAPClientFactory:
-    imap_host = os.environ.get('IMAP_HOST')
-    imap_username = os.environ.get('IMAP_USERNAME')
-    imap_password = os.environ.get('IMAP_PASSWORD')
-    if imap_host and imap_username and imap_password:
-        return IMAPClientFactory(imap_host, imap_username, imap_password)
-    raise RuntimeError("Unable to initialize IMAPClientFactory")
-
 def idle(client: IMAPClient, folder):
     client.select_folder(folder)
     client.idle()
@@ -341,7 +364,11 @@ if __name__ == "__main__":
     load_dotenv()
     setup_logging()
 
-    with get_imap_client_factory().get_client() as read_client:
+    with IMAPClientFactory(
+            os.getenv('IMAP_HOST'),
+            os.getenv('IMAP_USERNAME'),
+            os.getenv('IMAP_PASSWORD'),
+    ).get_client() as read_client:
         msgs = fetch_messages(read_client, criteria=["UNSEEN"], folder="INBOX")
         logger.info(msgs)
         for msg in msgs:

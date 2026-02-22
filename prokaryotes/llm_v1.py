@@ -55,7 +55,7 @@ class OpenAIClient(LLM):
                 logger.debug(event)
 
 def get_llm() -> LLM:
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
     if openai_api_key:
         return OpenAIClient(openai_api_key)
     raise RuntimeError("Unable to initialize any LLMs")
