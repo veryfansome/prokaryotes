@@ -70,3 +70,4 @@ services:
     depends_on:
       tests:
         condition: service_completed_successfully
+    stop_grace_period: 1m

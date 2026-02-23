@@ -157,7 +157,7 @@ class IngestController:
                             client.idle()
                             time_started = time.monotonic()
             except CONNECTION_ERRORS:
-                logger.exception("connection error, reconnecting")
+                logger.exception("Connection error, reconnecting")
                 self.idle_manager_client = None
 
     def run_worker(self, idx: int, queue_get_timeout: int = 60 * 4):
@@ -179,7 +179,7 @@ class IngestController:
                         except queue.Empty:
                             client.noop()
             except CONNECTION_ERRORS:
-                logger.exception("connection error, reconnecting")
+                logger.exception("Connection error, reconnecting")
 
     def safe_put_nowait(self, control_signal: ControlSignal):
         try:

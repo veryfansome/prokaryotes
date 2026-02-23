@@ -1,12 +1,22 @@
+import asyncio
+import concurrent.futures
 import logging.config
 import os
 
 logger = logging.getLogger(__name__)
 
-def log_future_exception(future):
+def log_async_task_exception(task: asyncio.Task):
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Exception in task")
+
+def log_future_exception(future: concurrent.futures.Future):
     exception = future.exception()
     if exception:
-        logger.exception("Thread crashed", exc_info=exception)
+        logger.exception("Exception in thread", exc_info=exception)
 
 def setup_logging():
     logging.config.dictConfig({
