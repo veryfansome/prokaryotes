@@ -69,8 +69,7 @@ class ProkaryoteV1(ProkaryotesBase):
         logger.debug(f"Developer message parts: {message_parts}")
         return "\n".join(message_parts)
 
-    def __init__(self, ui_filename: str):
-        self._ui_filename = ui_filename
+    def __init__(self, static_dir: str):
         self.background_tasks: set[asyncio.Task] = set()
         self.llm_client = get_llm_client()
         self.observers: list[Observer] = [
@@ -107,9 +106,11 @@ class ProkaryoteV1(ProkaryotesBase):
                 ],
             ),
         ]
+        self.static_dir = static_dir
 
         self.app = FastAPI(lifespan=self.lifespan)
         self.app.add_api_route("/", self.root, methods=["GET"])
+        self.app.add_api_route("/logo.png", self.logo, methods=["GET"])
         self.app.add_api_route("/chat", self.chat, methods=["POST"])
         self.app.add_api_route("/health", self.health, methods=["GET"])
 
@@ -155,6 +156,9 @@ class ProkaryoteV1(ProkaryotesBase):
             media_type="text/event-stream",
         )
 
+    def get_static_dir(self) -> str:
+        return self.static_dir
+
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
         logger.info("Entering lifespan")
@@ -164,6 +168,3 @@ class ProkaryoteV1(ProkaryotesBase):
             if pending_tasks:
                 logger.warning(f"Exiting with {len(pending_tasks)} tasks pending")
         logger.info("Exiting lifespan")
-
-    def ui_filename(self) -> str:
-        return self._ui_filename
