@@ -1,7 +1,29 @@
 networks:
   prokaryotes: {}
 
+volumes:
+  elastic-data: {}
+
 services:
+  elasticsearch:
+    networks: [prokaryotes]
+    container_name: prokaryotes-elasticsearch
+    image: elasticsearch:9.3.0
+    ports:
+      - "9200:9200"
+    volumes:
+      - elastic-data:/usr/share/elasticsearch/data
+    environment:
+      "discovery.type": single-node
+      "logger.level": ERROR
+      "xpack.security.enabled": false
+    healthcheck:
+      test: [ "CMD", "curl", "http://localhost:9200/_cluster/health?wait_for_status=green&timeout=2s" ]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+    stop_grace_period: 1m
+
   neo4j:
     networks: [prokaryotes]
     container_name: prokaryotes-neo4j
@@ -26,20 +48,15 @@ services:
   tests:
     container_name: prokaryotes-tests
     image: "prokaryotes:latest"
+    pull_policy: build
     build:
       context: .
       dockerfile: docker/app.Dockerfile
     working_dir: /app
     volumes:
       - ./tests:/app/tests
-    environment: &common-env
-      NEO4J_AUTH: *neo4j-auth
-      NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
     entrypoint: uv
     command: ["run", "pytest"]
-    depends_on:
-      neo4j:
-        condition: service_healthy
 
   imap-ingest:
     container_name: prokaryotes-imap-ingest
@@ -48,10 +65,17 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env
-    environment: *common-env
+    environment: &common-env
+      ELASTIC_URI: "http://prokaryotes-elasticsearch:9200"
+      NEO4J_AUTH: *neo4j-auth
+      NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
     entrypoint: uv
     command: ["run", "python", "-m", "scripts.imap_ingest"]
     depends_on:
+      elasticsearch:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
       tests:
         condition: service_completed_successfully
 
@@ -68,6 +92,10 @@ services:
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
+      elasticsearch:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
       tests:
         condition: service_completed_successfully
     stop_grace_period: 1m

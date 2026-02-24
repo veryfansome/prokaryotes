@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiofiles",
     "certifi",
+    "elasticsearch[async]",
     "fastapi",
     "imapclient",
     "neo4j",

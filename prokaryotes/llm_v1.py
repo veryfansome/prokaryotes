@@ -110,6 +110,8 @@ class OpenAIClient(LLMClient):
             tool_callbacks: dict[str, FunctionToolCallback] = None,
             tool_params: list[OpenAIToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
+        # TODO: Optional pre create_response hooks that can be used for recall and to inject new contexts
+        # TODO: Recall unanswered questions for the user, if any, from Neo4j
         callback_tasks = []
         async for event in await self.create_response(
                 messages, model,

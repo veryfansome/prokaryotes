@@ -1,112 +1,47 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from openai.types.responses import FunctionToolParam, WebSearchToolParam
 from zoneinfo import ZoneInfo
 
 from prokaryotes.callbacks_v1 import SearchEmailFunctionToolCallback
+from prokaryotes.graph_v1 import get_async_neo4j_driver
 from prokaryotes.llm_v1 import get_llm_client
 from prokaryotes.models_v1 import ChatMessage, ChatRequest
-from prokaryotes.observers_v1 import Observer
+from prokaryotes.observers_v1 import Observer, get_observers
+from prokaryotes.search_v1 import get_async_elastic_search
+from prokaryotes.tool_params_v1 import (
+    search_email_tool_param,
+    web_search_tool_param,
+)
 from prokaryotes.utils import log_async_task_exception
 from prokaryotes.web_base import ProkaryotesBase
 
 logger = logging.getLogger(__name__)
 
 class ProkaryoteV1(ProkaryotesBase):
-
-    tools_callbacks = {
-        "search_email": SearchEmailFunctionToolCallback(),
-    }
-
-    tools_params = [
-        FunctionToolParam(
-            type="function",
-            name="search_email",
-            description="Search the user's email using a criteria.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "search_criteria": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "A flat list of IMAP search tokens based on RFC 3501 (IMAP4rev1) and RFC 4731 (ESEARCH)"
-                            " for the Python imapclient library."
-                            f' Example: ["FROM", "John Smith", "SINCE", "{(datetime.now() - timedelta(days=7)).strftime("%d-%b-%Y")}"]'
-                        ),
-                    },
-                },
-                "additionalProperties": False,
-                "required": ["search_criteria"],
-            },
-            strict=True,
-        ),
-        WebSearchToolParam(
-            type="web_search",
-            filters={
-                "allowed_domains": [
-                    "en.wikipedia.org"
-                ]
-            }
-        )
-    ]
-
-    @classmethod
-    def developer_message(
-            cls,
-            latitude: float = None,
-            longitude: float = None,
-            time_zone: str = None,
-    ):
-        time_zone = ZoneInfo("UTC" if not time_zone else time_zone)
-        message_parts = [f"Current time: {datetime.now(tz=time_zone).strftime("%Y-%m-%d %H:%M")} {time_zone}"]
-        if latitude and longitude:
-            message_parts.append(f"User location: {latitude:.4f}, {longitude:.4f}")
-        logger.debug(f"Developer message parts: {message_parts}")
-        return "\n".join(message_parts)
-
     def __init__(self, static_dir: str):
-        self.background_tasks: set[asyncio.Task] = set()
+        self.graph_client = get_async_neo4j_driver()
         self.llm_client = get_llm_client()
-        self.observers: list[Observer] = [
-                Observer(
-                llm_client=self.llm_client,
-                tool_callbacks={},
-                tool_params=[
-                    FunctionToolParam(
-                        type="function",
-                        name="save_user_context",
-                        description=(
-                            "Save information about the user. This includes anything about the user or their personal life"
-                            ", including: family, friends, colleagues, past events, opinions and preferences, hobbies, goals"
-                            ", projects, and more."
-                            " Call this function whenever the user volunteers specific information that cannot be found elsewhere."
-                        ),
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "context_summary": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "A flat list of atomic, independent facts about the user. Use simple language"
-                                        " that clearly articulates what information to save."
-                                    ),
-                                },
-                            },
-                            "additionalProperties": False,
-                            "required": ["context_summary"],
-                        },
-                        strict=True,
-                    ),
-                ],
-            ),
-        ]
+        self.search_client = get_async_elastic_search()
+
+        self.background_tasks: set[asyncio.Task] = set()
+        self.observers: list[Observer] = get_observers(
+            self.graph_client,
+            self.llm_client,
+            self.search_client,
+        )
         self.static_dir = static_dir
+
+        self.tools_callbacks = {
+            search_email_tool_param["name"]: SearchEmailFunctionToolCallback(self.search_client),
+        }
+        self.tools_params = [
+            search_email_tool_param,
+            web_search_tool_param,
+        ]
 
         self.app = FastAPI(lifespan=self.lifespan)
         self.app.add_api_route("/", self.root, methods=["GET"])
@@ -143,7 +78,6 @@ class ProkaryoteV1(ProkaryotesBase):
                 )
             )
         ]
-        # TODO: Recall unanswered questions for the user, if any, from Neo4j
         # TODO: roll long contexts off but in a way that can be recalled
         context_window.extend(request.messages)
         return StreamingResponse(
@@ -155,6 +89,21 @@ class ProkaryoteV1(ProkaryotesBase):
             ),
             media_type="text/event-stream",
         )
+
+    @classmethod
+    def developer_message(
+            cls,
+            latitude: float = None,
+            longitude: float = None,
+            time_zone: str = None,
+    ):
+        time_zone = ZoneInfo("UTC" if not time_zone else time_zone)
+        message_parts = [f"Current time: {datetime.now(tz=time_zone).strftime("%Y-%m-%d %H:%M")} {time_zone}"]
+        if latitude and longitude:
+            message_parts.append(f"User location: {latitude:.4f}, {longitude:.4f}")
+        # TODO: Prefer short responses (1-2 sentences max) unless requested otherwise
+        logger.debug(f"Developer message parts: {message_parts}")
+        return "\n".join(message_parts)
 
     def get_static_dir(self) -> str:
         return self.static_dir
