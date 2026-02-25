@@ -3,8 +3,12 @@ networks:
 
 volumes:
   elastic-data: {}
+  neo4j-data: {}
 
 services:
+
+  # Databases
+
   elasticsearch:
     networks: [prokaryotes]
     container_name: prokaryotes-elasticsearch
@@ -21,7 +25,7 @@ services:
       test: [ "CMD", "curl", "http://localhost:9200/_cluster/health?wait_for_status=green&timeout=2s" ]
       interval: 3s
       timeout: 2s
-      retries: 5
+      retries: 20
     stop_grace_period: 1m
 
   neo4j:
@@ -32,21 +36,21 @@ services:
       - "7474:7474" # HTTP
       - "7687:7687" # Bolt
     volumes:
-      - ./database_dump/neo4j:/dump:rw
-      - ./scripts/neo4j-start.sh:/neo4j-start.sh
+      - neo4j-data:/data
     environment:
       NEO4J_AUTH: &neo4j-auth neo4j/${NEO4J_PASSWORD:-Ma9icMicr0be}
       NEO4J_server_jvm_additional: "--add-modules jdk.incubator.vector"
-    command: [ "/neo4j-start.sh" ]
     healthcheck:
       test: [ "CMD", "wget", "-q", "-t=1", "http://localhost:7474" ]
       interval: 3s
       timeout: 2s
-      retries: 5
+      retries: 20
     stop_grace_period: 1m
 
-  tests:
-    container_name: prokaryotes-tests
+  # Tests
+
+  unit-tests:
+    container_name: prokaryotes-unit-tests
     image: "prokaryotes:latest"
     pull_policy: build
     build:
@@ -58,6 +62,23 @@ services:
     entrypoint: uv
     command: ["run", "pytest"]
 
+  # Apps
+
+  elasticsearch-init:
+    networks: [prokaryotes]
+    container_name: prokaryotes-elasticsearch-init
+    image: "prokaryotes:latest"
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env
+    environment: &common-elastic-env
+      ELASTIC_URI: "http://prokaryotes-elasticsearch:9200"
+    entrypoint: uv
+    command: ["run", "python", "-m", "scripts.search_init"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
   imap-ingest:
     container_name: prokaryotes-imap-ingest
     networks: [prokaryotes]
@@ -66,17 +87,17 @@ services:
     volumes:
       - ./.env:/app/.env
     environment: &common-env
-      ELASTIC_URI: "http://prokaryotes-elasticsearch:9200"
+      <<: *common-elastic-env
       NEO4J_AUTH: *neo4j-auth
       NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
     entrypoint: uv
     command: ["run", "python", "-m", "scripts.imap_ingest"]
     depends_on:
-      elasticsearch:
-        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
       neo4j:
         condition: service_healthy
-      tests:
+      unit-tests:
         condition: service_completed_successfully
 
   web:
@@ -92,10 +113,10 @@ services:
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
-      elasticsearch:
-        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
       neo4j:
         condition: service_healthy
-      tests:
+      unit-tests:
         condition: service_completed_successfully
     stop_grace_period: 1m

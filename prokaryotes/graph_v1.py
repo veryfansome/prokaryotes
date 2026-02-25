@@ -4,7 +4,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase
 
 logger = logging.getLogger(__name__)
 
-def get_async_neo4j_driver() -> AsyncDriver:
+def get_neo4j_driver() -> AsyncDriver:
     neo4j_auth = os.environ.get("NEO4J_AUTH")
     neo4j_uri = os.environ.get("NEO4J_URI")
     if neo4j_auth and neo4j_uri:
