@@ -7,10 +7,10 @@ save_user_context_tool_param = FunctionToolParam(
     type="function",
     name="save_user_context",
     description=(
-        "Save information about the user. This includes anything about the user or their personal life"
+        "Save new information about the user. This includes anything about the user or their personal life"
         ", including: family, friends, colleagues, past events, opinions and preferences, hobbies, goals"
         ", projects, and more."
-        " Call this function whenever the user volunteers specific information that cannot be found elsewhere."
+        " Call this function when the user volunteers new information that cannot be found elsewhere."
     ),
     parameters={
         "type": "object",
@@ -19,7 +19,7 @@ save_user_context_tool_param = FunctionToolParam(
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "A flat list of atomic, independent facts about the user. Use simple language"
+                    "A flat list of atomic, independent facts. Use simple language"
                     " that clearly articulates what information to save."
                 ),
             },
