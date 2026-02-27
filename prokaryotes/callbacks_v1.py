@@ -14,9 +14,21 @@ class SaveUserContextFunctionToolCallback(FunctionToolCallback):
 
     async def call(self, arguments: str, call_id: str) -> None:
         try:
-            arguments = json.loads(arguments)
+            arguments: dict[str, list[str]] = json.loads(arguments)
             if "context_summary" in arguments and arguments["context_summary"]:
-                await self.search_client.add_user_person_fact_doc(self.person_doc, arguments["context_summary"])
+                normalized_candidates = []
+                for candidate in arguments["context_summary"]:
+                    candidate = " ".join(candidate.strip(" .!?\r\n").split())
+                    if candidate:
+                        normalized_candidates.append(candidate)
+                # Exact dedupe
+                existing_fact_texts = {fact.text.casefold() for fact in self.person_doc.facts}
+                candidates_after_exact_dedupe = [
+                    candidate for candidate in normalized_candidates
+                    if candidate.casefold() not in existing_fact_texts
+                ]
+                # TODO: Additional dedupe via semantic similarity or another pass with an LLM
+                await self.search_client.add_user_person_fact_doc(self.person_doc, candidates_after_exact_dedupe)
             else:
                 logging.warning(f"Missing or empty context_summary user {self.person_doc.user_id} in {arguments}")
         except Exception:

@@ -1,4 +1,5 @@
 import logging
+from abc import ABC, abstractmethod
 from openai.types.responses import FunctionToolParam
 
 from prokaryotes.callbacks_v1 import SaveUserContextFunctionToolCallback
@@ -6,73 +7,129 @@ from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import FunctionToolCallback, LLMClient
 from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.search_v1 import PersonDoc, SearchClient
-from prokaryotes.tool_params_v1 import save_user_context_tool_param
 
 logger = logging.getLogger(__name__)
 
-class Observer:
-    def __init__(
-            self,
-            llm_client: LLMClient,
-            tool_callbacks: dict[str, FunctionToolCallback],
-            tool_params: list[FunctionToolParam],
-            model: str = "gpt-5.1",
-            # TODO: Optional reasoning level
-    ):
+class Observer(ABC):
+    def __init__(self, llm_client: LLMClient, model: str = "gpt-5.1"):
         self.llm_client = llm_client
         self.model = model
-        self.tool_callbacks = tool_callbacks
-        self.tool_params = tool_params
 
-    @classmethod
-    def adjust_developer_message(cls, developer_message: str) -> str:
-        return developer_message
+    @abstractmethod
+    def developer_message(self) -> str | None:
+        pass
 
-    async def observe(self, developer_message: str, messages: list[ChatMessage]):
-        adjusted_developer_message = self.adjust_developer_message(developer_message)
-        logger.info(f"{self.__class__.__name__} developer message:\n{adjusted_developer_message}")
-
-        context_window = [ChatMessage(role="developer", content=adjusted_developer_message)]
+    async def observe(self, messages: list[ChatMessage]):
+        context_window = []
+        developer_message = self.developer_message()
+        if developer_message:
+            logger.debug(f"{self.__class__.__name__} developer message:\n{developer_message}")
+            context_window.append(ChatMessage(role="developer", content=developer_message))
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(messages)
+
         async for _ in self.llm_client.stream_response(
-            context_window, self.model,
-            tool_callbacks=self.tool_callbacks,
-            tool_params=self.tool_params,
+                context_window, self.model,
+                reasoning_effort=self.reasoning_effort(),
+                tool_callbacks=self.tool_callbacks(),
+                tool_params=self.tool_params(),
         ):
             pass  # Drop streamed data
 
-class UserContextSavingObserver(Observer):
-    def __init__(
-            self,
-            person_doc: PersonDoc,
-            llm_client: LLMClient,
-            search_client: SearchClient,
-            **kwargs
-    ):
-        super().__init__(
-            llm_client,
-            {
-                save_user_context_tool_param["name"]: SaveUserContextFunctionToolCallback(person_doc, search_client)
-            },
-            [
-                save_user_context_tool_param,
-            ],
-            **kwargs
-        )
+    @abstractmethod
+    def reasoning_effort(self) -> str:
+        return "none"
 
-    @classmethod
-    def adjust_developer_message(cls, developer_message: str) -> str:
-        adjusted_message_parts = [
-            developer_message,
-            "---",
-            # TODO: This doesn't seem to work...
-            (
-                "When using the save_user_context function tool, dedupe against the recalled user info above."
-                " Don't save the same information more than once."
-            ),
+    @abstractmethod
+    def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
+        return {}
+
+    @abstractmethod
+    def tool_params(self) -> list[FunctionToolParam]:
+        return []
+
+class UserContextSavingObserver(Observer):
+    def __init__(self, person_doc: PersonDoc, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+        super().__init__(llm_client, **kwargs)
+        self.search_client = search_client
+        self.person_doc = person_doc
+
+    def developer_message(self) -> str | None:
+        message_parts = [
+            "## User info",
         ]
-        return "\n".join(adjusted_message_parts)
+        if self.person_doc.facts:
+            # TODO: Some facts are only relevant for a fixed period, e.g. a planned visit with a friend
+            for fact_doc in self.person_doc.facts:
+                message_parts.append(f"- {fact_doc.text}")
+        else:
+            message_parts.append("Nothing is known about this user.")
+
+        message_parts.append("---")
+        message_parts.append("## Assistant instructions")
+        if self.person_doc.facts:
+            message_parts.append(
+                "Consider what is already known about the user in the \"User info\" section above."
+                " If most recent message reveals *NEW* facts, call the `save_user_context` function tool"
+                " to add them to the \"User info\" section."
+                " Do *NOT* include anything that is already in the \"User info\" section."
+            )
+        else:
+            message_parts.append(
+                "Consider the most recently received message. If the user has revealed information about themselves,"
+                " call the `save_user_context` function tool to add this information to the \"User info\" section."
+            )
+        return "\n".join(message_parts)
+
+    def reasoning_effort(self) -> str:
+        # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+        fact_cnt = len(self.person_doc.facts)
+        if fact_cnt <= 10:
+            return "none"
+        elif fact_cnt <= 20:
+            return "low"
+        elif fact_cnt <= 30:
+            return "medium"
+        else:
+            return "high"
+
+    def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
+        return {
+            "save_user_context": SaveUserContextFunctionToolCallback(self.person_doc, self.search_client)
+        }
+
+    def tool_params(self) -> list[FunctionToolParam]:
+        return [
+            FunctionToolParam(
+                type="function",
+                name="save_user_context",
+                # TODO: Add dedupe downstream of fact generation.
+                description=(
+                    "Add new facts to the user's \"User info\" section."
+                    " Call this function whenever the user mentions private information that can't be easily looked up."
+                    
+                    " This includes knowledge about the user or their personal life, including:"
+                    " family, friends, colleagues, past events, opinions and preferences,"
+                    " hobbies, goals, projects, and more."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "context_summary": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "A flat list of atomic facts, stating information about the user in the"
+                                " simplest language possible."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
+                    "required": ["context_summary"],
+                },
+                strict=True,
+            )
+        ]
 
 def get_observers(
         person_doc: PersonDoc,
