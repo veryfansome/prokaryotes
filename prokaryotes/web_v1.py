@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import platform
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import (
@@ -67,7 +69,8 @@ class ProkaryoteV1(ProkaryotesBase):
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
-        person_doc = await self.search_client.get_or_create_user_person_doc(str(0))  # TODO: Implement user_id
+        # TODO: Actually implement user_id
+        person_doc = await self.search_client.get_or_create_user_person_doc(str(1))
 
         for observer in get_observers(
             person_doc,
@@ -109,26 +112,36 @@ class ProkaryoteV1(ProkaryotesBase):
             time_zone: str = None,
     ):
         time_zone = ZoneInfo("UTC" if not time_zone else time_zone)
-        message_parts = [f"Current time: {datetime.now(tz=time_zone).strftime('%Y-%m-%d %H:%M')} {time_zone}"]
+        now = datetime.now(tz=time_zone).strftime('%Y-%m-%d %H:%M')
+        message_parts = [
+            "## Execution context",
+            f"Time: {now} {time_zone}",
+        ]
         if latitude and longitude:
-            message_parts.append(f"User location: {latitude:.4f}, {longitude:.4f}")
+            message_parts.append(f"Location: {latitude:.4f}, {longitude:.4f}")
+        message_parts.append(f"Environment: Python-{platform.python_version()} / {platform.platform()}")
+        message_parts.append(f"Directory: {os.getcwd()}")
 
         # TODO: Move ranking and filtering upstream of this call
         message_parts.append("---")
         message_parts.append("## User info")
         if not person_doc.facts:
-            message_parts.append(f"Nothing is known about this user.")
+            message_parts.append(f"Nothing is known about this user. Maybe ask for their name?")
         else:
             # TODO: Ranking needed when fact lists grow long
             for fact_doc in person_doc.facts:
                 message_parts.append(f"- {fact_doc.created_at.astimezone(time_zone).strftime('%Y-%m-%d %H:%M')}: {fact_doc.text}")
 
         message_parts.append("---")
+        message_parts.append("## Assistant info")
+        message_parts.append(f"- {now}: The assistant is a Python app")
+
+        message_parts.append("---")
         message_parts.append("## Assistant instructions")
         # TODO: Maybe this should be guided by user preferences
-        message_parts.append("- *suggestion*: Use short messages (1-2 sentences), unless the user specifically requests more.")
-        if not person_doc.facts:
-            message_parts.append("- *suggestion*: Ask for the user's name.")
+        message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
+        message_parts.append("- Don't offer platitudes or untruths.")
+        message_parts.append("- Don't project confidence when you are uncertain.")
 
         message = "\n".join(message_parts)
         logger.info(f"Foreground developer message:\n{message}")

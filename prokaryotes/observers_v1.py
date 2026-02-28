@@ -2,7 +2,7 @@ import logging
 from abc import ABC, abstractmethod
 from openai.types.responses import FunctionToolParam
 
-from prokaryotes.callbacks_v1 import SaveUserContextFunctionToolCallback
+from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
 from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import FunctionToolCallback, LLMClient
 from prokaryotes.models_v1 import ChatMessage
@@ -48,7 +48,7 @@ class Observer(ABC):
     def tool_params(self) -> list[FunctionToolParam]:
         return []
 
-class UserContextSavingObserver(Observer):
+class UserFactsSavingObserver(Observer):
     def __init__(self, person_doc: PersonDoc, llm_client: LLMClient, search_client: SearchClient, **kwargs):
         super().__init__(llm_client, **kwargs)
         self.search_client = search_client
@@ -59,7 +59,6 @@ class UserContextSavingObserver(Observer):
             "## User info",
         ]
         if self.person_doc.facts:
-            # TODO: Some facts are only relevant for a fixed period, e.g. a planned visit with a friend
             for fact_doc in self.person_doc.facts:
                 message_parts.append(f"- {fact_doc.text}")
         else:
@@ -70,14 +69,15 @@ class UserContextSavingObserver(Observer):
         if self.person_doc.facts:
             message_parts.append(
                 "Consider what is already known about the user in the \"User info\" section above."
-                " If most recent message reveals *NEW* facts, call the `save_user_context` function tool"
+                " If the most recent message reveals *NEW* facts, call the `save_user_facts` function tool"
                 " to add them to the \"User info\" section."
-                " Do *NOT* include anything that is already in the \"User info\" section."
+                " The `facts` parameter of the `save_user_facts` function tool should contain *NEW* information only."
+                " Do *NOT* duplicate anything that is already in the \"User info\" section."
             )
         else:
             message_parts.append(
                 "Consider the most recently received message. If the user has revealed information about themselves,"
-                " call the `save_user_context` function tool to add this information to the \"User info\" section."
+                " call the `save_user_facts` function tool to add this information to the \"User info\" section."
             )
         return "\n".join(message_parts)
 
@@ -95,15 +95,14 @@ class UserContextSavingObserver(Observer):
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {
-            "save_user_context": SaveUserContextFunctionToolCallback(self.person_doc, self.search_client)
+            "save_user_facts": SaveUserFactsFunctionToolCallback(self.person_doc, self.search_client)
         }
 
     def tool_params(self) -> list[FunctionToolParam]:
         return [
             FunctionToolParam(
                 type="function",
-                name="save_user_context",
-                # TODO: Add dedupe downstream of fact generation.
+                name="save_user_facts",
                 description=(
                     "Add new facts to the user's \"User info\" section."
                     " Call this function whenever the user mentions private information that can't be easily looked up."
@@ -115,7 +114,7 @@ class UserContextSavingObserver(Observer):
                 parameters={
                     "type": "object",
                     "properties": {
-                        "context_summary": {
+                        "facts": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
@@ -125,11 +124,30 @@ class UserContextSavingObserver(Observer):
                         },
                     },
                     "additionalProperties": False,
-                    "required": ["context_summary"],
+                    "required": ["facts"],
                 },
                 strict=True,
             )
         ]
+
+# TODO: Flesh out question saving
+class UserQuestionsSavingObserver(Observer):
+    def __init__(self, person_doc: PersonDoc, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+        super().__init__(llm_client, **kwargs)
+        self.search_client = search_client
+        self.person_doc = person_doc
+
+    def developer_message(self) -> str | None:
+        pass
+
+    def reasoning_effort(self) -> str:
+        return "none"
+
+    def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
+        return {}
+
+    def tool_params(self) -> list[FunctionToolParam]:
+        return []
 
 def get_observers(
         person_doc: PersonDoc,
@@ -138,5 +156,5 @@ def get_observers(
         search_client: SearchClient,
 ) -> list[Observer]:
     return [
-        UserContextSavingObserver(person_doc, llm_client, search_client),
+        UserFactsSavingObserver(person_doc, llm_client, search_client),
     ]
