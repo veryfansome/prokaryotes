@@ -4,33 +4,14 @@ import os
 from datetime import datetime, timezone
 from elastic_transport import ObjectApiResponse
 from elasticsearch import AsyncElasticsearch
-from pydantic import BaseModel, Field
+
+from prokaryotes.models_v1 import (
+    FactDoc,
+    PersonContext,
+    QuestionDoc,
+)
 
 logger = logging.getLogger(__name__)
-
-class FactDoc(BaseModel):
-    about: list[str]
-    created_at: datetime
-    doc_id: str | None = Field(default=None, exclude=True)
-    importance: int = 1
-    invalid_after: datetime | None = None
-    labels: list[str] = Field(default_factory=list)
-    text: str
-
-class QuestionDoc(BaseModel):
-    about: list[str]
-    created_at: datetime
-    doc_id: str | None = Field(default=None, exclude=True)
-    importance: int = 1
-    invalid_after: datetime | None = None
-    labels: list[str] = Field(default_factory=list)
-    text: str
-    to: list[str]  # Maybe for_?
-
-class PersonContext(BaseModel):
-    facts: list[FactDoc] = Field(default_factory=list)
-    questions: list[QuestionDoc] = Field(default_factory=list)
-    user_id: int | None = None
 
 fact_mappings = {
     "dynamic": "strict",

@@ -1,12 +1,25 @@
 import logging
-from abc import ABC, abstractmethod
+from abc import (
+    ABC,
+    abstractmethod,
+)
 from openai.types.responses import FunctionToolParam
 
 from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
 from prokaryotes.graph_v1 import GraphClient
-from prokaryotes.llm_v1 import FunctionToolCallback, LLMClient
-from prokaryotes.models_v1 import ChatMessage
-from prokaryotes.search_v1 import PersonContext, SearchClient
+from prokaryotes.llm_v1 import (
+    FunctionToolCallback,
+    LLMClient,
+)
+from prokaryotes.models_v1 import (
+    ChatMessage,
+    RequestContext,
+)
+from prokaryotes.search_v1 import (
+    PersonContext,
+    SearchClient,
+)
+from prokaryotes.utils import developer_message_parts
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +36,7 @@ class Observer(ABC):
         context_window = []
         developer_message = self.developer_message()
         if developer_message:
-            logger.debug(f"{self.__class__.__name__} developer message:\n{developer_message}")
+            logger.info(f"{self.__class__.__name__} developer message:\n{developer_message}")
             context_window.append(ChatMessage(role="developer", content=developer_message))
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(messages)
@@ -49,28 +62,30 @@ class Observer(ABC):
         return []
 
 class UserFactsSavingObserver(Observer):
-    def __init__(self, user_context: PersonContext, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+    def __init__(
+            self,
+            request_context: RequestContext,
+            user_context: PersonContext,
+            llm_client: LLMClient,
+            search_client: SearchClient,
+            **kwargs
+    ):
         super().__init__(llm_client, **kwargs)
+        self.request_context = request_context
         self.search_client = search_client
         self.user_context = user_context
 
     def developer_message(self) -> str | None:
-        message_parts = [
-            "## User info",
-        ]
-        if self.user_context.facts:
-            for fact_doc in self.user_context.facts:
-                message_parts.append(f"- {fact_doc.text}")
-        else:
-            message_parts.append("Nothing is known about this user.")
-
+        message_parts = developer_message_parts(self.request_context, self.user_context)
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         if self.user_context.facts:
             message_parts.append(
                 "Consider what is already known about the user in the \"User info\" section above."
+                
                 " If the most recent message reveals *NEW* facts, call the `save_user_facts` function tool"
                 " to add them to the \"User info\" section."
+                
                 " The `facts` parameter of the `save_user_facts` function tool should contain *NEW* information only."
                 " Do *NOT* duplicate anything that is already in the \"User info\" section."
             )
@@ -132,10 +147,19 @@ class UserFactsSavingObserver(Observer):
 
 # TODO: Flesh out question saving
 class UserQuestionsSavingObserver(Observer):
-    def __init__(self, user_context: PersonContext, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+    def __init__(
+            self,
+            request_context: RequestContext,
+            user_context: PersonContext,
+            llm_client: LLMClient,
+            search_client: SearchClient,
+            **kwargs
+    ):
         super().__init__(llm_client, **kwargs)
+        self.request_context = request_context
         self.search_client = search_client
         self.user_context = user_context
+
 
     def developer_message(self) -> str | None:
         pass
@@ -150,11 +174,12 @@ class UserQuestionsSavingObserver(Observer):
         return []
 
 def get_observers(
+        request_context: RequestContext,
         user_context: PersonContext,
         graph_client: GraphClient,
         llm_client: LLMClient,
         search_client: SearchClient,
 ) -> list[Observer]:
     return [
-        UserFactsSavingObserver(user_context, llm_client, search_client),
+        UserFactsSavingObserver(request_context, user_context, llm_client, search_client),
     ]

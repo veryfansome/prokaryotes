@@ -1,16 +1,12 @@
 import asyncio
 import logging
-import os
-import platform
 from contextlib import asynccontextmanager
-from datetime import datetime
 from fastapi import (
     FastAPI,
     HTTPException,
     Query,
 )
 from fastapi.responses import StreamingResponse
-from zoneinfo import ZoneInfo
 
 from prokaryotes.callbacks_v1 import SearchEmailFunctionToolCallback
 from prokaryotes.graph_v1 import GraphClient
@@ -18,6 +14,7 @@ from prokaryotes.llm_v1 import get_llm_client
 from prokaryotes.models_v1 import (
     ChatMessage,
     ChatRequest,
+    RequestContext,
 )
 from prokaryotes.observers_v1 import get_observers
 from prokaryotes.search_v1 import (
@@ -28,7 +25,10 @@ from prokaryotes.tool_params_v1 import (
     search_email_tool_param,
     web_search_tool_param,
 )
-from prokaryotes.utils import log_async_task_exception
+from prokaryotes.utils import (
+    developer_message_parts,
+    log_async_task_exception,
+)
 from prokaryotes.web_base import ProkaryotesBase
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,7 @@ class ProkaryoteV1(ProkaryotesBase):
         """Chat completion."""
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
+        request_context = RequestContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
         # TODO: Drop stop word and do a blind text search against facts and questions
 
@@ -75,6 +76,7 @@ class ProkaryoteV1(ProkaryotesBase):
         user_context = await self.search_client.get_user_context(1)
 
         for observer in get_observers(
+            request_context,
             user_context,
             self.graph_client,
             self.llm_client,
@@ -85,14 +87,7 @@ class ProkaryoteV1(ProkaryotesBase):
             observe_task.add_done_callback(log_async_task_exception)
             observe_task.add_done_callback(self.background_tasks.discard)
 
-        context_window = [
-            ChatMessage(role="developer", content=self.developer_message(
-                user_context,
-                latitude=latitude,
-                longitude=longitude,
-                time_zone=time_zone,
-            ))
-        ]
+        context_window = [ChatMessage(role="developer", content=self.developer_message(request_context, user_context))]
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(request.messages)
         return StreamingResponse(
@@ -106,34 +101,8 @@ class ProkaryoteV1(ProkaryotesBase):
         )
 
     @classmethod
-    def developer_message(
-            cls,
-            user_context: PersonContext,
-            latitude: float = None,
-            longitude: float = None,
-            time_zone: str = None,
-    ):
-        time_zone = ZoneInfo("UTC" if not time_zone else time_zone)
-        now = datetime.now(tz=time_zone).strftime('%Y-%m-%d %H:%M')
-        message_parts = [
-            "## Execution context",
-            f"Time: {now} {time_zone}",
-            f"Environment: Python-{platform.python_version()} / {platform.platform()}",
-            f"Directory: {os.getcwd()}",
-            "---",
-            "## User info",
-        ]
-        if latitude and longitude:
-            message_parts.append(f"- {now}: The user is at *lat: {latitude:.4f}, long: {longitude:.4f}*")
-        if user_context.facts:
-            # TODO: Trimming needed if fact lists grow long
-            for fact_doc in user_context.facts:
-                message_parts.append(f"- {fact_doc.created_at.astimezone(time_zone).strftime('%Y-%m-%d %H:%M')}: {fact_doc.text}")
-
-        message_parts.append("---")
-        message_parts.append("## Assistant info")
-        message_parts.append(f"- {now}: The assistant is a Python app")
-
+    def developer_message(cls, request_context: RequestContext, user_context: PersonContext):
+        message_parts = developer_message_parts(request_context, user_context)
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         # TODO: Maybe this should be guided by user preferences
