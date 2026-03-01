@@ -33,7 +33,31 @@ async def sync_mappings(replicas: int = 0):
         else:
             await es.indices.create(index=index_name, body={
                 "mappings": mappings,
-                "settings": {"number_of_replicas": replicas},
+                "settings": {
+                    "analysis": {
+                        "filter": {
+                            "extended_stop_filter": {
+                                "type": "stop",
+                                "stopwords": [
+                                    # https://docs.opensearch.org/latest/analyzers/token-filters/stop
+                                    "_english_",
+                                    "he", "his",
+                                    "her", "hers",
+                                    "theirs",  # _english_ includes: they, their
+                                    "its",  # _english_ includes: it
+                                ]
+                            }
+                        },
+                        "analyzer": {
+                            "custom_query_analyzer": {
+                                "type": "custom",
+                                "tokenizer": "standard",
+                                "filter": ["lowercase", "extended_stop_filter"]
+                            }
+                        }
+                    },
+                    "number_of_replicas": replicas,
+                },
             })
             logger.info(f"Created index: {index_name}")
     await es.close()

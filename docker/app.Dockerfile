@@ -6,4 +6,5 @@ COPY pyproject.toml uv.lock     ./
 COPY scripts                    ./scripts
 COPY prokaryotes                ./prokaryotes
 
-RUN uv sync --all-extras
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --all-extras --frozen --no-install-project

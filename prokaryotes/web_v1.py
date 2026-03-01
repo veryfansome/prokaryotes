@@ -7,6 +7,7 @@ from fastapi import (
     Query,
 )
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from prokaryotes.callbacks_v1 import SearchEmailFunctionToolCallback
 from prokaryotes.graph_v1 import GraphClient
@@ -28,6 +29,7 @@ from prokaryotes.tool_params_v1 import (
 from prokaryotes.utils import (
     developer_message_parts,
     log_async_task_exception,
+    prep_chat_message_text_for_search,
 )
 from prokaryotes.web_base import ProkaryotesBase
 
@@ -70,6 +72,10 @@ class ProkaryoteV1(ProkaryotesBase):
             raise HTTPException(status_code=400, detail="At least one message is required")
         request_context = RequestContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
+        search_query_text = await run_in_threadpool(
+            prep_chat_message_text_for_search, " ".join(m.content for m in request.messages if m.role == "user"),
+        )
+        logger.info(f"Search query text:\n{search_query_text}")
         # TODO: Drop stop word and do a blind text search against facts and questions
 
         # TODO: Actually implement user_id

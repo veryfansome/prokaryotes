@@ -16,24 +16,32 @@ logger = logging.getLogger(__name__)
 fact_mappings = {
     "dynamic": "strict",
     "properties": {
-        "about": {"type": "keyword"},
-        "created_at": {"type": "date"},
-        "importance": {"type": "integer"},
+        "about":         {"type": "keyword"},
+        "created_at":    {"type": "date"},
+        "importance":    {"type": "integer"},
         "invalid_after": {"type": "date"},
-        "labels": {"type": "keyword"},
-        "text": {"type": "text"},
+        "labels":        {"type": "keyword"},
+        "text": {
+            "type":            "text",
+            "analyzer":        "standard",
+            "search_analyzer": "custom_query_analyzer",
+        },
     }
 }
 
 question_mappings = {
     "dynamic": "strict",
     "properties": {
-        "about": {"type": "keyword"},
-        "created_at": {"type": "date"},
-        "importance": {"type": "integer"},
+        "about":         {"type": "keyword"},
+        "created_at":    {"type": "date"},
+        "importance":    {"type": "integer"},
         "invalid_after": {"type": "date"},
-        "labels": {"type": "keyword"},
-        "text": {"type": "text"},
+        "labels":        {"type": "keyword"},
+        "text": {
+            "type":            "text",
+            "analyzer":        "standard",
+            "search_analyzer": "custom_query_analyzer",
+        },
         "to": {"type": "keyword"},
     }
 }

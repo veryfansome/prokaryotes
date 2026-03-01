@@ -1,7 +1,9 @@
 import asyncio
 import concurrent.futures
 import logging.config
+import mistune
 import os
+from bs4 import BeautifulSoup
 
 from prokaryotes.models_v1 import (
     PersonContext,
@@ -53,6 +55,13 @@ def log_future_exception(future: concurrent.futures.Future):
     exception = future.exception()
     if exception:
         logger.exception("Exception in thread", exc_info=exception)
+
+def prep_chat_message_text_for_search(text: str) -> str:
+    text = mistune.html(text.lower())
+    soup = BeautifulSoup(text, "lxml")
+    for code_tag in soup.select('pre code'):
+        code_tag.decompose()
+    return soup.get_text()
 
 def setup_logging():
     logging.config.dictConfig({
