@@ -6,7 +6,7 @@ from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
 from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import FunctionToolCallback, LLMClient
 from prokaryotes.models_v1 import ChatMessage
-from prokaryotes.search_v1 import PersonDoc, SearchClient
+from prokaryotes.search_v1 import PersonContext, SearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -49,24 +49,24 @@ class Observer(ABC):
         return []
 
 class UserFactsSavingObserver(Observer):
-    def __init__(self, person_doc: PersonDoc, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+    def __init__(self, user_context: PersonContext, llm_client: LLMClient, search_client: SearchClient, **kwargs):
         super().__init__(llm_client, **kwargs)
         self.search_client = search_client
-        self.person_doc = person_doc
+        self.user_context = user_context
 
     def developer_message(self) -> str | None:
         message_parts = [
             "## User info",
         ]
-        if self.person_doc.facts:
-            for fact_doc in self.person_doc.facts:
+        if self.user_context.facts:
+            for fact_doc in self.user_context.facts:
                 message_parts.append(f"- {fact_doc.text}")
         else:
             message_parts.append("Nothing is known about this user.")
 
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
-        if self.person_doc.facts:
+        if self.user_context.facts:
             message_parts.append(
                 "Consider what is already known about the user in the \"User info\" section above."
                 " If the most recent message reveals *NEW* facts, call the `save_user_facts` function tool"
@@ -83,7 +83,7 @@ class UserFactsSavingObserver(Observer):
 
     def reasoning_effort(self) -> str:
         # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
-        fact_cnt = len(self.person_doc.facts)
+        fact_cnt = len(self.user_context.facts)
         if fact_cnt <= 10:
             return "none"
         elif fact_cnt <= 20:
@@ -95,7 +95,7 @@ class UserFactsSavingObserver(Observer):
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {
-            "save_user_facts": SaveUserFactsFunctionToolCallback(self.person_doc, self.search_client)
+            "save_user_facts": SaveUserFactsFunctionToolCallback(self.user_context, self.search_client)
         }
 
     def tool_params(self) -> list[FunctionToolParam]:
@@ -132,10 +132,10 @@ class UserFactsSavingObserver(Observer):
 
 # TODO: Flesh out question saving
 class UserQuestionsSavingObserver(Observer):
-    def __init__(self, person_doc: PersonDoc, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+    def __init__(self, user_context: PersonContext, llm_client: LLMClient, search_client: SearchClient, **kwargs):
         super().__init__(llm_client, **kwargs)
         self.search_client = search_client
-        self.person_doc = person_doc
+        self.user_context = user_context
 
     def developer_message(self) -> str | None:
         pass
@@ -150,11 +150,11 @@ class UserQuestionsSavingObserver(Observer):
         return []
 
 def get_observers(
-        person_doc: PersonDoc,
+        user_context: PersonContext,
         graph_client: GraphClient,
         llm_client: LLMClient,
         search_client: SearchClient,
 ) -> list[Observer]:
     return [
-        UserFactsSavingObserver(person_doc, llm_client, search_client),
+        UserFactsSavingObserver(user_context, llm_client, search_client),
     ]

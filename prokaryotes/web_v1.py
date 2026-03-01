@@ -21,7 +21,7 @@ from prokaryotes.models_v1 import (
 )
 from prokaryotes.observers_v1 import get_observers
 from prokaryotes.search_v1 import (
-    PersonDoc,
+    PersonContext,
     SearchClient,
 )
 from prokaryotes.tool_params_v1 import (
@@ -69,11 +69,13 @@ class ProkaryoteV1(ProkaryotesBase):
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
+        # TODO: Drop stop word and do a blind text search against facts and questions
+
         # TODO: Actually implement user_id
-        person_doc = await self.search_client.get_or_create_user_person_doc(str(1))
+        user_context = await self.search_client.get_user_context(1)
 
         for observer in get_observers(
-            person_doc,
+            user_context,
             self.graph_client,
             self.llm_client,
             self.search_client,
@@ -85,7 +87,7 @@ class ProkaryoteV1(ProkaryotesBase):
 
         context_window = [
             ChatMessage(role="developer", content=self.developer_message(
-                person_doc,
+                user_context,
                 latitude=latitude,
                 longitude=longitude,
                 time_zone=time_zone,
@@ -106,7 +108,7 @@ class ProkaryoteV1(ProkaryotesBase):
     @classmethod
     def developer_message(
             cls,
-            person_doc: PersonDoc,
+            user_context: PersonContext,
             latitude: float = None,
             longitude: float = None,
             time_zone: str = None,
@@ -116,20 +118,16 @@ class ProkaryoteV1(ProkaryotesBase):
         message_parts = [
             "## Execution context",
             f"Time: {now} {time_zone}",
+            f"Environment: Python-{platform.python_version()} / {platform.platform()}",
+            f"Directory: {os.getcwd()}",
+            "---",
+            "## User info",
         ]
         if latitude and longitude:
-            message_parts.append(f"Location: {latitude:.4f}, {longitude:.4f}")
-        message_parts.append(f"Environment: Python-{platform.python_version()} / {platform.platform()}")
-        message_parts.append(f"Directory: {os.getcwd()}")
-
-        # TODO: Move ranking and filtering upstream of this call
-        message_parts.append("---")
-        message_parts.append("## User info")
-        if not person_doc.facts:
-            message_parts.append(f"Nothing is known about this user. Maybe ask for their name?")
-        else:
-            # TODO: Ranking needed when fact lists grow long
-            for fact_doc in person_doc.facts:
+            message_parts.append(f"- {now}: The user is at *lat: {latitude:.4f}, long: {longitude:.4f}*")
+        if user_context.facts:
+            # TODO: Trimming needed if fact lists grow long
+            for fact_doc in user_context.facts:
                 message_parts.append(f"- {fact_doc.created_at.astimezone(time_zone).strftime('%Y-%m-%d %H:%M')}: {fact_doc.text}")
 
         message_parts.append("---")

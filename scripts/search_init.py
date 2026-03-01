@@ -4,8 +4,9 @@ from dotenv import load_dotenv
 
 from prokaryotes.utils import setup_logging
 from prokaryotes.search_v1 import (
+    fact_mappings,
     get_elastic_search,
-    person_mappings,
+    question_mappings,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,8 @@ setup_logging()
 
 async def sync_mappings(replicas: int = 0):
     schemas = {
-        "persons": person_mappings,
+        "facts": fact_mappings,
+        "questions": question_mappings,
     }
     es = get_elastic_search()
     for index_name, mappings in schemas.items():
