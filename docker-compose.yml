@@ -58,7 +58,8 @@ services:
       dockerfile: docker/app.Dockerfile
     working_dir: /app
     volumes:
-      - ./tests:/app/tests
+      - ./tests:/app/tests:ro
+      - ~/.cache/huggingface:/root/.cache/huggingface:ro
     entrypoint: uv
     command: ["run", "pytest"]
 
@@ -70,7 +71,7 @@ services:
     image: "prokaryotes:latest"
     working_dir: /app
     volumes:
-      - ./.env:/app/.env
+      - ./.env:/app/.env:ro
     environment: &common-elastic-env
       ELASTIC_URI: "http://prokaryotes-elasticsearch:9200"
     entrypoint: uv
@@ -79,13 +80,32 @@ services:
       elasticsearch:
         condition: service_healthy
 
+  emb:
+    container_name: prokaryotes-emb
+    networks: [prokaryotes]
+    image: "prokaryotes:latest"
+    ports:
+      - "8001:8001" # HTTP
+    working_dir: /app
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface:ro
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    entrypoint: uv
+    command: ["run", "uvicorn", "scripts.emb:v1.app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      unit-tests:
+        condition: service_completed_successfully
+    stop_grace_period: 1m
+
   imap-ingest:
     container_name: prokaryotes-imap-ingest
     networks: [prokaryotes]
     image: "prokaryotes:latest"
     working_dir: /app
     volumes:
-      - ./.env:/app/.env
+      - ./.env:/app/.env:ro
     environment: &common-env
       <<: *common-elastic-env
       NEO4J_AUTH: *neo4j-auth
@@ -108,7 +128,7 @@ services:
       - "8000:8000" # HTTP
     working_dir: /app
     volumes:
-      - ./.env:/app/.env
+      - ./.env:/app/.env:ro
     environment: *common-env
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]

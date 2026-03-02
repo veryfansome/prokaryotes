@@ -3,16 +3,16 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pathlib import Path
 
-class ProkaryotesBase(ABC):
-
-    @abstractmethod
-    def get_static_dir(self):
-        raise NotImplementedError(f"Method 'static_dir' not implemented for {self.__class__.__name__}")
-
+class WebBase(ABC):
     @classmethod
     async def health(cls):
         """Health check."""
         return {"status": "ok"}
+
+class ProkaryotesBase(WebBase):
+    @abstractmethod
+    def get_static_dir(self):
+        raise NotImplementedError(f"Method 'static_dir' not implemented for {self.__class__.__name__}")
 
     async def logo(self):
         logo_png_path = Path(self.get_static_dir()) / "logo.png"

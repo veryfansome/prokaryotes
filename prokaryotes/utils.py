@@ -63,7 +63,13 @@ def prep_chat_message_text_for_search(text: str) -> str:
         code_tag.decompose()
     return soup.get_text()
 
-def setup_logging():
+def setup_logging(
+        httpcore_level: str = os.getenv("HTTPCORE_LOG_LEVEL", "INFO"),
+        httpx_level: str = os.getenv("HTTPX_LOG_LEVEL", "INFO"),
+        imapclient_level: str = os.getenv("IMAPCLIENT_LOG_LEVEL", "INFO"),
+        openai_level: str = os.getenv("OPENAI_LOG_LEVEL", "INFO"),
+        root_level: str = os.getenv("LOG_LEVEL", "INFO"),
+):
     logging.config.dictConfig({
         "version": 1,
         "disable_existing_loggers": False,
@@ -78,21 +84,26 @@ def setup_logging():
         },
         "loggers": {
             "root": {
-                "level": os.getenv("LOG_LEVEL", "INFO"),
+                "level": root_level,
                 "handlers": ["console"],
             },
             "httpcore": {
-                "level": os.getenv("HTTPCORE_LOG_LEVEL", "INFO"),
+                "level": httpcore_level,
+                "handlers": ["console"],
+                "propagate": False,
+            },
+            "httpx": {
+                "level": httpx_level,
                 "handlers": ["console"],
                 "propagate": False,
             },
             "imapclient": {
-                "level": os.getenv("IMAPCLIENT_LOG_LEVEL", "INFO"),
+                "level": imapclient_level,
                 "handlers": ["console"],
                 "propagate": False,
             },
             "openai": {
-                "level": os.getenv("OPENAI_LOG_LEVEL", "INFO"),
+                "level": openai_level,
                 "handlers": ["console"],
                 "propagate": False,
             },

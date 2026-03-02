@@ -2,6 +2,7 @@ import os
 import platform
 from datetime import datetime, timezone
 from dataclasses import dataclass
+from enum import Enum
 from pydantic import BaseModel, Field
 from zoneinfo import ZoneInfo
 
@@ -53,3 +54,11 @@ class RequestContext:
     @classmethod
     def new(cls, latitude: float, longitude: float, time_zone: str) -> "RequestContext":
         return cls(latitude=latitude, longitude=longitude, time_zone=ZoneInfo("UTC" if not time_zone else time_zone))
+
+class TextEmbeddingPrompt(Enum):
+    DOCUMENT = "document"
+    QUERY = "query"
+
+class TextEmbeddingRequest(BaseModel):
+    prompt: TextEmbeddingPrompt
+    texts: list[str]
