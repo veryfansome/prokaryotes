@@ -9,7 +9,11 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from prokaryotes.callbacks_v1 import SearchEmailFunctionToolCallback
+from prokaryotes.callbacks_v1 import (
+    ListDirectoryCallback,
+    ReadFileCallback,
+    SearchEmailFunctionToolCallback,
+)
 from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import get_llm_client
 from prokaryotes.models_v1 import (
@@ -23,6 +27,8 @@ from prokaryotes.search_v1 import (
     SearchClient,
 )
 from prokaryotes.tool_params_v1 import (
+    list_directory_tool_param,
+    read_file_tool_param,
     search_email_tool_param,
     web_search_tool_param,
 )
@@ -45,9 +51,13 @@ class ProkaryoteV1(ProkaryotesBase):
         self.static_dir = static_dir
 
         self.tools_callbacks = {
+            list_directory_tool_param["name"]: ListDirectoryCallback(),
+            read_file_tool_param["name"]: ReadFileCallback(),
             search_email_tool_param["name"]: SearchEmailFunctionToolCallback(self.search_client),
         }
         self.tools_params = [
+            list_directory_tool_param,
+            read_file_tool_param,
             search_email_tool_param,
             web_search_tool_param,
         ]
@@ -75,11 +85,11 @@ class ProkaryoteV1(ProkaryotesBase):
         search_query_text = await run_in_threadpool(
             prep_chat_message_text_for_search, " ".join(m.content for m in request.messages if m.role == "user"),
         )
-        logger.info(f"Search query text:\n{search_query_text}")
-        # TODO: Drop stop word and do a blind text search against facts and questions
-
-        # TODO: Actually implement user_id
-        user_context = await self.search_client.get_user_context(1)
+        logger.info(f"Search query text: {search_query_text}")
+        user_context = await self.search_client.get_user_context(
+            # TODO: Actually implement user_id
+            1, match=(search_query_text if search_query_text else None),
+        )
 
         for observer in get_observers(
             request_context,

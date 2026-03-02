@@ -21,7 +21,7 @@ def developer_message_parts(request_context: RequestContext, user_context: Perso
             f"Environment: Python-{request_context.execution_context.python_version}"
             f" / {request_context.execution_context.platform_short}"
         ),
-        f"Directory: {request_context.execution_context.cwd}",
+        f"Working directory: {request_context.execution_context.cwd}",
         "---",
         "## User info",
     ]

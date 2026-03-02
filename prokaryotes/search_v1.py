@@ -124,8 +124,8 @@ class SearchClient:
         hits = response["hits"]["hits"]
         return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
 
-    async def get_user_context(self, user_id: int) -> PersonContext:
-        facts = await self.search_facts(f"user_{user_id}")
+    async def get_user_context(self, user_id: int, match: str = None) -> PersonContext:
+        facts = await self.search_facts(f"user_{user_id}", match=match)
         return PersonContext(facts=facts, questions=[], user_id=user_id)
 
     async def close(self):
