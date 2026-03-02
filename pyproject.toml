@@ -24,11 +24,22 @@ dependencies = [
 test = [
     "pytest",
     "pytest-cov",
+    "pytest-xdist",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.coverage.run]
+source = ["prokaryotes"]
+omit = [
+    "tests/*",
+    "**/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --cov=prokaryotes"

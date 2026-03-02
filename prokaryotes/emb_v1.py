@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import numpy as np
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -32,11 +33,19 @@ class EmbeddingV1(WebBase):
             stop_idx = idx + partition_len
             tasks.append(asyncio.create_task(run_in_threadpool(
                 self.encoder.encode, payload.texts[idx:stop_idx],
+                normalize_embeddings=True,
                 prompt_name=payload.prompt.value,
-                normalize_embeddings=False, show_progress_bar=False,
+                show_progress_bar=False,
             )))
         for batch_embs in await asyncio.gather(*tasks):
-            embs.extend(batch_embs.tolist())
+            if payload.truncate_to:
+                # Apply Matryoshka Truncation
+                trunc = batch_embs[:, :payload.truncate_to]
+                # Re-normalize truncated vectors
+                norms = np.linalg.norm(trunc, axis=1, keepdims=True)
+                embs.extend((trunc / np.where(norms > 0, norms, 1.0)).tolist())
+            else:
+                embs.extend(batch_embs.tolist())
         return {"embeddings": embs}
 
     @asynccontextmanager

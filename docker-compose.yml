@@ -60,8 +60,11 @@ services:
     volumes:
       - ./tests:/app/tests:ro
       - ~/.cache/huggingface:/root/.cache/huggingface:ro
+    environment: &common-hf-offline-env
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     entrypoint: uv
-    command: ["run", "pytest"]
+    command: ["run", "pytest", "-vvv", "-n", "auto"]
 
   # Apps
 
@@ -89,9 +92,7 @@ services:
     working_dir: /app
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface:ro
-    environment:
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
+    environment: *common-hf-offline-env
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.emb:v1.app", "--host", "0.0.0.0", "--port", "8001"]
     depends_on:

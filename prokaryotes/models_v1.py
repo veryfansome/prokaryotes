@@ -62,3 +62,7 @@ class TextEmbeddingPrompt(Enum):
 class TextEmbeddingRequest(BaseModel):
     prompt: TextEmbeddingPrompt
     texts: list[str]
+    truncate_to: int | None = None
+
+class TextEmbeddingResponse(BaseModel):
+    embeddings: list[list[float]]

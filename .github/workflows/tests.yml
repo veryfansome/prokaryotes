@@ -1,0 +1,60 @@
+name: tests
+
+on:
+  push: &repo_trigger
+    branches:
+      - main
+    paths:
+      - .github/workflows/tests.yml
+      - '*/**.py'
+  pull_request: *repo_trigger
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Cache HF Hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub/
+          key: ${{ runner.os }}-hf-cache
+
+      - name: Run tests
+        run: |
+          if [ -d ~/.cache/huggingface/hub/models--Snowflake--snowflake-arctic-embed-l-v2.0 ]; then
+              export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+          fi
+          uv sync --all-extras --frozen --no-install-project
+          uv run pytest -vvv -n auto --cov --cov-report=xml --cov-report=term
+
+      - name: Generate Coverage Badge
+        uses: tj-actions/coverage-badge-py@v2
+        with:
+          output: coverage.svg
+
+      - name: Verify Changed files
+        uses: tj-actions/verify-changed-files@v20
+        id: verify-changed-files
+        with:
+          files: coverage.svg
+
+      - name: Commit files
+        if: steps.verify-changed-files.outputs.files_changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add coverage.svg
+          git commit -m "Updated coverage.svg"
+          git push
