@@ -22,9 +22,9 @@ class EmbeddingV1(WebBase):
         self.model = model
 
         self.app = FastAPI(lifespan=self.lifespan)
-        self.app.add_api_route("/emb", self.emb, methods=["POST"])
+        self.app.add_api_route("/embs", self.embs, methods=["POST"])
 
-    async def emb(self, payload: TextEmbeddingRequest):
+    async def embs(self, payload: TextEmbeddingRequest):
         embs = []
         tasks = []
         texts_len = len(payload.texts)
@@ -52,5 +52,5 @@ class EmbeddingV1(WebBase):
     async def lifespan(self, app: FastAPI):
         logger.info("Initializing embedding model")
         self.encoder = SentenceTransformer(self.model)
-        await self.emb(TextEmbeddingRequest(texts=["Hello, world!"], prompt=TextEmbeddingPrompt.DOCUMENT))
+        await self.embs(TextEmbeddingRequest(texts=["Hello, world!"], prompt=TextEmbeddingPrompt.DOCUMENT))
         yield

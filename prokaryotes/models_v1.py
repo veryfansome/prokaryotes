@@ -3,7 +3,10 @@ import platform
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
 from zoneinfo import ZoneInfo
 
 class ChatMessage(BaseModel):

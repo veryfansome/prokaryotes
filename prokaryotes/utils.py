@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import httpx
 import logging.config
 import mistune
 import os
@@ -8,6 +9,8 @@ from bs4 import BeautifulSoup
 from prokaryotes.models_v1 import (
     PersonContext,
     RequestContext,
+    TextEmbeddingRequest,
+    TextEmbeddingResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,15 @@ def developer_message_parts(request_context: RequestContext, user_context: Perso
     message_parts.append(f"- {now}: The assistant is a Python app")
     return message_parts
 
+async def get_text_embeddings(req: TextEmbeddingRequest):
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            os.getenv("EMBEDDING_SERVICE_URL", "http://prokaryotes-emb:8001/embs"),
+            json=req.model_dump(mode="json"),
+        )
+        resp.raise_for_status()
+        return TextEmbeddingResponse.model_validate(resp.json())
+
 def log_async_task_exception(task: asyncio.Task):
     try:
         task.result()
@@ -68,6 +80,7 @@ def setup_logging(
         httpx_level: str = os.getenv("HTTPX_LOG_LEVEL", "INFO"),
         imapclient_level: str = os.getenv("IMAPCLIENT_LOG_LEVEL", "INFO"),
         openai_level: str = os.getenv("OPENAI_LOG_LEVEL", "INFO"),
+        prokaryotes_search_level: str = os.getenv("PROKARYOTES_SEARCH_LOG_LEVEL", "DEBUG"),
         root_level: str = os.getenv("LOG_LEVEL", "INFO"),
 ):
     logging.config.dictConfig({
@@ -104,6 +117,11 @@ def setup_logging(
             },
             "openai": {
                 "level": openai_level,
+                "handlers": ["console"],
+                "propagate": False,
+            },
+            "prokaryotes.search_v1": {
+                "level": prokaryotes_search_level,
                 "handlers": ["console"],
                 "propagate": False,
             },

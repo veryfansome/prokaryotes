@@ -20,6 +20,8 @@ from prokaryotes.models_v1 import (
     ChatMessage,
     ChatRequest,
     RequestContext,
+    TextEmbeddingPrompt,
+    TextEmbeddingRequest,
 )
 from prokaryotes.observers_v1 import get_observers
 from prokaryotes.search_v1 import (
@@ -34,6 +36,7 @@ from prokaryotes.tool_params_v1 import (
 )
 from prokaryotes.utils import (
     developer_message_parts,
+    get_text_embeddings,
     log_async_task_exception,
     prep_chat_message_text_for_search,
 )
@@ -86,9 +89,17 @@ class ProkaryoteV1(ProkaryotesBase):
             prep_chat_message_text_for_search, " ".join(m.content for m in request.messages if m.role == "user"),
         )
         logger.info(f"Search query text: {search_query_text}")
+        emb_resp = None
+        if search_query_text:
+            emb_resp = await get_text_embeddings(TextEmbeddingRequest(
+                prompt=TextEmbeddingPrompt.QUERY,
+                texts=[search_query_text],  # TODO: Concatenating all message might not be ideal
+                truncate_to=256,
+            ))
         user_context = await self.search_client.get_user_context(
-            # TODO: Actually implement user_id
-            1, match=(search_query_text if search_query_text else None),
+            1, # TODO: Actually implement user_id
+            match=(search_query_text if search_query_text else None),
+            match_emb=(emb_resp.embeddings[0] if emb_resp else None),
         )
 
         for observer in get_observers(

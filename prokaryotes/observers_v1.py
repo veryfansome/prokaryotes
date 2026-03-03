@@ -41,6 +41,7 @@ class Observer(ABC):
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(messages)
 
+        # TODO: Optionally squash text output to save cost, rather than dropping and paying
         async for _ in self.llm_client.stream_response(
                 context_window, self.model,
                 reasoning_effort=self.reasoning_effort(),

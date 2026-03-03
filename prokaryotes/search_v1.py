@@ -9,7 +9,10 @@ from prokaryotes.models_v1 import (
     FactDoc,
     PersonContext,
     QuestionDoc,
+    TextEmbeddingPrompt,
+    TextEmbeddingRequest,
 )
+from prokaryotes.utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,12 @@ fact_mappings = {
             "type":            "text",
             "analyzer":        "standard",
             "search_analyzer": "custom_query_analyzer",
+        },
+        "text_emb": {
+            "type":       "dense_vector",
+            "dims":       256,
+            "index":      True,
+            "similarity": "cosine",
         },
     }
 }
@@ -42,6 +51,12 @@ question_mappings = {
             "analyzer":        "standard",
             "search_analyzer": "custom_query_analyzer",
         },
+        "text_emb": {
+            "type":       "dense_vector",
+            "dims":       256,
+            "index":      True,
+            "similarity": "cosine",
+        },
         "to": {"type": "keyword"},
     }
 }
@@ -58,9 +73,15 @@ class SearchClient:
 
     async def index_facts(self, about: list[str], fact_texts: list[str]) -> list[FactDoc]:
         """Index a small list of facts."""
+        embs_resp = await get_text_embeddings(
+            TextEmbeddingRequest(prompt=TextEmbeddingPrompt.DOCUMENT, texts=fact_texts, truncate_to=256)
+        )
         created_at = datetime.now(timezone.utc)
         facts = [FactDoc(about=about, created_at=created_at, text=text) for text in fact_texts]
-        index_tasks = [self.es.index(index="facts", document=fact.model_dump()) for fact in facts]
+        index_tasks = [
+            self.es.index(index="facts", document=(fact.model_dump() | {"text_emb": embs_resp.embeddings[idx]}))
+            for idx, fact in enumerate(facts)
+        ]
         results: list[ObjectApiResponse | Exception] = await asyncio.gather(*index_tasks, return_exceptions=True)
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
@@ -69,30 +90,29 @@ class SearchClient:
                 facts[idx].doc_id = result["_id"]
         return facts
 
-    async def search_facts(self, about: str, match: str = None) -> list[FactDoc]:
+    async def search_facts(self, about: str, match: str = None, match_emb: list[float] = None) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
-        main_query = {
-            "filter": [
-                {"term": {"about": about}},
-                {
-                    "bool": {
-                        "should": [
-                            {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
-                            {"range": {"invalid_after": {"gt": now.isoformat()}}},
-                        ],
-                        "minimum_should_match": 1,
-                    }
+        shared_filters = [
+            {"term": {"about": about}},
+            {
+                "bool": {
+                    "should": [
+                        {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
+                        {"range": {"invalid_after": {"gt": now.isoformat()}}},
+                    ],
+                    "minimum_should_match": 1,
                 }
-            ],
-            "must_not": [
-                {"term": {"labels": "deactivated"}},
-            ]
+            }
+        ]
+        main_query = {
+            "filter": shared_filters,
+            "must_not": [{"term": {"labels": "deactivated"}}]
         }
         if match:
             main_query["should"] = [{"match": {"text": match}}]
-        response = await self.es.search(
-            index="facts",
-            query={
+        search_kwargs = {
+            "index": "facts",
+            "query": {
                 "function_score": {
                     "query": {"bool": main_query},
                     "functions": [
@@ -120,12 +140,29 @@ class SearchClient:
                     "boost_mode": "multiply",
                 },
             },
-        )
+        }
+        if match_emb:
+            search_kwargs["knn"] = {
+                "field": "text_emb",
+                "query_vector": match_emb,
+                "boost": 5.0,  # Increase this if semantic matches should weigh more
+                "k": 50,
+                "num_candidates": 100,
+                "filter": {
+                    "bool": {
+                        "must": shared_filters,
+                        "must_not": [{"term": {"labels": "deactivated"}}]
+                    }
+                }
+            }
+        response = await self.es.search(**search_kwargs)
         hits = response["hits"]["hits"]
+        for h in hits:
+            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {h['_source'].get('text')[:50]}...")
         return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
 
-    async def get_user_context(self, user_id: int, match: str = None) -> PersonContext:
-        facts = await self.search_facts(f"user_{user_id}", match=match)
+    async def get_user_context(self, user_id: int, match: str = None, match_emb: list[float] = None) -> PersonContext:
+        facts = await self.search_facts(f"user_{user_id}", match=match, match_emb=match_emb)
         return PersonContext(facts=facts, questions=[], user_id=user_id)
 
     async def close(self):

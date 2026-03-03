@@ -65,13 +65,13 @@ def test_semantic_similarity(
     with TestClient(v1.app) as client:
         # Get embeddings for query
         payload = {"prompt": "query", "texts": [query], "truncate_to": truncate_to}
-        resp = client.post("/emb", json=payload)
+        resp = client.post("/embs", json=payload)
         assert resp.status_code == 200, resp
         qry_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
 
         # Get embeddings for documents
         payload = {"prompt": "document", "texts": [related_doc, unrelated_doc], "truncate_to": truncate_to}
-        resp = client.post("/emb", json=payload)
+        resp = client.post("/embs", json=payload)
         assert resp.status_code == 200, resp
         doc_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
 
