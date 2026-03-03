@@ -1,5 +1,7 @@
+*.egg-info
+.DS_Store
 .coverage
 .env
+.venv
 __pycache__/
 neo4j.dump
-prokaryotes.egg-info

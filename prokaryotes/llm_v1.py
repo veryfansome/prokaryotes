@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 from openai.types.responses import (
     ResponseFunctionToolCall as OpenAIResponseFunctionToolCall,
     ResponseStreamEvent as OpenAIResponseStreamEvent,
+    ResponseTextConfigParam as OpenAIResponseTextConfigParam,
     ToolParam as OpenAIToolParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput as OpenAIFunctionCallOutput
@@ -24,6 +25,7 @@ class LLMClient(Protocol):
             messages: list[ChatMessage],
             model: str,
             reasoning_effort: str = None,
+            text: OpenAIResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
             tool_params: list[OpenAIToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
@@ -39,12 +41,14 @@ class OpenAIClient(LLMClient):
             model: str,
             reasoning_effort: str = None,
             stream: bool = False,
+            text: OpenAIResponseTextConfigParam = None,
             tool_params: list[OpenAIToolParam] = None,
     ):
         reasoning_config = {"effort": reasoning_effort if reasoning_effort else "none"}
         return await self.async_openai.responses.create(
             model=model,
             input=[(m if (is_typeddict(m) or not isinstance(m, ChatMessage)) else m.model_dump()) for m in messages],
+            text=text,
             tools=tool_params if tool_params else None,
             reasoning=reasoning_config,
             stream=stream,
@@ -76,16 +80,17 @@ class OpenAIClient(LLMClient):
             messages: list[ChatMessage],
             model: str,
             reasoning_effort: str = None,
+            text: OpenAIResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
             tool_params: list[OpenAIToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
         # TODO: Optional pre create_response hooks that can be used for recall and to inject new contexts
-        # TODO: Recall unanswered questions for the user, if any, from Neo4j
         callback_tasks = []
         async for event in await self.create_response(
                 messages, model,
                 reasoning_effort=reasoning_effort,
                 stream=True,
+                text=text,
                 tool_params=tool_params,
         ):
             if event.type == "response.output_text.delta":
@@ -103,6 +108,7 @@ class OpenAIClient(LLMClient):
                         messages, model,
                         reasoning_effort=reasoning_effort,
                         stream=True,
+                        text=text,
                         tool_params=tool_params,
                 ):
                     if event.type == "response.output_text.delta":

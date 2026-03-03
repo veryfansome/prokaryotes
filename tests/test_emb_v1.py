@@ -51,6 +51,14 @@ def client():
             0.53,
             256,
     ),
+    (
+            "The user claims to be the creator of the assistant",
+            "The user considers themself the creator of this assistant.",
+            0.75,
+            "The user's name is John",
+            0.45,
+            256,
+    ),
 ])
 def test_semantic_similarity(
         client,
@@ -61,22 +69,20 @@ def test_semantic_similarity(
         unrelated_doc_threshold,
         truncate_to,
 ):
-    v1 = EmbeddingV1("Snowflake/snowflake-arctic-embed-l-v2.0")
-    with TestClient(v1.app) as client:
-        # Get embeddings for query
-        payload = {"prompt": "query", "texts": [query], "truncate_to": truncate_to}
-        resp = client.post("/embs", json=payload)
-        assert resp.status_code == 200, resp
-        qry_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
+    # Get embeddings for query
+    payload = {"batch_size": 16, "prompt": "query", "texts": [query], "truncate_to": truncate_to}
+    resp = client.post("/embs", json=payload)
+    assert resp.status_code == 200, resp
+    qry_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
 
-        # Get embeddings for documents
-        payload = {"prompt": "document", "texts": [related_doc, unrelated_doc], "truncate_to": truncate_to}
-        resp = client.post("/embs", json=payload)
-        assert resp.status_code == 200, resp
-        doc_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
+    # Get embeddings for documents
+    payload = {"batch_size": 16, "prompt": "document", "texts": [related_doc, unrelated_doc], "truncate_to": truncate_to}
+    resp = client.post("/embs", json=payload)
+    assert resp.status_code == 200, resp
+    doc_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
 
-        score_unrelated = np.dot(qry_embs[0], doc_embs[1])
-        assert score_unrelated < unrelated_doc_threshold, "Unrelated documents should have low similarity"
+    score_unrelated = np.dot(qry_embs[0], doc_embs[1])
+    assert score_unrelated < unrelated_doc_threshold, "Unrelated documents should have low similarity"
 
-        score_related = np.dot(qry_embs[0], doc_embs[0])
-        assert score_related > related_doc_threshold, "Related documents should have higher similarity"
+    score_related = np.dot(qry_embs[0], doc_embs[0])
+    assert score_related > related_doc_threshold, "Related documents should have higher similarity"

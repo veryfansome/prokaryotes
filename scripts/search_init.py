@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 
 from prokaryotes.utils import setup_logging
 from prokaryotes.search_v1 import (
+    chat_completion_mappings,
     fact_mappings,
     get_elastic_search,
     question_mappings,
@@ -16,6 +17,7 @@ setup_logging()
 
 async def sync_mappings(replicas: int = 0):
     schemas = {
+        "chat-completions": chat_completion_mappings,
         "facts": fact_mappings,
         "questions": question_mappings,
     }
@@ -41,6 +43,7 @@ async def sync_mappings(replicas: int = 0):
                                 "stopwords": [
                                     # https://docs.opensearch.org/latest/analyzers/token-filters/stop
                                     "_english_",
+                                    # TODO: Reference scikit-learn's english stop words
                                     "ain't",
                                     "all",
                                     "am",

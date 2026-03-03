@@ -39,7 +39,6 @@ services:
       - neo4j-data:/data
     environment:
       NEO4J_AUTH: &neo4j-auth neo4j/${NEO4J_PASSWORD:-Ma9icMicr0be}
-      NEO4J_server_jvm_additional: "--add-modules jdk.incubator.vector"
     healthcheck:
       test: [ "CMD", "wget", "-q", "-t=1", "http://localhost:7474" ]
       interval: 3s
@@ -60,8 +59,10 @@ services:
     volumes:
       - ./tests:/app/tests:ro
       - ~/.cache/huggingface:/root/.cache/huggingface:ro
-    environment: &common-hf-offline-env
+      - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
+    environment: &common-model-env
       HF_HUB_OFFLINE: "1"
+      NUMBA_CPU_NAME: generic
       TRANSFORMERS_OFFLINE: "1"
     entrypoint: uv
     command: ["run", "pytest", "-vvv", "-n", "auto"]
@@ -92,7 +93,8 @@ services:
     working_dir: /app
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface:ro
-    environment: *common-hf-offline-env
+      - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
+    environment: *common-model-env
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.emb:v1.app", "--host", "0.0.0.0", "--port", "8001"]
     depends_on:

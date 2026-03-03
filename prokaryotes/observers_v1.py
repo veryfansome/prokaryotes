@@ -3,7 +3,11 @@ from abc import (
     ABC,
     abstractmethod,
 )
-from openai.types.responses import FunctionToolParam
+from openai.types.responses import (
+    FunctionToolParam as OpenAIFunctionToolParam,
+    ResponseFormatTextJSONSchemaConfigParam as OpenAIResponseFormatTextJSONSchemaParam,
+    ResponseTextConfigParam as OpenAIResponseTextConfigParam,
+)
 
 from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
 from prokaryotes.graph_v1 import GraphClient
@@ -41,25 +45,31 @@ class Observer(ABC):
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(messages)
 
-        # TODO: Optionally squash text output to save cost, rather than dropping and paying
-        async for _ in self.llm_client.stream_response(
+        response_text = ""
+        async for chunk in self.llm_client.stream_response(
                 context_window, self.model,
                 reasoning_effort=self.reasoning_effort(),
+                text=self.text_param(),
                 tool_callbacks=self.tool_callbacks(),
                 tool_params=self.tool_params(),
         ):
-            pass  # Drop streamed data
+            response_text += chunk
+        logger.info(f"{self.__class__.__name__} response text: {response_text}")
 
     @abstractmethod
     def reasoning_effort(self) -> str:
         return "none"
 
     @abstractmethod
+    def text_param(self) -> OpenAIResponseTextConfigParam:
+        return OpenAIResponseTextConfigParam(verbosity="low")
+
+    @abstractmethod
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {}
 
     @abstractmethod
-    def tool_params(self) -> list[FunctionToolParam]:
+    def tool_params(self) -> list[OpenAIFunctionToolParam]:
         return []
 
 class UserFactsSavingObserver(Observer):
@@ -83,12 +93,8 @@ class UserFactsSavingObserver(Observer):
         if self.user_context.facts:
             message_parts.append(
                 "Consider what is already known about the user in the \"User info\" section above."
-                
-                " If the most recent message reveals *NEW* facts, call the `save_user_facts` function tool"
-                " to add them to the \"User info\" section."
-                
-                " The `facts` parameter of the `save_user_facts` function tool should contain *NEW* information only."
-                " Do *NOT* duplicate anything that is already in the \"User info\" section."
+                " If the most recent message reveals new facts, call the `save_user_facts` function tool"
+                " to add these new fact to the \"User info\" section."
             )
         else:
             message_parts.append(
@@ -109,14 +115,33 @@ class UserFactsSavingObserver(Observer):
         else:
             return "high"
 
+    def text_param(self) -> OpenAIResponseTextConfigParam:
+        return OpenAIResponseTextConfigParam(format=OpenAIResponseFormatTextJSONSchemaParam(
+            name="tool_called",
+            type="json_schema",
+            schema={
+                "type": "object",
+                "properties": {
+                    "tool_called": {
+                        "type": "string",
+                        "description": "True, if the `save_user_facts` function tool was called, else False.",
+                        "enum": ["True", "False"],
+                    },
+                },
+                "additionalProperties": False,
+                "required": ["tool_called"],
+            },
+            strict=True,
+        ))
+
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {
             "save_user_facts": SaveUserFactsFunctionToolCallback(self.user_context, self.search_client)
         }
 
-    def tool_params(self) -> list[FunctionToolParam]:
+    def tool_params(self) -> list[OpenAIFunctionToolParam]:
         return [
-            FunctionToolParam(
+            OpenAIFunctionToolParam(
                 type="function",
                 name="save_user_facts",
                 description=(
@@ -168,10 +193,13 @@ class UserQuestionsSavingObserver(Observer):
     def reasoning_effort(self) -> str:
         return "none"
 
+    def text_param(self) -> OpenAIResponseTextConfigParam:
+        return OpenAIResponseTextConfigParam(verbosity="low")
+
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {}
 
-    def tool_params(self) -> list[FunctionToolParam]:
+    def tool_params(self) -> list[OpenAIFunctionToolParam]:
         return []
 
 def get_observers(

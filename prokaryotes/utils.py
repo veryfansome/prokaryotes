@@ -46,6 +46,18 @@ def developer_message_parts(request_context: RequestContext, user_context: Perso
     message_parts.append(f"- {now}: The assistant is a Python app")
     return message_parts
 
+def get_cache_dir():
+    home_dir = os.path.expanduser("~")
+    cache_dir = os.path.join(home_dir, ".cache")
+    prokaryotes_dir = os.path.join(cache_dir, "prokaryotes")
+    os.makedirs(prokaryotes_dir, exist_ok=True)
+    return prokaryotes_dir
+
+def get_models_dir():
+    model_dir = os.path.join(get_cache_dir(), "models")
+    os.makedirs(model_dir, exist_ok=True)
+    return model_dir
+
 async def get_text_embeddings(req: TextEmbeddingRequest):
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -73,7 +85,7 @@ def prep_chat_message_text_for_search(text: str) -> str:
     soup = BeautifulSoup(text, "lxml")
     for code_tag in soup.select('pre code'):
         code_tag.decompose()
-    return soup.get_text()
+    return soup.get_text().strip()
 
 def setup_logging(
         httpcore_level: str = os.getenv("HTTPCORE_LOG_LEVEL", "INFO"),

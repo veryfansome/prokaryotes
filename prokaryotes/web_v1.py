@@ -8,6 +8,10 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from typing import (
+    Any,
+    AsyncGenerator,
+)
 
 from prokaryotes.callbacks_v1 import (
     ListDirectoryCallback,
@@ -85,6 +89,9 @@ class ProkaryoteV1(ProkaryotesBase):
             raise HTTPException(status_code=400, detail="At least one message is required")
         request_context = RequestContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
+        # TODO: When a completion is received, how do we look up direct predecessors if any, and other related
+        #       or similar completions? Maybe some signature that's included as a label when indexed?
+
         search_query_text = await run_in_threadpool(
             prep_chat_message_text_for_search, " ".join(m.content for m in request.messages if m.role == "user"),
         )
@@ -118,11 +125,15 @@ class ProkaryoteV1(ProkaryotesBase):
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(request.messages)
         return StreamingResponse(
-            self.llm_client.stream_response(
-                context_window, model,
-                reasoning_effort=reasoning_effort,
-                tool_callbacks=self.tools_callbacks,
-                tool_params=self.tools_params,
+            self.stream_and_index(
+                user_context.user_id,
+                context_window,
+                self.llm_client.stream_response(
+                    context_window, model,
+                    reasoning_effort=reasoning_effort,
+                    tool_callbacks=self.tools_callbacks,
+                    tool_params=self.tools_params,
+                )
             ),
             media_type="text/event-stream",
         )
@@ -155,3 +166,30 @@ class ProkaryoteV1(ProkaryotesBase):
         await self.graph_client.close()
         await self.search_client.close()
         logger.info("Exiting lifespan")
+
+    async def stream_and_index(
+            self,
+            user_id: int,
+            messages: list[ChatMessage],
+            response_generator: AsyncGenerator[str, Any],
+    ) -> AsyncGenerator[str, Any]:
+        error = None
+        indexed_messages = [msg for msg in messages if msg.role != "developer"]
+        response_text = ""
+        try:
+            async for chunk in response_generator:
+                response_text += chunk
+                yield chunk
+        except Exception as e:
+            error = str(e)
+            raise
+        finally:
+            indexing_task = asyncio.create_task(
+                self.search_client.index_chat_completion(
+                    error=error,
+                    labels=[f"user_{user_id}"],
+                    messages=(indexed_messages + [ChatMessage(role="assistant", content=response_text)]),
+                )
+            )
+            self.background_tasks.add(indexing_task)
+            indexing_task.add_done_callback(self.background_tasks.discard)

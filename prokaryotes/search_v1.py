@@ -6,6 +6,8 @@ from elastic_transport import ObjectApiResponse
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import (
+    ChatCompletionDoc,
+    ChatMessage,
     FactDoc,
     PersonContext,
     QuestionDoc,
@@ -15,6 +17,28 @@ from prokaryotes.models_v1 import (
 from prokaryotes.utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
+
+chat_completion_mappings = {
+    "dynamic": "strict",
+    "properties": {
+        "about":      {"type": "keyword"},
+        "created_at": {"type": "date"},
+        "error":      {"type": "text"},
+        "importance": {"type": "integer"},
+        "labels":     {"type": "keyword"},
+        "messages": {
+            "type": "nested",
+            "properties": {
+                "role": {"type": "keyword"},
+                "content":  {
+                    "type":            "text",
+                    "analyzer":        "standard",
+                    "search_analyzer": "custom_query_analyzer",
+                },
+            }
+        }
+    }
+}
 
 fact_mappings = {
     "dynamic": "strict",
@@ -71,10 +95,18 @@ class SearchClient:
     def __init__(self, es: AsyncElasticsearch = get_elastic_search()):
         self.es = es
 
-    async def index_facts(self, about: list[str], fact_texts: list[str]) -> list[FactDoc]:
+    async def index_chat_completion(self, labels: list[str], messages: list[ChatMessage], error: str = None):
+        created_at = datetime.now(timezone.utc)
+        doc = ChatCompletionDoc(about=[], created_at=created_at, error=error, labels=labels, messages=messages)
+        try:
+            await self.es.index(index="chat-completions", document=doc.model_dump())
+        except Exception:
+            logger.exception(f"Failed to index {doc}")
+
+    async def index_facts(self, about: list[str], fact_texts: list[str]):
         """Index a small list of facts."""
         embs_resp = await get_text_embeddings(
-            TextEmbeddingRequest(prompt=TextEmbeddingPrompt.DOCUMENT, texts=fact_texts, truncate_to=256)
+            TextEmbeddingRequest(batch_size=16, prompt=TextEmbeddingPrompt.DOCUMENT, texts=fact_texts, truncate_to=256)
         )
         created_at = datetime.now(timezone.utc)
         facts = [FactDoc(about=about, created_at=created_at, text=text) for text in fact_texts]
@@ -86,9 +118,7 @@ class SearchClient:
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(f"Failed to index {facts[idx]}", exc_info=result)
-            else:
-                facts[idx].doc_id = result["_id"]
-        return facts
+                # TODO: Retry?
 
     async def search_facts(self, about: str, match: str = None, match_emb: list[float] = None) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)

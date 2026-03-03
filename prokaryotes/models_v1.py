@@ -13,6 +13,15 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
+class ChatCompletionDoc(BaseModel):
+    about: list[str]
+    created_at: datetime
+    doc_id: str | None = Field(default=None, exclude=True)
+    error: str | None = Field(default=None)
+    importance: int = 1
+    labels: list[str] = Field(default_factory=list)
+    messages: list[ChatMessage]
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
 
@@ -63,6 +72,7 @@ class TextEmbeddingPrompt(Enum):
     QUERY = "query"
 
 class TextEmbeddingRequest(BaseModel):
+    batch_size: int = 1
     prompt: TextEmbeddingPrompt
     texts: list[str]
     truncate_to: int | None = None
