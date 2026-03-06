@@ -53,11 +53,6 @@ def get_cache_dir():
     os.makedirs(prokaryotes_dir, exist_ok=True)
     return prokaryotes_dir
 
-def get_models_dir():
-    model_dir = os.path.join(get_cache_dir(), "models")
-    os.makedirs(model_dir, exist_ok=True)
-    return model_dir
-
 async def get_text_embeddings(req: TextEmbeddingRequest):
     async with httpx.AsyncClient() as client:
         resp = await client.post(

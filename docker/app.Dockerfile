@@ -2,8 +2,6 @@ FROM astral/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y build-essential
-
 COPY pyproject.toml uv.lock     ./
 COPY scripts                    ./scripts
 COPY prokaryotes                ./prokaryotes

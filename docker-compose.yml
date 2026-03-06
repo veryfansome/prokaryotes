@@ -62,7 +62,6 @@ services:
       - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
     environment: &common-model-env
       HF_HUB_OFFLINE: "1"
-      NUMBA_CPU_NAME: generic
       TRANSFORMERS_OFFLINE: "1"
     entrypoint: uv
     command: ["run", "pytest", "-vvv", "-n", "auto"]
