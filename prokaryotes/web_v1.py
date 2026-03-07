@@ -170,8 +170,7 @@ class ProkaryoteV1(ProkaryotesBase):
         if completion and topics:
             await self.graph_client.create_topic_to_completion_edge(completion, topics)
 
-        # TODO: This needs to be awaited
-        saved_facts = user_fact_observer.get_saved_facts()
+        saved_facts = await user_fact_observer.get_saved_facts()
         if completion and saved_facts:
             await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
 

@@ -43,7 +43,7 @@ class Observer(ABC):
         context_window = []
         developer_message = self.developer_message()
         if developer_message:
-            logger.info(f"{self.__class__.__name__} developer message:\n{developer_message}")
+            logger.debug(f"{self.__class__.__name__} developer message:\n{developer_message}")
             context_window.append(ChatMessage(role="developer", content=developer_message))
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(messages)
@@ -151,8 +151,13 @@ class UserFactsSavingObserver(Observer):
             )
         return "\n".join(message_parts)
 
-    def get_saved_facts(self) -> list[FactDoc]:
-        return self.callback.saved_facts
+    async def get_saved_facts(self) -> list[FactDoc]:
+        try:
+            await self.bg_task
+            return self.callback.saved_facts
+        except Exception:
+            logger.exception(f"Failed to get saved facts")
+            return []
 
     def reasoning_effort(self) -> str:
         # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
