@@ -90,8 +90,9 @@ class ReadFileCallback(FunctionToolCallback):
 
 class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
     def __init__(self, user_context: PersonContext, search_client: SearchClient):
-        self.user_context = user_context
+        self.saved_facts = []
         self.search_client = search_client
+        self.user_context = user_context
 
     async def call(self, arguments: str, call_id: str) -> None:
         try:
@@ -109,7 +110,10 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                     if candidate.casefold() not in existing_fact_texts
                 ]
                 # TODO: Additional dedupe via semantic similarity or another pass with an LLM (offline?)
-                await self.search_client.index_facts([f"user_{self.user_context.user_id}"], candidates_after_exact_dedupe)
+                self.saved_facts = await self.search_client.index_facts(
+                    [f"user_{self.user_context.user_id}"],
+                    candidates_after_exact_dedupe,
+                )
             else:
                 logging.warning(f"Missing or empty facts in {arguments} (user {self.user_context.user_id})")
         except Exception:

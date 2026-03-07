@@ -11,6 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from typing import (
     Any,
     AsyncGenerator,
+    Coroutine,
 )
 
 from prokaryotes.callbacks_v1 import (
@@ -27,7 +28,10 @@ from prokaryotes.models_v1 import (
     TextEmbeddingPrompt,
     TextEmbeddingRequest,
 )
-from prokaryotes.observers_v1 import get_observers
+from prokaryotes.observers_v1 import (
+    TopicClassifyingObserver,
+    UserFactsSavingObserver,
+)
 from prokaryotes.search_v1 import (
     PersonContext,
     SearchClient,
@@ -87,6 +91,10 @@ class ProkaryoteV1(ProkaryotesBase):
         """Chat completion."""
         if len(request.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
+
+        topic_observer = TopicClassifyingObserver(self.llm_client)
+        topic_observer.observe_in_background(request.messages)
+
         request_context = RequestContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
         # TODO: When a completion is received, how do we look up direct predecessors if any, and other related
@@ -109,23 +117,14 @@ class ProkaryoteV1(ProkaryotesBase):
             match_emb=(emb_resp.embeddings[0] if emb_resp else None),
         )
 
-        for observer in get_observers(
-            request_context,
-            user_context,
-            self.graph_client,
-            self.llm_client,
-            self.search_client,
-        ):
-            observe_task = asyncio.create_task(observer.observe(request.messages))
-            self.background_tasks.add(observe_task)
-            observe_task.add_done_callback(log_async_task_exception)
-            observe_task.add_done_callback(self.background_tasks.discard)
+        user_fact_observer = UserFactsSavingObserver(request_context, user_context, self.llm_client, self.search_client)
+        user_fact_observer.observe_in_background(request.messages)
 
         context_window = [ChatMessage(role="developer", content=self.developer_message(request_context, user_context))]
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(request.messages)
         return StreamingResponse(
-            self.stream_and_index(
+            self.stream_and_finalize(
                 user_context.user_id,
                 context_window,
                 self.llm_client.stream_response(
@@ -133,7 +132,9 @@ class ProkaryoteV1(ProkaryotesBase):
                     reasoning_effort=reasoning_effort,
                     tool_callbacks=self.tools_callbacks,
                     tool_params=self.tools_params,
-                )
+                ),
+                topic_observer,
+                user_fact_observer,
             ),
             media_type="text/event-stream",
         )
@@ -152,6 +153,34 @@ class ProkaryoteV1(ProkaryotesBase):
         logger.info(f"Foreground developer message:\n{message}")
         return message
 
+    async def finalize(
+            self,
+            user_id: int,
+            messages: list[ChatMessage],
+            topic_observer: TopicClassifyingObserver,
+            user_fact_observer: UserFactsSavingObserver,
+            error: str = None
+    ):
+        topics = await topic_observer.get_topics()
+        completion = await self.search_client.index_chat_completion(
+            topics, [f"user_{user_id}"], messages,
+            error=error,
+        )
+
+        if completion and topics:
+            await self.graph_client.create_topic_to_completion_edge(completion, topics)
+
+        # TODO: This needs to be awaited
+        saved_facts = user_fact_observer.get_saved_facts()
+        if completion and saved_facts:
+            await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
+
+    def fire_and_forget(self, coro: Coroutine):
+        bg_task = asyncio.create_task(coro)
+        self.background_tasks.add(bg_task)
+        bg_task.add_done_callback(log_async_task_exception)
+        bg_task.add_done_callback(self.background_tasks.discard)
+
     def get_static_dir(self) -> str:
         return self.static_dir
 
@@ -167,14 +196,16 @@ class ProkaryoteV1(ProkaryotesBase):
         await self.search_client.close()
         logger.info("Exiting lifespan")
 
-    async def stream_and_index(
+    async def stream_and_finalize(
             self,
             user_id: int,
             messages: list[ChatMessage],
             response_generator: AsyncGenerator[str, Any],
+            topic_observer: TopicClassifyingObserver,
+            user_fact_observer: UserFactsSavingObserver,
     ) -> AsyncGenerator[str, Any]:
         error = None
-        indexed_messages = [msg for msg in messages if msg.role != "developer"]
+        messages_to_index = [msg for msg in messages if msg.role != "developer"]
         response_text = ""
         try:
             async for chunk in response_generator:
@@ -184,12 +215,11 @@ class ProkaryoteV1(ProkaryotesBase):
             error = str(e)
             raise
         finally:
-            indexing_task = asyncio.create_task(
-                self.search_client.index_chat_completion(
-                    error=error,
-                    labels=[f"user_{user_id}"],
-                    messages=(indexed_messages + [ChatMessage(role="assistant", content=response_text)]),
-                )
-            )
-            self.background_tasks.add(indexing_task)
-            indexing_task.add_done_callback(self.background_tasks.discard)
+            messages_to_index.append(ChatMessage(role="assistant", content=response_text))
+            self.fire_and_forget(self.finalize(
+                user_id,
+                messages_to_index,
+                topic_observer,
+                user_fact_observer,
+                error=error
+            ))

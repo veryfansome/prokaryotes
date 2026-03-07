@@ -95,11 +95,19 @@ class SearchClient:
     def __init__(self, es: AsyncElasticsearch = get_elastic_search()):
         self.es = es
 
-    async def index_chat_completion(self, labels: list[str], messages: list[ChatMessage], error: str = None):
+    async def index_chat_completion(
+            self,
+            about: list[str],
+            labels: list[str],
+            messages: list[ChatMessage],
+            error: str = None,
+    ) -> ChatCompletionDoc | None:
         created_at = datetime.now(timezone.utc)
-        doc = ChatCompletionDoc(about=[], created_at=created_at, error=error, labels=labels, messages=messages)
+        doc = ChatCompletionDoc(about=about, created_at=created_at, error=error, labels=labels, messages=messages)
         try:
-            await self.es.index(index="chat-completions", document=doc.model_dump())
+            result = await self.es.index(index="chat-completions", document=doc.model_dump())
+            doc.doc_id = result["_id"]
+            return doc
         except Exception:
             logger.exception(f"Failed to index {doc}")
 
@@ -119,6 +127,9 @@ class SearchClient:
             if isinstance(result, Exception):
                 logger.error(f"Failed to index {facts[idx]}", exc_info=result)
                 # TODO: Retry?
+            else:
+                facts[idx].doc_id = result["_id"]
+        return facts
 
     async def search_facts(self, about: str, match: str = None, match_emb: list[float] = None) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
@@ -188,7 +199,9 @@ class SearchClient:
         response = await self.es.search(**search_kwargs)
         hits = response["hits"]["hits"]
         for h in hits:
-            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {h['_source'].get('text')[:50]}...")
+            text = h['_source'].get('text')
+            displayed_text = text if len(text) <= 50 else (text[:50] + "...")
+            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}...")
         return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
 
     async def get_user_context(self, user_id: int, match: str = None, match_emb: list[float] = None) -> PersonContext:

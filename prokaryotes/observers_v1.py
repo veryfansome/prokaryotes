@@ -1,8 +1,7 @@
+import asyncio
+import json
 import logging
-from abc import (
-    ABC,
-    abstractmethod,
-)
+from abc import ABC
 from openai.types.responses import (
     FunctionToolParam as OpenAIFunctionToolParam,
     ResponseFormatTextJSONSchemaConfigParam as OpenAIResponseFormatTextJSONSchemaParam,
@@ -10,29 +9,33 @@ from openai.types.responses import (
 )
 
 from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
-from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import (
     FunctionToolCallback,
     LLMClient,
 )
 from prokaryotes.models_v1 import (
     ChatMessage,
+    FactDoc,
     RequestContext,
 )
 from prokaryotes.search_v1 import (
     PersonContext,
     SearchClient,
 )
-from prokaryotes.utils import developer_message_parts
+from prokaryotes.utils import (
+    developer_message_parts,
+    log_async_task_exception,
+)
 
 logger = logging.getLogger(__name__)
 
 class Observer(ABC):
     def __init__(self, llm_client: LLMClient, model: str = "gpt-5.1"):
+        self.bg_task = None
         self.llm_client = llm_client
         self.model = model
+        self.response_text = ""
 
-    @abstractmethod
     def developer_message(self) -> str | None:
         pass
 
@@ -45,7 +48,6 @@ class Observer(ABC):
         # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(messages)
 
-        response_text = ""
         async for chunk in self.llm_client.stream_response(
                 context_window, self.model,
                 reasoning_effort=self.reasoning_effort(),
@@ -53,24 +55,70 @@ class Observer(ABC):
                 tool_callbacks=self.tool_callbacks(),
                 tool_params=self.tool_params(),
         ):
-            response_text += chunk
-        logger.info(f"{self.__class__.__name__} response text: {response_text}")
+            self.response_text += chunk
+        logger.info(f"{self.__class__.__name__} response text: {self.response_text}")
 
-    @abstractmethod
+    def observe_in_background(self, messages: list[ChatMessage]):
+        self.bg_task = asyncio.create_task(self.observe(messages))
+        self.bg_task.add_done_callback(log_async_task_exception)
+
     def reasoning_effort(self) -> str:
         return "none"
 
-    @abstractmethod
     def text_param(self) -> OpenAIResponseTextConfigParam:
         return OpenAIResponseTextConfigParam(verbosity="low")
 
-    @abstractmethod
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {}
 
-    @abstractmethod
     def tool_params(self) -> list[OpenAIFunctionToolParam]:
         return []
+
+class TopicClassifyingObserver(Observer):
+    def __init__(self, llm_client: LLMClient, **kwargs):
+        super().__init__(llm_client, **kwargs)
+
+    def developer_message(self) -> str | None:
+        message_parts = [
+            "---",
+            "## Assistant instructions",
+            (
+                "Consider the most recently received message."
+                " Pick 1-3 words (or phrases) that best conveys the current topic."
+            ),
+        ]
+        return "\n".join(message_parts)
+
+    async def get_topics(self) -> list[str]:
+        try:
+            await self.bg_task
+            data = json.loads(self.response_text)
+            return data["topic_words"]
+        except Exception:
+            logger.exception(f"Failed to get topic words from '{self.response_text}'")
+            return []
+
+    def text_param(self) -> OpenAIResponseTextConfigParam:
+        return OpenAIResponseTextConfigParam(
+            format=OpenAIResponseFormatTextJSONSchemaParam(
+                name="topic_words",
+                type="json_schema",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "topic_words": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "A flat list of topic words or phrases.",
+                        },
+                    },
+                    "additionalProperties": False,
+                    "required": ["topic_words"],
+                },
+                strict=True,
+            ),
+            verbosity="low",
+        )
 
 class UserFactsSavingObserver(Observer):
     def __init__(
@@ -82,8 +130,8 @@ class UserFactsSavingObserver(Observer):
             **kwargs
     ):
         super().__init__(llm_client, **kwargs)
+        self.callback = SaveUserFactsFunctionToolCallback(user_context, search_client)
         self.request_context = request_context
-        self.search_client = search_client
         self.user_context = user_context
 
     def developer_message(self) -> str | None:
@@ -102,6 +150,9 @@ class UserFactsSavingObserver(Observer):
                 " call the `save_user_facts` function tool to add this information to the \"User info\" section."
             )
         return "\n".join(message_parts)
+
+    def get_saved_facts(self) -> list[FactDoc]:
+        return self.callback.saved_facts
 
     def reasoning_effort(self) -> str:
         # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
@@ -135,9 +186,7 @@ class UserFactsSavingObserver(Observer):
         ))
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
-        return {
-            "save_user_facts": SaveUserFactsFunctionToolCallback(self.user_context, self.search_client)
-        }
+        return {"save_user_facts": self.callback}
 
     def tool_params(self) -> list[OpenAIFunctionToolParam]:
         return [
@@ -201,14 +250,3 @@ class UserQuestionsSavingObserver(Observer):
 
     def tool_params(self) -> list[OpenAIFunctionToolParam]:
         return []
-
-def get_observers(
-        request_context: RequestContext,
-        user_context: PersonContext,
-        graph_client: GraphClient,
-        llm_client: LLMClient,
-        search_client: SearchClient,
-) -> list[Observer]:
-    return [
-        UserFactsSavingObserver(request_context, user_context, llm_client, search_client),
-    ]
