@@ -22,7 +22,7 @@ from prokaryotes.utils import log_future_exception
 
 logger = logging.getLogger(__name__)
 
-CONNECTION_ERRORS = (ConnectionError, imaplib.IMAP4.abort, ssl.SSLError)
+CONNECTION_ERRORS = (ConnectionError, imaplib.IMAP4.abort, imaplib.IMAP4.error, ssl.SSLError)
 
 class ControlSignalType(Enum):
     EXISTS = 1
@@ -153,12 +153,15 @@ class IngestController:
                         # Restart IDLE periodically
                         if time.monotonic() - time_started > idle_restart_seconds:
                             logger.info(f"Refreshing idle connection")
-                            client.idle_done()
+                            _, trailing = client.idle_done()
+                            if trailing:
+                                logger.info(f"Trailing responses after idle_done: {trailing}")
                             client.idle()
                             time_started = time.monotonic()
             except CONNECTION_ERRORS:
                 logger.exception("Connection error, reconnecting")
                 self.idle_manager_client = None
+                time.sleep(1)  # Small backoff
 
     def run_worker(self, idx: int, queue_get_timeout: int = 60 * 4):
         while not self.stop_event.is_set():
