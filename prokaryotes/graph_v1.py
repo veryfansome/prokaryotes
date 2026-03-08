@@ -33,7 +33,7 @@ class GraphClient:
         UNWIND $input_structs AS input_struct
         MERGE (c:ChatCompletion {doc_id: input_struct.completion_id})
         WITH input_struct, c
-        MERGE (f:FactDoc {doc_id: input_struct.fact_id})
+        MERGE (f:Fact {doc_id: input_struct.fact_id})
         SET f.text = input_struct.fact_text
         WITH c, f
         MERGE (f)-[:LEARNED_FROM]->(c)

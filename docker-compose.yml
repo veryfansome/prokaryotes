@@ -4,6 +4,8 @@ networks:
 volumes:
   elastic-data: {}
   neo4j-data: {}
+  postgres-data: {}
+  redis-data: {}
 
 services:
 
@@ -31,16 +33,80 @@ services:
   neo4j:
     networks: [prokaryotes]
     container_name: prokaryotes-neo4j
-    image: neo4j:latest
+    image: neo4j:4.4
     ports:
-      - "7474:7474" # HTTP
-      - "7687:7687" # Bolt
+      - "7474:7474"
+      - "7687:7687"
     volumes:
       - neo4j-data:/data
     environment:
-      NEO4J_AUTH: &neo4j-auth neo4j/${NEO4J_PASSWORD:-Ma9icMicr0be}
+      NEO4J_AUTH: &neo4j-auth neo4j/Ma9icMicr0be
     healthcheck:
       test: [ "CMD", "wget", "-q", "-t=1", "http://localhost:7474" ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    stop_grace_period: 1m
+
+  neo4j-migrate:
+    networks: [prokaryotes]
+    container_name: prokaryotes-neo4j-migrate
+    image: migrate/migrate:latest
+    volumes:
+      - ./database/neo4j:/migrations
+    command: [
+      "-path=/migrations/",
+      "-database=neo4j://neo4j:Ma9icMicr0be@prokaryotes-neo4j:7687/neo4j?x-multi-statement=true",
+      "up",
+    ]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  postgres:
+    networks: [prokaryotes]
+    container_name: prokaryotes-postgres
+    image: postgres:18-alpine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    environment:
+      POSTGRES_DB: prokaryotes
+      POSTGRES_PASSWORD: &pg-password Ma9icMicr0be
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "postgres" ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    stop_grace_period: 1m
+
+  postgres-migrate:
+    networks: [prokaryotes]
+    container_name: prokaryotes-postgres-migrate
+    image: migrate/migrate:latest
+    volumes:
+      - ./database/postgres:/migrations
+    command: [
+      "-path=/migrations/",
+      "-database=postgresql://postgres:Ma9icMicr0be@prokaryotes-postgres:5432/prokaryotes?sslmode=disable",
+      "up",
+    ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:latest
+    container_name: prokaryotes-redis
+    ports:
+      - "6379:6379"
+    restart: always
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 3s
       timeout: 2s
       retries: 20
@@ -72,6 +138,7 @@ services:
     networks: [prokaryotes]
     container_name: prokaryotes-elasticsearch-init
     image: "prokaryotes:latest"
+    pull_policy: build
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
@@ -87,6 +154,7 @@ services:
     container_name: prokaryotes-emb
     networks: [prokaryotes]
     image: "prokaryotes:latest"
+    pull_policy: build
     ports:
       - "8001:8001" # HTTP
     working_dir: /app
@@ -99,12 +167,12 @@ services:
     depends_on:
       unit-tests:
         condition: service_completed_successfully
-    stop_grace_period: 1m
 
   imap-ingest:
     container_name: prokaryotes-imap-ingest
     networks: [prokaryotes]
     image: "prokaryotes:latest"
+    pull_policy: build
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
@@ -117,8 +185,6 @@ services:
     depends_on:
       elasticsearch-init:
         condition: service_completed_successfully
-      neo4j:
-        condition: service_healthy
       unit-tests:
         condition: service_completed_successfully
 
@@ -126,6 +192,7 @@ services:
     container_name: prokaryotes-web
     networks: [prokaryotes]
     image: "prokaryotes:latest"
+    pull_policy: build
     ports:
       - "8000:8000" # HTTP
     working_dir: /app
@@ -135,9 +202,19 @@ services:
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
+      elasticsearch:
+        condition: service_healthy
       elasticsearch-init:
         condition: service_completed_successfully
       neo4j:
+        condition: service_healthy
+      neo4j-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
+      redis:
         condition: service_healthy
       unit-tests:
         condition: service_completed_successfully
