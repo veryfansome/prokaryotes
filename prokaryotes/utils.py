@@ -55,10 +55,7 @@ def get_cache_dir():
 
 async def get_text_embeddings(req: TextEmbeddingRequest):
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            os.getenv("EMBEDDING_SERVICE_URL", "http://prokaryotes-emb:8001/embs"),
-            json=req.model_dump(mode="json"),
-        )
+        resp = await client.post(os.getenv("EMBEDDING_SERVICE_URL"), json=req.model_dump(mode="json"))
         resp.raise_for_status()
         return TextEmbeddingResponse.model_validate(resp.json())
 

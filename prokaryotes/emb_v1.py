@@ -10,11 +10,10 @@ from prokaryotes.models_v1 import (
     TextEmbeddingRequest,
     TextEmbeddingResponse,
 )
-from prokaryotes.web_base import WebBase
 
 logger = logging.getLogger(__name__)
 
-class EmbeddingV1(WebBase):
+class EmbeddingV1:
     def __init__(self, emb_model_name: str):
         self.emb_model: SentenceTransformer | None = None
         self.emb_model_name = emb_model_name
@@ -47,6 +46,10 @@ class EmbeddingV1(WebBase):
     async def lifespan(self, app: FastAPI):
         logger.info("Initializing models")
         await run_in_threadpool(self.load_emb_model)
+        await run_in_threadpool(self.embs, TextEmbeddingRequest(
+            prompt=TextEmbeddingPrompt.QUERY,
+            texts=["Hello, world!"],
+        ))
         yield
 
     def load_emb_model(self):

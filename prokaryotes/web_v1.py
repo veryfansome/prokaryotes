@@ -1,8 +1,5 @@
-import asyncio
 import logging
-from contextlib import asynccontextmanager
 from fastapi import (
-    FastAPI,
     HTTPException,
     Query,
 )
@@ -11,7 +8,6 @@ from starlette.concurrency import run_in_threadpool
 from typing import (
     Any,
     AsyncGenerator,
-    Coroutine,
 )
 
 from prokaryotes.callbacks_v1 import (
@@ -45,22 +41,17 @@ from prokaryotes.tool_params_v1 import (
 from prokaryotes.utils import (
     developer_message_parts,
     get_text_embeddings,
-    log_async_task_exception,
     prep_chat_message_text_for_search,
 )
-from prokaryotes.web_base import ProkaryotesBase
+from prokaryotes.web_base import WebBase
 
 logger = logging.getLogger(__name__)
 
-class ProkaryoteV1(ProkaryotesBase):
+class ProkaryoteV1(WebBase):
     def __init__(self, static_dir: str):
         self.graph_client = GraphClient()
         self.llm_client = get_llm_client()
         self.search_client = SearchClient()
-
-        self.background_tasks: set[asyncio.Task] = set()
-        self.static_dir = static_dir
-
         self.tools_callbacks = {
             list_directory_tool_param["name"]: ListDirectoryCallback(),
             read_file_tool_param["name"]: ReadFileCallback(),
@@ -73,11 +64,8 @@ class ProkaryoteV1(ProkaryotesBase):
             web_search_tool_param,
         ]
 
-        self.app = FastAPI(lifespan=self.lifespan)
-        self.app.add_api_route("/", self.root, methods=["GET"])
-        self.app.add_api_route("/logo.png", self.logo, methods=["GET"])
+        super().__init__(static_dir)
         self.app.add_api_route("/chat", self.chat, methods=["POST"])
-        self.app.add_api_route("/health", self.health, methods=["GET"])
 
     async def chat(
             self,
@@ -174,26 +162,12 @@ class ProkaryoteV1(ProkaryotesBase):
         if completion and saved_facts:
             await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
 
-    def fire_and_forget(self, coro: Coroutine):
-        bg_task = asyncio.create_task(coro)
-        self.background_tasks.add(bg_task)
-        bg_task.add_done_callback(log_async_task_exception)
-        bg_task.add_done_callback(self.background_tasks.discard)
+    async def on_start(self):
+        pass
 
-    def get_static_dir(self) -> str:
-        return self.static_dir
-
-    @asynccontextmanager
-    async def lifespan(self, app: FastAPI):
-        logger.info("Entering lifespan")
-        yield
-        if self.background_tasks:
-            done_task, pending_tasks = await asyncio.wait(self.background_tasks, timeout=30.0)
-            if pending_tasks:
-                logger.warning(f"Exiting with {len(pending_tasks)} tasks pending")
+    async def on_stop(self):
         await self.graph_client.close()
         await self.search_client.close()
-        logger.info("Exiting lifespan")
 
     async def stream_and_finalize(
             self,
@@ -215,7 +189,7 @@ class ProkaryoteV1(ProkaryotesBase):
             raise
         finally:
             messages_to_index.append(ChatMessage(role="assistant", content=response_text))
-            self.fire_and_forget(self.finalize(
+            self.background_and_forget(self.finalize(
                 user_id,
                 messages_to_index,
                 topic_observer,

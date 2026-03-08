@@ -176,10 +176,7 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
-    environment: &common-env
-      <<: *common-elastic-env
-      NEO4J_AUTH: *neo4j-auth
-      NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
+    environment: *common-elastic-env
     entrypoint: uv
     command: ["run", "python", "-m", "scripts.imap_ingest"]
     depends_on:
@@ -198,7 +195,12 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
-    environment: *common-env
+    environment:
+      <<: *common-elastic-env
+      EMBEDDING_SERVICE_URL: "http://prokaryotes-emb:8001/embs"
+      NEO4J_AUTH: *neo4j-auth
+      NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
+      REDIS_HOST: "prokaryotes-redis"
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
