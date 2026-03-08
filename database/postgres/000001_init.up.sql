@@ -23,11 +23,12 @@ CREATE TABLE chat_user (
       user_id               SMALLINT            NOT NULL GENERATED ALWAYS AS IDENTITY
     , dt_created            TIMESTAMPTZ         NOT NULL DEFAULT CURRENT_TIMESTAMP
     , dt_modified           TIMESTAMPTZ         NOT NULL DEFAULT CURRENT_TIMESTAMP
+    , email                 TEXT                NOT NULL
+    , full_name             TEXT                NOT NULL
     , password_hash         TEXT                NOT NULL
-    , user_name             TEXT                NOT NULL
     , PRIMARY KEY (user_id)
 )
 ;
-CREATE UNIQUE INDEX idx_chat_user_user_name     ON chat_user    USING btree (user_name);
+CREATE UNIQUE INDEX idx_chat_user_email         ON chat_user    USING btree (email);
 SELECT update_dt_modified_column('chat_user');
 COMMENT ON TABLE chat_user IS 'This table stores chat user records';

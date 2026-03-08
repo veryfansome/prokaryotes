@@ -12,18 +12,9 @@ from prokaryotes.models_v1 import (
 
 logger = logging.getLogger(__name__)
 
-def get_neo4j_driver() -> AsyncDriver:
-    neo4j_auth = os.environ.get("NEO4J_AUTH")
-    neo4j_uri = os.environ.get("NEO4J_URI")
-    if neo4j_auth and neo4j_uri:
-        neo4j_auth = neo4j_auth.split("/")
-        if len(neo4j_auth) == 2:
-            return AsyncGraphDatabase.driver(neo4j_uri, auth=(neo4j_auth[0], neo4j_auth[1]))
-    raise RuntimeError("Unable to initialize Neo4j driver")
-
 class GraphClient:
-    def __init__(self, driver: AsyncDriver = get_neo4j_driver()):
-        self.driver = driver
+    def __init__(self):
+        self.driver: AsyncDriver | None = None
 
     async def close(self):
         await self.driver.close()
@@ -71,3 +62,15 @@ class GraphClient:
                 return await session.execute_write(_edge)
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
+
+    def init_client(self):
+        self.driver = get_neo4j_driver()
+
+def get_neo4j_driver() -> AsyncDriver:
+    auth = os.environ.get("NEO4J_AUTH")
+    uri = os.environ.get("NEO4J_URI")
+    if auth and uri:
+        auth = auth.split("/")
+        if len(auth) == 2:
+            return AsyncGraphDatabase.driver(uri, auth=(auth[0], auth[1]))
+    raise RuntimeError("Unable to initialize Neo4j driver")

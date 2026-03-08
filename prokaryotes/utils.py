@@ -8,36 +8,39 @@ from bs4 import BeautifulSoup
 
 from prokaryotes.models_v1 import (
     PersonContext,
-    RequestContext,
+    ChatCompletionContext,
     TextEmbeddingRequest,
     TextEmbeddingResponse,
 )
 
 logger = logging.getLogger(__name__)
 
-def developer_message_parts(request_context: RequestContext, user_context: PersonContext) -> list[str]:
-    now = request_context.received_at.astimezone(tz=request_context.time_zone).strftime('%Y-%m-%d %H:%M')
+def developer_message_parts(completion_context: ChatCompletionContext, user_context: PersonContext) -> list[str]:
+    now = completion_context.received_at.astimezone(tz=completion_context.time_zone).strftime('%Y-%m-%d %H:%M')
     message_parts = [
         "## Execution context",
-        f"Time: {now} {request_context.time_zone}",
+        f"Time: {now} {completion_context.time_zone}",
         (
-            f"Environment: Python-{request_context.execution_context.python_version}"
-            f" / {request_context.execution_context.platform_short}"
+            f"Environment: Python-{completion_context.python_version}"
+            f" / {completion_context.platform_short}"
         ),
-        f"Working directory: {request_context.execution_context.cwd}",
+        f"Working directory: {completion_context.cwd}",
         "---",
         "## User info",
     ]
-    if request_context.latitude and request_context.longitude:
+    if completion_context.latitude and completion_context.longitude:
+        message_parts.append(
+            f"- {now}: The user's name is {user_context.name}"
+        )
         message_parts.append(
             f"- {now}: The user is at"
-            f" *lat: {request_context.latitude:.4f}, long: {request_context.longitude:.4f}*"
+            f" *lat: {completion_context.latitude:.4f}, long: {completion_context.longitude:.4f}*"
         )
     if user_context.facts:
         # TODO: Optional trimming if fact lists grow long
         for fact_doc in user_context.facts:
             message_parts.append(
-                f"- {fact_doc.created_at.astimezone(request_context.time_zone).strftime('%Y-%m-%d %H:%M')}"
+                f"- {fact_doc.created_at.astimezone(completion_context.time_zone).strftime('%Y-%m-%d %H:%M')}"
                 f": {fact_doc.text}"
             )
 
@@ -55,7 +58,7 @@ def get_cache_dir():
 
 async def get_text_embeddings(req: TextEmbeddingRequest):
     async with httpx.AsyncClient() as client:
-        resp = await client.post(os.getenv("EMBEDDING_SERVICE_URL"), json=req.model_dump(mode="json"))
+        resp = await client.post(os.getenv("EMBEDDINGS_URL"), json=req.model_dump(mode="json"))
         resp.raise_for_status()
         return TextEmbeddingResponse.model_validate(resp.json())
 

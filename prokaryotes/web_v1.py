@@ -2,9 +2,11 @@ import logging
 from fastapi import (
     HTTPException,
     Query,
+    Request,
 )
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from starsessions import load_session
 from typing import (
     Any,
     AsyncGenerator,
@@ -19,8 +21,8 @@ from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import get_llm_client
 from prokaryotes.models_v1 import (
     ChatMessage,
-    ChatRequest,
-    RequestContext,
+    ChatCompletionPayload,
+    ChatCompletionContext,
     TextEmbeddingPrompt,
     TextEmbeddingRequest,
 )
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 class ProkaryoteV1(WebBase):
     def __init__(self, static_dir: str):
+        super().__init__(static_dir)
         self.graph_client = GraphClient()
         self.llm_client = get_llm_client()
         self.search_client = SearchClient()
@@ -64,12 +67,10 @@ class ProkaryoteV1(WebBase):
             web_search_tool_param,
         ]
 
-        super().__init__(static_dir)
-        self.app.add_api_route("/chat", self.chat, methods=["POST"])
-
     async def chat(
             self,
-            request: ChatRequest,
+            request: Request,
+            payload: ChatCompletionPayload,
             latitude: float = Query(None),
             longitude: float = Query(None),
             model: str = Query("gpt-5.1"),
@@ -77,19 +78,21 @@ class ProkaryoteV1(WebBase):
             time_zone: str = Query(None),
     ):
         """Chat completion."""
-        if len(request.messages) == 0:
+        await load_session(request)
+        session = request.session
+        if not session:
+            raise HTTPException(status_code=400, detail="Session expired")
+
+        if len(payload.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
         topic_observer = TopicClassifyingObserver(self.llm_client)
-        topic_observer.observe_in_background(request.messages)
+        topic_observer.observe_in_background(payload.messages)
 
-        request_context = RequestContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
-
-        # TODO: When a completion is received, how do we look up direct predecessors if any, and other related
-        #       or similar completions? Maybe some signature that's included as a label when indexed?
+        completion_context = ChatCompletionContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
         search_query_text = await run_in_threadpool(
-            prep_chat_message_text_for_search, " ".join(m.content for m in request.messages if m.role == "user"),
+            prep_chat_message_text_for_search, " ".join(m.content for m in payload.messages if m.role == "user"),
         )
         logger.info(f"Search query text: {search_query_text}")
         emb_resp = None
@@ -100,17 +103,17 @@ class ProkaryoteV1(WebBase):
                 truncate_to=256,
             ))
         user_context = await self.search_client.get_user_context(
-            1, # TODO: Actually implement user_id
+            session["full_name"], session["user_id"],
             match=(search_query_text if search_query_text else None),
             match_emb=(emb_resp.embeddings[0] if emb_resp else None),
         )
 
-        user_fact_observer = UserFactsSavingObserver(request_context, user_context, self.llm_client, self.search_client)
-        user_fact_observer.observe_in_background(request.messages)
+        user_fact_observer = UserFactsSavingObserver(completion_context, user_context, self.llm_client, self.search_client)
+        user_fact_observer.observe_in_background(payload.messages)
 
-        context_window = [ChatMessage(role="developer", content=self.developer_message(request_context, user_context))]
+        context_window = [ChatMessage(role="developer", content=self.developer_message(completion_context, user_context))]
         # TODO: Roll long contexts off but in a way that can be recalled
-        context_window.extend(request.messages)
+        context_window.extend(payload.messages)
         return StreamingResponse(
             self.stream_and_finalize(
                 user_context.user_id,
@@ -128,8 +131,8 @@ class ProkaryoteV1(WebBase):
         )
 
     @classmethod
-    def developer_message(cls, request_context: RequestContext, user_context: PersonContext):
-        message_parts = developer_message_parts(request_context, user_context)
+    def developer_message(cls, completion_context: ChatCompletionContext, user_context: PersonContext):
+        message_parts = developer_message_parts(completion_context, user_context)
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         # TODO: Maybe this should be guided by user preferences
@@ -162,10 +165,19 @@ class ProkaryoteV1(WebBase):
         if completion and saved_facts:
             await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
 
+    def init(self):
+        """Synchronous setup steps"""
+        super().init()
+        self.graph_client.init_client()
+        self.search_client.init_client()
+        self.app.add_api_route("/chat", self.chat, methods=["POST"])
+
     async def on_start(self):
+        """Asynchronous setup steps"""
         pass
 
     async def on_stop(self):
+        """Asynchronous teardown steps"""
         await self.graph_client.close()
         await self.search_client.close()
 

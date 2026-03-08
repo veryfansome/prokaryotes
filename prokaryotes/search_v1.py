@@ -85,15 +85,9 @@ question_mappings = {
     }
 }
 
-def get_elastic_search() -> AsyncElasticsearch:
-    elastic_uri = os.environ.get("ELASTIC_URI")
-    if elastic_uri:
-        return AsyncElasticsearch(elastic_uri)
-    raise RuntimeError("Unable to initialize Elasticsearch client")
-
 class SearchClient:
-    def __init__(self, es: AsyncElasticsearch = get_elastic_search()):
-        self.es = es
+    def __init__(self):
+        self.es: AsyncElasticsearch | None = None
 
     async def index_chat_completion(
             self,
@@ -130,6 +124,9 @@ class SearchClient:
             else:
                 facts[idx].doc_id = result["_id"]
         return facts
+
+    def init_client(self):
+        self.es = get_elastic_search()
 
     async def search_facts(self, about: str, match: str = None, match_emb: list[float] = None) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
@@ -204,9 +201,21 @@ class SearchClient:
             logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}...")
         return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
 
-    async def get_user_context(self, user_id: int, match: str = None, match_emb: list[float] = None) -> PersonContext:
+    async def get_user_context(
+            self,
+            full_name: str,
+            user_id: int,
+            match: str = None,
+            match_emb: list[float] = None,
+    ) -> PersonContext:
         facts = await self.search_facts(f"user_{user_id}", match=match, match_emb=match_emb)
-        return PersonContext(facts=facts, questions=[], user_id=user_id)
+        return PersonContext(facts=facts, name=full_name, questions=[], user_id=user_id)
 
     async def close(self):
         await self.es.close()
+
+def get_elastic_search() -> AsyncElasticsearch:
+    uri = os.environ.get("ELASTIC_URI")
+    if uri:
+        return AsyncElasticsearch(uri)
+    raise RuntimeError("Unable to initialize Elasticsearch client")

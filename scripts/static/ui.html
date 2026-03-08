@@ -5,49 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Prokaryotes</title>
     <link rel="icon" type="image/png" href="/logo.png">
+    <link rel="stylesheet" href="/common.css">
     <style>
-        :root {
-            color-scheme: light;
-        }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, "Apple Color Emoji", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol";
-            background-color: #ffffff;
-            color: #111827;
-            min-height: 100dvh;
-            margin: 0;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .header {
-            background-color: #ffffff;
-            padding: 1.25rem 1.5rem;
-        }
-
-        .header-left {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
-
-        .header-logo {
-            height: 32px;
-            width: auto;
-        }
-
-        .header h1 {
-            font-size: 1.25rem;
-            font-weight: 600;
-            margin: 0;
-            color: #111827;
-        }
-
-        .new-conversation-btn {
+        .logout-btn {
             width: 32px;
             height: 32px;
             padding: 0;
@@ -60,9 +20,10 @@
             align-items: center;
             justify-content: center;
             transition: all 0.2s ease;
+            text-decoration: none;
         }
 
-        .new-conversation-btn:hover {
+        .logout-btn:hover {
             background-color: #f3f4f6;
             border-color: #d1d5db;
             color: #374151;
@@ -279,12 +240,13 @@
 <body>
     <div class="header">
         <div class="header-left">
-            <button class="new-conversation-btn" onclick="newConversation()" title="New Conversation (Ctrl+Shift+N)">
+            <a class="logout-btn" href="/logout" title="Log out" aria-label="Log out">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 5v14"></path>
-                    <path d="M5 12h14"></path>
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                    <path d="M16 17l5-5-5-5"></path>
+                    <path d="M21 12H9"></path>
                 </svg>
-            </button>
+            </a>
             <h1>prokaryotes</h1>
         </div>
     </div>
@@ -354,16 +316,6 @@
                 event.preventDefault();
                 sendMessage();
             }
-        }
-
-        function newConversation() {
-            messages = [];
-            chatWrapper.innerHTML = '';
-            chatInput.value = '';
-            chatInput.style.height = 'auto';
-            sendButton.disabled = false;
-            isGenerating = false;
-            chatInput.focus();
         }
 
         function addMessage(role, content, messageIndex = null) {
@@ -482,7 +434,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    const error = await response.json()
+                    const errorDetail = error?.detail || response.statusText
+                    throw new Error(`HTTP ${response.status} error: ${errorDetail}`);
                 }
 
                 const reader = response.body.getReader();
