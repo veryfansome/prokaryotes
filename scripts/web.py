@@ -7,3 +7,4 @@ load_dotenv()
 setup_logging()
 
 v1 = ProkaryoteV1("scripts/static")
+v1.init()

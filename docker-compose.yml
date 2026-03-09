@@ -40,7 +40,7 @@ services:
     volumes:
       - neo4j-data:/data
     environment:
-      NEO4J_AUTH: &neo4j-auth neo4j/Ma9icMicr0be
+      NEO4J_AUTH: neo4j/Ma9icMicr0be
     healthcheck:
       test: [ "CMD", "wget", "-q", "-t=1", "http://localhost:7474" ]
       interval: 3s
@@ -73,7 +73,7 @@ services:
       - postgres-data:/var/lib/postgresql
     environment:
       POSTGRES_DB: prokaryotes
-      POSTGRES_PASSWORD: &pg-password Ma9icMicr0be
+      POSTGRES_PASSWORD: Ma9icMicr0be
     healthcheck:
       test: [ "CMD", "pg_isready", "-U", "postgres" ]
       interval: 3s
@@ -97,8 +97,9 @@ services:
         condition: service_healthy
 
   redis:
-    image: redis:latest
+    networks: [prokaryotes]
     container_name: prokaryotes-redis
+    image: redis:latest
     ports:
       - "6379:6379"
     restart: always
@@ -142,8 +143,6 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
-    environment: &common-elastic-env
-      ELASTIC_URI: "http://prokaryotes-elasticsearch:9200"
     entrypoint: uv
     command: ["run", "python", "-m", "scripts.search_init"]
     depends_on:
@@ -151,14 +150,15 @@ services:
         condition: service_healthy
 
   emb:
-    container_name: prokaryotes-emb
     networks: [prokaryotes]
+    container_name: prokaryotes-emb
     image: "prokaryotes:latest"
     pull_policy: build
     ports:
       - "8001:8001" # HTTP
     working_dir: /app
     volumes:
+      - ./.env:/app/.env:ro
       - ~/.cache/huggingface:/root/.cache/huggingface:ro
       - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
     environment: *common-model-env
@@ -169,14 +169,13 @@ services:
         condition: service_completed_successfully
 
   imap-ingest:
-    container_name: prokaryotes-imap-ingest
     networks: [prokaryotes]
+    container_name: prokaryotes-imap-ingest
     image: "prokaryotes:latest"
     pull_policy: build
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
-    environment: *common-elastic-env
     entrypoint: uv
     command: ["run", "python", "-m", "scripts.imap_ingest"]
     depends_on:
@@ -186,8 +185,8 @@ services:
         condition: service_completed_successfully
 
   web:
-    container_name: prokaryotes-web
     networks: [prokaryotes]
+    container_name: prokaryotes-web
     image: "prokaryotes:latest"
     pull_policy: build
     ports:
@@ -195,12 +194,6 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
-    environment:
-      <<: *common-elastic-env
-      EMBEDDING_SERVICE_URL: "http://prokaryotes-emb:8001/embs"
-      NEO4J_AUTH: *neo4j-auth
-      NEO4J_URI: "bolt://prokaryotes-neo4j:7687"
-      REDIS_HOST: "prokaryotes-redis"
     entrypoint: uv
     command: ["run", "uvicorn", "scripts.web:v1.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:

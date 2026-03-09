@@ -5,6 +5,7 @@ description = "Denizens of the primoridal soup"
 requires-python = ">=3.12"
 dependencies = [
     "aiofiles",
+    "asyncpg",
     "bcrypt",
     "beautifulsoup4",
     "certifi",
@@ -17,9 +18,9 @@ dependencies = [
     "neo4j",
     "openai",
     "python-dotenv",
+    "python-multipart",
     "redis",
     "sentence-transformers",
-    "sqlalchemy[asyncio]",
     "starsessions[redis]",
     "uvicorn",
 ]
