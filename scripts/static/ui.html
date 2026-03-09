@@ -302,6 +302,7 @@
         const chatInput = document.getElementById('chatInput');
         const sendButton = document.getElementById('sendButton');
 
+        let conversation = '';
         let messages = [];
         let isGenerating = false;
 
@@ -429,6 +430,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
+                        conversation: conversation,
                         messages: messages,
                     }),
                 });
@@ -506,14 +508,15 @@
         // Autofocus the chat input on page load
         chatInput.focus();
 
-        fetch(`${apiUrl}/health`)
+        fetch(`${apiUrl}/conversation`)
             .then(response => response.json())
             .then(data => {
-                console.log('Engine status:', data);
+                console.log('Conversation:', data);
+                conversation = data["conversation"]
             })
             .catch(error => {
-                console.error('Engine not available:', error);
-                chatWrapper.innerHTML = '<div class="error-message">Engine not running. Please start engine.py first.</div>';
+                console.error('Service not available:', error);
+                chatWrapper.innerHTML = '<div class="error-message">Service not available.</div>';
             });
     </script>
 </body>

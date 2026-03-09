@@ -1,4 +1,5 @@
 import logging
+import uuid
 from fastapi import (
     HTTPException,
     Query,
@@ -67,7 +68,74 @@ class ProkaryoteV1(WebBase):
             web_search_tool_param,
         ]
 
-    async def chat(
+    @classmethod
+    def developer_message(cls, completion_context: ChatCompletionContext, user_context: PersonContext):
+        message_parts = developer_message_parts(completion_context, user_context)
+        message_parts.append("---")
+        message_parts.append("## Assistant instructions")
+        # TODO: Maybe this should be guided by user preferences
+        message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
+        message_parts.append("- Don't offer platitudes or untruths.")
+        message_parts.append("- Don't project confidence when you are uncertain.")
+
+        message = "\n".join(message_parts)
+        logger.info(f"Foreground developer message:\n{message}")
+        return message
+
+    async def finalize(
+            self,
+            user_id: int,
+            conversation: str,
+            messages: list[ChatMessage],
+            topic_observer: TopicClassifyingObserver,
+            user_fact_observer: UserFactsSavingObserver,
+            error: str = None
+    ):
+        topics = await topic_observer.get_topics()
+        completion = await self.search_client.index_chat_completion(
+            topics,
+            [
+                # TODO: Add conversation as node to graph?
+                f"conversation_{conversation}",
+                f"user_{user_id}",
+            ],
+            messages,
+            error=error,
+        )
+
+        if completion and topics:
+            await self.graph_client.create_topic_to_completion_edge(completion, topics)
+
+        saved_facts = await user_fact_observer.get_saved_facts()
+        if completion and saved_facts:
+            await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
+
+    @classmethod
+    async def get_conversation(cls, request: Request):
+        await load_session(request)
+        session = request.session
+        if not session:
+            raise HTTPException(status_code=400, detail="Session expired")
+        return {"conversation": uuid.uuid4()}
+
+    def init(self):
+        """Synchronous setup steps"""
+        super().init()
+        self.graph_client.init_client()
+        self.search_client.init_client()
+        self.app.add_api_route("/chat", self.post_chat, methods=["POST"])
+        self.app.add_api_route("/conversation", self.get_conversation, methods=["GET"])
+
+    async def on_start(self):
+        """Asynchronous setup steps"""
+        pass
+
+    async def on_stop(self):
+        """Asynchronous teardown steps"""
+        await self.graph_client.close()
+        await self.search_client.close()
+
+    async def post_chat(
             self,
             request: Request,
             payload: ChatCompletionPayload,
@@ -90,6 +158,11 @@ class ProkaryoteV1(WebBase):
         topic_observer.observe_in_background(payload.messages)
 
         completion_context = ChatCompletionContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
+
+        # TODO: Observer that identifies when a conversation reaches an inflection point and earlier parts can be
+        #       summarized and truncated.
+        # TODO: Way to identify a completion as one of a larger ongoing conversation
+        # TODO: Way to keep only the last completion of a conversation, and a small amount of related data, if any
 
         search_query_text = await run_in_threadpool(
             prep_chat_message_text_for_search, " ".join(m.content for m in payload.messages if m.role == "user"),
@@ -117,6 +190,7 @@ class ProkaryoteV1(WebBase):
         return StreamingResponse(
             self.stream_and_finalize(
                 user_context.user_id,
+                payload.conversation,
                 context_window,
                 self.llm_client.stream_response(
                     context_window, model,
@@ -130,60 +204,10 @@ class ProkaryoteV1(WebBase):
             media_type="text/event-stream",
         )
 
-    @classmethod
-    def developer_message(cls, completion_context: ChatCompletionContext, user_context: PersonContext):
-        message_parts = developer_message_parts(completion_context, user_context)
-        message_parts.append("---")
-        message_parts.append("## Assistant instructions")
-        # TODO: Maybe this should be guided by user preferences
-        message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
-        message_parts.append("- Don't offer platitudes or untruths.")
-        message_parts.append("- Don't project confidence when you are uncertain.")
-
-        message = "\n".join(message_parts)
-        logger.info(f"Foreground developer message:\n{message}")
-        return message
-
-    async def finalize(
-            self,
-            user_id: int,
-            messages: list[ChatMessage],
-            topic_observer: TopicClassifyingObserver,
-            user_fact_observer: UserFactsSavingObserver,
-            error: str = None
-    ):
-        topics = await topic_observer.get_topics()
-        completion = await self.search_client.index_chat_completion(
-            topics, [f"user_{user_id}"], messages,
-            error=error,
-        )
-
-        if completion and topics:
-            await self.graph_client.create_topic_to_completion_edge(completion, topics)
-
-        saved_facts = await user_fact_observer.get_saved_facts()
-        if completion and saved_facts:
-            await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
-
-    def init(self):
-        """Synchronous setup steps"""
-        super().init()
-        self.graph_client.init_client()
-        self.search_client.init_client()
-        self.app.add_api_route("/chat", self.chat, methods=["POST"])
-
-    async def on_start(self):
-        """Asynchronous setup steps"""
-        pass
-
-    async def on_stop(self):
-        """Asynchronous teardown steps"""
-        await self.graph_client.close()
-        await self.search_client.close()
-
     async def stream_and_finalize(
             self,
             user_id: int,
+            conversation: str,
             messages: list[ChatMessage],
             response_generator: AsyncGenerator[str, Any],
             topic_observer: TopicClassifyingObserver,
@@ -203,6 +227,7 @@ class ProkaryoteV1(WebBase):
             messages_to_index.append(ChatMessage(role="assistant", content=response_text))
             self.background_and_forget(self.finalize(
                 user_id,
+                conversation,
                 messages_to_index,
                 topic_observer,
                 user_fact_observer,
