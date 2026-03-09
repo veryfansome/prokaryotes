@@ -35,6 +35,7 @@ class ChatCompletionDoc(BaseModel):
     messages: list[ChatMessage]
 
 class ChatCompletionPayload(BaseModel):
+    conversation: str
     messages: list[ChatMessage]
 
 class ChatMessage(BaseModel):

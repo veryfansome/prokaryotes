@@ -119,10 +119,10 @@ class WebBase:
         self.app.add_api_route("/common.css", self.get_common_css, methods=["GET"], include_in_schema=False)
         self.app.add_api_route("/health", self.get_health, methods=["GET"], include_in_schema=False)
         self.app.add_api_route("/login", self.get_login, methods=["GET"], include_in_schema=False)
-        self.app.add_api_route("/logout", self.get_logout, methods=["GET"], include_in_schema=False)
-        self.app.add_api_route("/logo.png", self.get_logo, methods=["GET"], include_in_schema=False)
-        self.app.add_api_route("/register", self.get_register, methods=["GET"], include_in_schema=False)
         self.app.add_api_route("/login", self.post_login, methods=["POST"])
+        self.app.add_api_route("/logo.png", self.get_logo, methods=["GET"], include_in_schema=False)
+        self.app.add_api_route("/logout", self.get_logout, methods=["GET"], include_in_schema=False)
+        self.app.add_api_route("/register", self.get_register, methods=["GET"], include_in_schema=False)
         self.app.add_api_route("/register", self.post_register, methods=["POST"])
 
     @asynccontextmanager
