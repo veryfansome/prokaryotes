@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from fastapi import (
@@ -86,7 +87,9 @@ class ProkaryoteV1(WebBase):
             self,
             user_id: int,
             conversation: str,
-            messages: list[ChatMessage],
+            completion: str,
+            payload_messages: list[ChatMessage],
+            generated_response: str,
             topic_observer: TopicClassifyingObserver,
             user_fact_observer: UserFactsSavingObserver,
             error: str = None
@@ -99,7 +102,7 @@ class ProkaryoteV1(WebBase):
                 f"conversation_{conversation}",
                 f"user_{user_id}",
             ],
-            messages,
+            payload_messages,
             error=error,
         )
 
@@ -161,8 +164,15 @@ class ProkaryoteV1(WebBase):
 
         # TODO: Observer that identifies when a conversation reaches an inflection point and earlier parts can be
         #       summarized and truncated.
-        # TODO: Way to identify a completion as one of a larger ongoing conversation
-        # TODO: Way to keep only the last completion of a conversation, and a small amount of related data, if any
+        # TODO: Way to truncate completions in a way that preserves context but saves tokens.
+        # NOTE: User keeps and sends the full conversation with all messages so any truncation is server side only.
+        #       This means when a completion is received, we need to efficiently retrieve the truncated view of that
+        #       conversation to do the actual LLM completion.
+        # NOTE: Alternatively, we could truncate aggressively and just rely on facts.
+
+        # payload arrives                       >
+        #                                       <   assistant responds, returns UUID, and save a summary
+        # next payload includes previous UUID   >
 
         search_query_text = await run_in_threadpool(
             prep_chat_message_text_for_search, " ".join(m.content for m in payload.messages if m.role == "user"),
@@ -185,13 +195,12 @@ class ProkaryoteV1(WebBase):
         user_fact_observer.observe_in_background(payload.messages)
 
         context_window = [ChatMessage(role="developer", content=self.developer_message(completion_context, user_context))]
-        # TODO: Roll long contexts off but in a way that can be recalled
         context_window.extend(payload.messages)
         return StreamingResponse(
             self.stream_and_finalize(
                 user_context.user_id,
                 payload.conversation,
-                context_window,
+                payload.messages,
                 self.llm_client.stream_response(
                     context_window, model,
                     reasoning_effort=reasoning_effort,
@@ -208,27 +217,30 @@ class ProkaryoteV1(WebBase):
             self,
             user_id: int,
             conversation: str,
-            messages: list[ChatMessage],
+            payload_messages: list[ChatMessage],
             response_generator: AsyncGenerator[str, Any],
             topic_observer: TopicClassifyingObserver,
             user_fact_observer: UserFactsSavingObserver,
     ) -> AsyncGenerator[str, Any]:
+        completion = str(uuid.uuid4())
+        yield json.dumps({"completion": completion}) + "\n"
+
         error = None
-        messages_to_index = [msg for msg in messages if msg.role != "developer"]
-        response_text = ""
+        generated_response = ""
         try:
             async for chunk in response_generator:
-                response_text += chunk
-                yield chunk
+                generated_response += chunk
+                yield json.dumps({"chunk": chunk}) + "\n"
         except Exception as e:
             error = str(e)
             raise
         finally:
-            messages_to_index.append(ChatMessage(role="assistant", content=response_text))
             self.background_and_forget(self.finalize(
                 user_id,
                 conversation,
-                messages_to_index,
+                completion,
+                payload_messages,
+                generated_response,
                 topic_observer,
                 user_fact_observer,
                 error=error
