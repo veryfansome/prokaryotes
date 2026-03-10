@@ -302,7 +302,7 @@
         const chatInput = document.getElementById('chatInput');
         const sendButton = document.getElementById('sendButton');
 
-        let conversation = '';
+        let conversation_uuid = '';
         let messages = [];
         let isGenerating = false;
 
@@ -430,7 +430,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        conversation: conversation,
+                        conversation_uuid: conversation_uuid,
                         messages: messages,
                     }),
                 });
@@ -463,8 +463,8 @@
                         fullResponse += payload['chunk'];
                         assistantContent.textContent = fullResponse;
                         chatContainer.scrollTop = chatContainer.scrollHeight;
-                    } else if ('completion' in payload) {
-                        console.log('Completion:', payload);
+                    } else if ('prompt_uuid' in payload) {
+                        console.log('Prompt:', payload);
                     }
                 };
 
@@ -543,7 +543,7 @@
             .then(response => response.json())
             .then(data => {
                 console.log('Conversation:', data);
-                conversation = data["conversation"]
+                conversation_uuid = data["conversation_uuid"]
             })
             .catch(error => {
                 console.error('Service not available:', error);

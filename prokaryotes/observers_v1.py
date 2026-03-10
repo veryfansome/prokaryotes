@@ -16,7 +16,7 @@ from prokaryotes.llm_v1 import (
 from prokaryotes.models_v1 import (
     ChatMessage,
     FactDoc,
-    ChatCompletionContext,
+    PromptContext,
 )
 from prokaryotes.search_v1 import (
     PersonContext,
@@ -123,7 +123,7 @@ class TopicClassifyingObserver(Observer):
 class UserFactsSavingObserver(Observer):
     def __init__(
             self,
-            completion_context: ChatCompletionContext,
+            prompt_context: PromptContext,
             user_context: PersonContext,
             llm_client: LLMClient,
             search_client: SearchClient,
@@ -131,11 +131,11 @@ class UserFactsSavingObserver(Observer):
     ):
         super().__init__(llm_client, **kwargs)
         self.callback = SaveUserFactsFunctionToolCallback(user_context, search_client)
-        self.completion_context = completion_context
+        self.prompt_context = prompt_context
         self.user_context = user_context
 
     def developer_message(self) -> str | None:
-        message_parts = developer_message_parts(self.completion_context, self.user_context)
+        message_parts = developer_message_parts(self.prompt_context, self.user_context)
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         if self.user_context.facts:
@@ -229,14 +229,14 @@ class UserFactsSavingObserver(Observer):
 class UserQuestionsSavingObserver(Observer):
     def __init__(
             self,
-            completion_context: ChatCompletionContext,
+            prompt_context: PromptContext,
             user_context: PersonContext,
             llm_client: LLMClient,
             search_client: SearchClient,
             **kwargs
     ):
         super().__init__(llm_client, **kwargs)
-        self.completion_context = completion_context
+        self.prompt_context = prompt_context
         self.search_client = search_client
         self.user_context = user_context
 

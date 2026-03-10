@@ -11,33 +11,6 @@ from pydantic import (
 )
 from zoneinfo import ZoneInfo
 
-@dataclass(frozen=True)
-class ChatCompletionContext:
-    cwd: str = os.getcwd()
-    latitude: float = None
-    longitude: float = None
-    platform_short: str = platform.platform(terse=True)
-    python_version: str = platform.python_version()
-    received_at: datetime = datetime.now(timezone.utc)
-    time_zone: ZoneInfo = None
-
-    @classmethod
-    def new(cls, latitude: float, longitude: float, time_zone: str) -> ChatCompletionContext:
-        return cls(latitude=latitude, longitude=longitude, time_zone=ZoneInfo("UTC" if not time_zone else time_zone))
-
-class ChatCompletionDoc(BaseModel):
-    about: list[str]
-    created_at: datetime
-    doc_id: str | None = Field(default=None, exclude=True)
-    error: str | None = Field(default=None)
-    importance: int = 1
-    labels: list[str] = Field(default_factory=list)
-    messages: list[ChatMessage]
-
-class ChatCompletionPayload(BaseModel):
-    conversation: str
-    messages: list[ChatMessage]
-
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -57,6 +30,32 @@ class PersonContext(BaseModel):
     questions: list[QuestionDoc] = Field(default_factory=list)
     user_id: int | None = None
 
+class PromptPayload(BaseModel):
+    conversation_uuid: str
+    messages: list[ChatMessage]
+
+@dataclass(frozen=True)
+class PromptContext:
+    cwd: str = os.getcwd()
+    latitude: float = None
+    longitude: float = None
+    platform_short: str = platform.platform(terse=True)
+    python_version: str = platform.python_version()
+    received_at: datetime = datetime.now(timezone.utc)
+    time_zone: ZoneInfo = None
+
+    @classmethod
+    def new(cls, latitude: float, longitude: float, time_zone: str) -> PromptContext:
+        return cls(latitude=latitude, longitude=longitude, time_zone=ZoneInfo("UTC" if not time_zone else time_zone))
+
+class PromptDoc(BaseModel):
+    about: list[str]
+    created_at: datetime
+    doc_id: str | None = Field(default=None, exclude=True)
+    importance: int = 1
+    labels: list[str] = Field(default_factory=list)
+    messages: list[ChatMessage]
+
 class QuestionDoc(BaseModel):
     about: list[str]
     created_at: datetime
@@ -70,6 +69,15 @@ class QuestionDoc(BaseModel):
 class TextEmbeddingPrompt(Enum):
     DOCUMENT = "document"
     QUERY = "query"
+
+class ResponseDoc(BaseModel):
+    about: list[str]
+    created_at: datetime
+    doc_id: str | None = Field(default=None, exclude=True)
+    error: str | None = Field(default=None)
+    importance: int = 1
+    labels: list[str] = Field(default_factory=list)
+    text: str
 
 class TextEmbeddingRequest(BaseModel):
     batch_size: int = 1

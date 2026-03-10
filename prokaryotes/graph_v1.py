@@ -6,8 +6,9 @@ from neo4j import (
 )
 
 from prokaryotes.models_v1 import (
-    ChatCompletionDoc,
     FactDoc,
+    PromptDoc,
+    ResponseDoc,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,19 +20,19 @@ class GraphClient:
     async def close(self):
         await self.driver.close()
 
-    async def create_fact_to_completion_edge(self, completion: ChatCompletionDoc, facts: list[FactDoc]):
+    async def create_fact_to_prompt_edge(self, prompt: PromptDoc, facts: list[FactDoc]):
         cypher = """
         UNWIND $input_structs AS input_struct
-        MERGE (c:ChatCompletion {doc_id: input_struct.completion_id})
-        WITH input_struct, c
+        MERGE (p:Prompt {doc_id: input_struct.prompt_id})
+        WITH input_struct, p
         MERGE (f:Fact {doc_id: input_struct.fact_id})
         SET f.text = input_struct.fact_text
-        WITH c, f
-        MERGE (f)-[:LEARNED_FROM]->(c)
+        WITH p, f
+        MERGE (f)-[:LEARNED_FROM]->(p)
         """
         async def _edge(tx):
             input_structs = [{
-                'completion_id': completion.doc_id,
+                'prompt_id': prompt.doc_id,
                 'fact_id': fact.doc_id,
                 'fact_text': fact.text,
             } for fact in facts]
@@ -42,18 +43,39 @@ class GraphClient:
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
 
-    async def create_topic_to_completion_edge(self, completion: ChatCompletionDoc, topics: list[str]):
+    async def create_topic_to_prompt_edge(self, prompt: PromptDoc, topics: list[str]):
         cypher = """
         UNWIND $input_structs AS input_struct
-        MERGE (c:ChatCompletion {doc_id: input_struct.completion_id})
-        WITH input_struct, c
+        MERGE (p:Prompt {doc_id: input_struct.prompt_id})
+        WITH input_struct, p
         MERGE (t:Topic {text: input_struct.topic})
-        WITH c, t
-        MERGE (t)-[:TOPIC_OF]->(c)
+        WITH p, t
+        MERGE (t)-[:TOPIC_OF]->(p)
         """
         async def _edge(tx):
             input_structs = [{
-                'completion_id': completion.doc_id,
+                'prompt_id': prompt.doc_id,
+                'topic': topic,
+            } for topic in topics]
+            await tx.run(cypher, input_structs=input_structs)
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
+    async def create_topic_to_response_edge(self, response: ResponseDoc, topics: list[str]):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (r:Response {doc_id: input_struct.response_id})
+        WITH input_struct, r
+        MERGE (t:Topic {text: input_struct.topic})
+        WITH r, t
+        MERGE (t)-[:TOPIC_OF]->(r)
+        """
+        async def _edge(tx):
+            input_structs = [{
+                'response_id': response.doc_id,
                 'topic': topic,
             } for topic in topics]
             await tx.run(cypher, input_structs=input_structs)
