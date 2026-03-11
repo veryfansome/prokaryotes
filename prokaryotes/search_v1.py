@@ -6,39 +6,18 @@ from elastic_transport import ObjectApiResponse
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import (
-    ChatCompletionDoc,
+    PromptDoc,
     ChatMessage,
     FactDoc,
     PersonContext,
     QuestionDoc,
+    ResponseDoc,
     TextEmbeddingPrompt,
     TextEmbeddingRequest,
 )
 from prokaryotes.utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
-
-chat_completion_mappings = {
-    "dynamic": "strict",
-    "properties": {
-        "about":      {"type": "keyword"},
-        "created_at": {"type": "date"},
-        "error":      {"type": "text"},
-        "importance": {"type": "integer"},
-        "labels":     {"type": "keyword"},
-        "messages": {
-            "type": "nested",
-            "properties": {
-                "role": {"type": "keyword"},
-                "content":  {
-                    "type":            "text",
-                    "analyzer":        "standard",
-                    "search_analyzer": "custom_query_analyzer",
-                },
-            }
-        }
-    }
-}
 
 fact_mappings = {
     "dynamic": "strict",
@@ -59,6 +38,27 @@ fact_mappings = {
             "index":      True,
             "similarity": "cosine",
         },
+    }
+}
+
+prompt_mappings = {
+    "dynamic": "strict",
+    "properties": {
+        "about":      {"type": "keyword"},
+        "created_at": {"type": "date"},
+        "importance": {"type": "integer"},
+        "labels":     {"type": "keyword"},
+        "messages": {
+            "type": "nested",
+            "properties": {
+                "role": {"type": "keyword"},
+                "content":  {
+                    "type":            "text",
+                    "analyzer":        "standard",
+                    "search_analyzer": "custom_query_analyzer",
+                },
+            }
+        }
     }
 }
 
@@ -85,25 +85,25 @@ question_mappings = {
     }
 }
 
+response_mappings = {
+    "dynamic": "strict",
+    "properties": {
+        "about":      {"type": "keyword"},
+        "created_at": {"type": "date"},
+        "error":      {"type": "text"},
+        "importance": {"type": "integer"},
+        "labels":     {"type": "keyword"},
+        "text": {
+            "type": "text",
+            "analyzer": "standard",
+            "search_analyzer": "custom_query_analyzer",
+        },
+    }
+}
+
 class SearchClient:
     def __init__(self):
         self.es: AsyncElasticsearch | None = None
-
-    async def index_chat_completion(
-            self,
-            about: list[str],
-            labels: list[str],
-            messages: list[ChatMessage],
-            error: str = None,
-    ) -> ChatCompletionDoc | None:
-        created_at = datetime.now(timezone.utc)
-        doc = ChatCompletionDoc(about=about, created_at=created_at, error=error, labels=labels, messages=messages)
-        try:
-            result = await self.es.index(index="chat-completions", document=doc.model_dump())
-            doc.doc_id = result["_id"]
-            return doc
-        except Exception:
-            logger.exception(f"Failed to index {doc}")
 
     async def index_facts(self, about: list[str], fact_texts: list[str]):
         """Index a small list of facts."""
@@ -124,6 +124,41 @@ class SearchClient:
             else:
                 facts[idx].doc_id = result["_id"]
         return facts
+
+    async def index_prompt(
+            self,
+            about: list[str],
+            prompt_uuid: str,
+            labels: list[str],
+            messages: list[ChatMessage],
+    ) -> PromptDoc | None:
+        created_at = datetime.now(timezone.utc)
+        doc = PromptDoc(
+            about=about, created_at=created_at, doc_id=prompt_uuid, labels=labels, messages=messages
+        )
+        try:
+            await self.es.index(id=prompt_uuid, index="prompts", document=doc.model_dump())
+            return doc
+        except Exception:
+            logger.exception(f"Failed to index {doc}")
+
+    async def index_response(
+            self,
+            about: list[str],
+            prompt_uuid: str,
+            labels: list[str],
+            generated_response: str,
+            error: str = None,
+    ):
+        created_at = datetime.now(timezone.utc)
+        doc = ResponseDoc(
+            about=about, created_at=created_at, doc_id=prompt_uuid, error=error, labels=labels, text=generated_response
+        )
+        try:
+            await self.es.index(id=prompt_uuid, index="responses", document=doc.model_dump())
+            return doc
+        except Exception:
+            logger.exception(f"Failed to index {doc}")
 
     def init_client(self):
         self.es = get_elastic_search()

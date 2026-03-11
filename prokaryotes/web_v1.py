@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 import uuid
 from fastapi import (
@@ -22,8 +24,8 @@ from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import get_llm_client
 from prokaryotes.models_v1 import (
     ChatMessage,
-    ChatCompletionPayload,
-    ChatCompletionContext,
+    PromptPayload,
+    PromptContext,
     TextEmbeddingPrompt,
     TextEmbeddingRequest,
 )
@@ -69,8 +71,8 @@ class ProkaryoteV1(WebBase):
         ]
 
     @classmethod
-    def developer_message(cls, completion_context: ChatCompletionContext, user_context: PersonContext):
-        message_parts = developer_message_parts(completion_context, user_context)
+    def developer_message(cls, prompt_context: PromptContext, user_context: PersonContext):
+        message_parts = developer_message_parts(prompt_context, user_context)
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         # TODO: Maybe this should be guided by user preferences
@@ -85,30 +87,47 @@ class ProkaryoteV1(WebBase):
     async def finalize(
             self,
             user_id: int,
-            conversation: str,
-            messages: list[ChatMessage],
+            conversation_uuid: str,
+            prompt_uuid: str,
+            payload_messages: list[ChatMessage],
+            generated_response: str,
             topic_observer: TopicClassifyingObserver,
             user_fact_observer: UserFactsSavingObserver,
             error: str = None
     ):
+        common_labels = [
+            f"conversation_{conversation_uuid}",
+            f"user_{user_id}",
+        ]
         topics = await topic_observer.get_topics()
-        completion = await self.search_client.index_chat_completion(
-            topics,
-            [
-                # TODO: Add conversation as node to graph?
-                f"conversation_{conversation}",
-                f"user_{user_id}",
-            ],
-            messages,
-            error=error,
+        prompt, response = await asyncio.gather(
+            self.search_client.index_prompt(
+                about=topics,
+                prompt_uuid=prompt_uuid,
+                labels=common_labels,
+                messages=payload_messages,
+            ),
+            self.search_client.index_response(
+                about=topics,
+                prompt_uuid=prompt_uuid,
+                labels=common_labels,
+                generated_response=generated_response,
+                error=error,
+            ),
         )
 
-        if completion and topics:
-            await self.graph_client.create_topic_to_completion_edge(completion, topics)
+        tasks = []
+
+        if prompt and topics:
+            tasks.append(asyncio.create_task(self.graph_client.create_topic_to_prompt_edge(prompt, topics)))
+        if response and topics:
+            tasks.append(asyncio.create_task(self.graph_client.create_topic_to_response_edge(response, topics)))
 
         saved_facts = await user_fact_observer.get_saved_facts()
-        if completion and saved_facts:
-            await self.graph_client.create_fact_to_completion_edge(completion, saved_facts)
+        if prompt and saved_facts:
+            tasks.append(asyncio.create_task(self.graph_client.create_fact_to_prompt_edge(prompt, saved_facts)))
+
+        await asyncio.gather(*tasks)
 
     @classmethod
     async def get_conversation(cls, request: Request):
@@ -116,7 +135,7 @@ class ProkaryoteV1(WebBase):
         session = request.session
         if not session:
             raise HTTPException(status_code=400, detail="Session expired")
-        return {"conversation": uuid.uuid4()}
+        return {"conversation_uuid": uuid.uuid4()}
 
     def init(self):
         """Synchronous setup steps"""
@@ -138,7 +157,7 @@ class ProkaryoteV1(WebBase):
     async def post_chat(
             self,
             request: Request,
-            payload: ChatCompletionPayload,
+            payload: PromptPayload,
             latitude: float = Query(None),
             longitude: float = Query(None),
             model: str = Query("gpt-5.1"),
@@ -157,12 +176,19 @@ class ProkaryoteV1(WebBase):
         topic_observer = TopicClassifyingObserver(self.llm_client)
         topic_observer.observe_in_background(payload.messages)
 
-        completion_context = ChatCompletionContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
+        prompt_context = PromptContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
         # TODO: Observer that identifies when a conversation reaches an inflection point and earlier parts can be
         #       summarized and truncated.
-        # TODO: Way to identify a completion as one of a larger ongoing conversation
-        # TODO: Way to keep only the last completion of a conversation, and a small amount of related data, if any
+        # TODO: Way to truncate prompts in a way that preserves context but saves tokens.
+        # NOTE: User keeps and sends the full conversation with all messages so any truncation is server side only.
+        #       This means when a prompt is received, we need to efficiently retrieve the truncated view of that
+        #       conversation to do the actual LLM completion.
+        # NOTE: Alternatively, we could truncate aggressively and just rely on facts.
+
+        # payload arrives                       >
+        #                                       <   assistant responds, returns UUID, and save a summary
+        # next payload includes previous UUID   >
 
         search_query_text = await run_in_threadpool(
             prep_chat_message_text_for_search, " ".join(m.content for m in payload.messages if m.role == "user"),
@@ -181,25 +207,24 @@ class ProkaryoteV1(WebBase):
             match_emb=(emb_resp.embeddings[0] if emb_resp else None),
         )
 
-        user_fact_observer = UserFactsSavingObserver(completion_context, user_context, self.llm_client, self.search_client)
+        user_fact_observer = UserFactsSavingObserver(prompt_context, user_context, self.llm_client, self.search_client)
         user_fact_observer.observe_in_background(payload.messages)
 
-        context_window = [ChatMessage(role="developer", content=self.developer_message(completion_context, user_context))]
-        # TODO: Roll long contexts off but in a way that can be recalled
+        context_window = [ChatMessage(role="developer", content=self.developer_message(prompt_context, user_context))]
         context_window.extend(payload.messages)
         return StreamingResponse(
             self.stream_and_finalize(
-                user_context.user_id,
-                payload.conversation,
-                context_window,
-                self.llm_client.stream_response(
+                user_id=user_context.user_id,
+                conversation_uuid=payload.conversation_uuid,
+                payload_messages=payload.messages,
+                response_generator=self.llm_client.stream_response(
                     context_window, model,
                     reasoning_effort=reasoning_effort,
                     tool_callbacks=self.tools_callbacks,
                     tool_params=self.tools_params,
                 ),
-                topic_observer,
-                user_fact_observer,
+                topic_observer=topic_observer,
+                user_fact_observer=user_fact_observer,
             ),
             media_type="text/event-stream",
         )
@@ -207,29 +232,32 @@ class ProkaryoteV1(WebBase):
     async def stream_and_finalize(
             self,
             user_id: int,
-            conversation: str,
-            messages: list[ChatMessage],
+            conversation_uuid: str,
+            payload_messages: list[ChatMessage],
             response_generator: AsyncGenerator[str, Any],
             topic_observer: TopicClassifyingObserver,
             user_fact_observer: UserFactsSavingObserver,
     ) -> AsyncGenerator[str, Any]:
+        prompt_uuid = str(uuid.uuid4())
+        yield json.dumps({"prompt_uuid": prompt_uuid}) + "\n"
+
         error = None
-        messages_to_index = [msg for msg in messages if msg.role != "developer"]
-        response_text = ""
+        generated_response = ""
         try:
             async for chunk in response_generator:
-                response_text += chunk
-                yield chunk
+                generated_response += chunk
+                yield json.dumps({"chunk": chunk}) + "\n"
         except Exception as e:
             error = str(e)
             raise
         finally:
-            messages_to_index.append(ChatMessage(role="assistant", content=response_text))
             self.background_and_forget(self.finalize(
-                user_id,
-                conversation,
-                messages_to_index,
-                topic_observer,
-                user_fact_observer,
+                user_id=user_id,
+                conversation_uuid=conversation_uuid,
+                prompt_uuid=prompt_uuid,
+                payload_messages=payload_messages,
+                generated_response=generated_response,
+                topic_observer=topic_observer,
+                user_fact_observer=user_fact_observer,
                 error=error
             ))

@@ -8,39 +8,39 @@ from bs4 import BeautifulSoup
 
 from prokaryotes.models_v1 import (
     PersonContext,
-    ChatCompletionContext,
+    PromptContext,
     TextEmbeddingRequest,
     TextEmbeddingResponse,
 )
 
 logger = logging.getLogger(__name__)
 
-def developer_message_parts(completion_context: ChatCompletionContext, user_context: PersonContext) -> list[str]:
-    now = completion_context.received_at.astimezone(tz=completion_context.time_zone).strftime('%Y-%m-%d %H:%M')
+def developer_message_parts(prompt_context: PromptContext, user_context: PersonContext) -> list[str]:
+    now = prompt_context.received_at.astimezone(tz=prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
     message_parts = [
         "## Execution context",
-        f"Time: {now} {completion_context.time_zone}",
+        f"Time: {now} {prompt_context.time_zone}",
         (
-            f"Environment: Python-{completion_context.python_version}"
-            f" / {completion_context.platform_short}"
+            f"Environment: Python-{prompt_context.python_version}"
+            f" / {prompt_context.platform_short}"
         ),
-        f"Working directory: {completion_context.cwd}",
+        f"Working directory: {prompt_context.cwd}",
         "---",
         "## User info",
     ]
-    if completion_context.latitude and completion_context.longitude:
+    if prompt_context.latitude and prompt_context.longitude:
         message_parts.append(
             f"- {now}: The user's name is {user_context.name}"
         )
         message_parts.append(
             f"- {now}: The user is at"
-            f" *lat: {completion_context.latitude:.4f}, long: {completion_context.longitude:.4f}*"
+            f" *lat: {prompt_context.latitude:.4f}, long: {prompt_context.longitude:.4f}*"
         )
     if user_context.facts:
         # TODO: Optional trimming if fact lists grow long
         for fact_doc in user_context.facts:
             message_parts.append(
-                f"- {fact_doc.created_at.astimezone(completion_context.time_zone).strftime('%Y-%m-%d %H:%M')}"
+                f"- {fact_doc.created_at.astimezone(prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')}"
                 f": {fact_doc.text}"
             )
 

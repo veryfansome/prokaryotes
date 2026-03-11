@@ -302,7 +302,7 @@
         const chatInput = document.getElementById('chatInput');
         const sendButton = document.getElementById('sendButton');
 
-        let conversation = '';
+        let conversation_uuid = '';
         let messages = [];
         let isGenerating = false;
 
@@ -430,7 +430,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        conversation: conversation,
+                        conversation_uuid: conversation_uuid,
                         messages: messages,
                     }),
                 });
@@ -444,18 +444,49 @@
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let fullResponse = '';
+                let streamBuffer = '';
+
+                const processStreamLine = (line) => {
+                    if (!line) return;
+
+                    let payload;
+                    try {
+                        payload = JSON.parse(line);
+                    } catch (parseError) {
+                        throw new Error(`Invalid stream payload: ${line}`);
+                    }
+
+                    if ('chunk' in payload && typeof payload['chunk'] === 'string') {
+                        if (fullResponse === '') {
+                            assistantContent.textContent = '';
+                        }
+                        fullResponse += payload['chunk'];
+                        assistantContent.textContent = fullResponse;
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    } else if ('prompt_uuid' in payload) {
+                        console.log('Prompt:', payload);
+                    }
+                };
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
 
-                    if (fullResponse === '') {
-                        assistantContent.textContent = '';
-                    }
+                    streamBuffer += decoder.decode(value, { stream: true });
 
-                    fullResponse += decoder.decode(value, { stream: true });
-                    assistantContent.textContent = fullResponse;
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                    let newlineIndex = streamBuffer.indexOf('\n');
+                    while (newlineIndex !== -1) {
+                        const line = streamBuffer.slice(0, newlineIndex).trim();
+                        streamBuffer = streamBuffer.slice(newlineIndex + 1);
+                        processStreamLine(line);
+                        newlineIndex = streamBuffer.indexOf('\n');
+                    }
+                }
+
+                streamBuffer += decoder.decode();
+                const finalLine = streamBuffer.trim();
+                if (finalLine) {
+                    processStreamLine(finalLine);
                 }
 
                 messages.push({ role: 'assistant', content: fullResponse });
@@ -512,7 +543,7 @@
             .then(response => response.json())
             .then(data => {
                 console.log('Conversation:', data);
-                conversation = data["conversation"]
+                conversation_uuid = data["conversation_uuid"]
             })
             .catch(error => {
                 console.error('Service not available:', error);
