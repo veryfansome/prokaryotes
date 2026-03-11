@@ -305,6 +305,33 @@
         let conversation_uuid = '';
         let messages = [];
         let isGenerating = false;
+        let editSession = null;
+
+        function cloneMessages(sourceMessages) {
+            return sourceMessages.map(message => ({ ...message }));
+        }
+
+        function renderMessages() {
+            chatWrapper.innerHTML = '';
+            messages.forEach((message, index) => {
+                addMessage(message.role, message.content, index);
+            });
+        }
+
+        function cancelEditSession() {
+            if (!editSession || isGenerating) return false;
+
+            messages = cloneMessages(editSession.messagesSnapshot);
+            renderMessages();
+
+            chatInput.value = editSession.inputValue;
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + 'px';
+            sendButton.disabled = !chatInput.value.trim() || isGenerating;
+
+            editSession = null;
+            return true;
+        }
 
         chatInput.addEventListener('input', function() {
             this.style.height = 'auto';
@@ -313,6 +340,13 @@
         });
 
         function handleKeyDown(event) {
+            if (event.key === 'Escape') {
+                if (cancelEditSession()) {
+                    event.preventDefault();
+                }
+                return;
+            }
+
             if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
                 sendMessage();
@@ -388,6 +422,13 @@
 
             const messageToEdit = messages[messageIndex];
             if (messageToEdit.role !== 'user') return;
+
+            if (!editSession) {
+                editSession = {
+                    messagesSnapshot: cloneMessages(messages),
+                    inputValue: chatInput.value,
+                };
+            }
 
             // Copy message content to input
             chatInput.value = messageToEdit.content;
@@ -524,6 +565,7 @@
             const message = chatInput.value.trim();
             if (!message || isGenerating) return;
 
+            editSession = null;
             chatInput.value = '';
             chatInput.style.height = 'auto';
 
@@ -533,6 +575,16 @@
 
             await generateAssistantResponse();
         }
+
+        document.addEventListener('mousedown', function(event) {
+            if (!editSession || isGenerating) return;
+
+            const clickInsideInput = chatInput.contains(event.target);
+            const clickOnSendButton = sendButton.contains(event.target);
+            if (!clickInsideInput && !clickOnSendButton) {
+                cancelEditSession();
+            }
+        });
 
         sendButton.disabled = false;
 
