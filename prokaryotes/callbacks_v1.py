@@ -1,10 +1,16 @@
+import asyncio
 import aiofiles.os
 import json
 import logging
 from openai.types.responses.response_input_param import FunctionCallOutput
 
 from prokaryotes.llm_v1 import FunctionToolCallback
+from prokaryotes.models_v1 import (
+    TextEmbeddingPrompt,
+    TextEmbeddingRequest,
+)
 from prokaryotes.search_v1 import PersonContext, SearchClient
+from prokaryotes.utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -103,17 +109,54 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                     candidate = " ".join(candidate.strip(" .!?\r\n").split())
                     if candidate:
                         normalized_candidates.append(candidate)
-                # Exact dedupe
+                len_before_dedupe = len(normalized_candidates)
+                # Exact-duplicate filtering
                 existing_fact_texts = {fact.text.casefold() for fact in self.user_context.facts}
                 candidates_after_exact_dedupe = [
                     candidate for candidate in normalized_candidates
                     if candidate.casefold() not in existing_fact_texts
                 ]
-                # TODO: Additional dedupe via semantic similarity or another pass with an LLM (offline?)
-                self.saved_facts = await self.search_client.index_facts(
-                    [f"user_{self.user_context.user_id}"],
-                    candidates_after_exact_dedupe,
+                len_after_exact_dedupe = len(candidates_after_exact_dedupe)
+                logger.info(
+                    f"Filtered out {len_before_dedupe - len_after_exact_dedupe} candidate facts after exact dedupe"
                 )
+                # Near-duplicate filtering
+                if candidates_after_exact_dedupe:
+                    embs_resp = await get_text_embeddings(
+                        TextEmbeddingRequest(batch_size=16, prompt=TextEmbeddingPrompt.DOCUMENT,
+                                             texts=candidates_after_exact_dedupe,
+                                             truncate_to=256)
+                    )
+                    search_tasks = []
+                    for idx, fact in enumerate(candidates_after_exact_dedupe):
+                        search_tasks.append(asyncio.create_task(
+                            self.search_client.knn_dedupe_facts(
+                                about=f"user_{self.user_context.user_id}",
+                                match_emb=embs_resp.embeddings[idx],
+                                score_threshold=0.95
+                            )
+                        ))
+                    search_results = await asyncio.gather(*search_tasks)
+                    candidates_to_index = []
+                    candidate_embs = []
+                    for idx, results in enumerate(search_results):
+                        if not results:
+                            candidates_to_index.append(candidates_after_exact_dedupe[idx])
+                            candidate_embs.append(embs_resp.embeddings[idx])
+                        else:
+                            # TODO: Pass near-duplicates to an LLM judge
+                            logger.info(
+                                f"Filtering out fact candidate '{candidates_after_exact_dedupe[idx]}'"
+                                f" as a near-duplicate of {[f.text for f in results]}"
+                            )
+                    len_after_knn_dedupe = len(candidates_to_index)
+                    logger.info(
+                        f"Filtered out {len_after_exact_dedupe - len_after_knn_dedupe} candidate facts after knn dedupe"
+                    )
+                    self.saved_facts = await self.search_client.index_facts(
+                        [f"user_{self.user_context.user_id}"],
+                        candidates_after_exact_dedupe, embs_resp.embeddings,
+                    )
             else:
                 logging.warning(f"Missing or empty facts in {arguments} (user {self.user_context.user_id})")
         except Exception:

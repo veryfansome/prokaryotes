@@ -105,15 +105,12 @@ class SearchClient:
     def __init__(self):
         self.es: AsyncElasticsearch | None = None
 
-    async def index_facts(self, about: list[str], fact_texts: list[str]):
+    async def index_facts(self, about: list[str], fact_texts: list[str], fact_embs: list[list[float]]):
         """Index a small list of facts."""
-        embs_resp = await get_text_embeddings(
-            TextEmbeddingRequest(batch_size=16, prompt=TextEmbeddingPrompt.DOCUMENT, texts=fact_texts, truncate_to=256)
-        )
         created_at = datetime.now(timezone.utc)
         facts = [FactDoc(about=about, created_at=created_at, text=text) for text in fact_texts]
         index_tasks = [
-            self.es.index(index="facts", document=(fact.model_dump() | {"text_emb": embs_resp.embeddings[idx]}))
+            self.es.index(index="facts", document=(fact.model_dump() | {"text_emb": fact_embs[idx]}))
             for idx, fact in enumerate(facts)
         ]
         results: list[ObjectApiResponse | Exception] = await asyncio.gather(*index_tasks, return_exceptions=True)
@@ -163,7 +160,53 @@ class SearchClient:
     def init_client(self):
         self.es = get_elastic_search()
 
-    async def search_facts(self, about: str, match: str = None, match_emb: list[float] = None) -> list[FactDoc]:
+    async def knn_dedupe_facts(
+            self,
+            about: str,
+            match_emb: list[float],
+            score_threshold: float = 0.4,
+    ):
+        now = datetime.now(tz=timezone.utc)
+        response = await self.es.search(
+            index="facts",
+            knn={
+                "field": "text_emb",
+                "query_vector": match_emb,
+                "k": 50,
+                "num_candidates": 100,
+                "filter": {
+                    "bool": {
+                        "must": [
+                            {"term": {"about": about}},
+                            {
+                                "bool": {
+                                    "should": [
+                                        {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
+                                        {"range": {"invalid_after": {"gt": now.isoformat()}}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
+                        ],
+                        "must_not": [{"term": {"labels": "deactivated"}}]
+                    }
+                }
+            }
+        )
+        hits = response["hits"]["hits"]
+        for h in hits:
+            text = h['_source'].get('text')
+            displayed_text = text if len(text) <= 50 else (text[:50] + "...")
+            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
+        return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits if h["_score"] >= score_threshold]
+
+    async def search_facts(
+            self,
+            about: str,
+            match: str = None,
+            match_emb: list[float] = None,
+            score_threshold: float = None,
+    ) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
         shared_filters = [
             {"term": {"about": about}},
@@ -218,7 +261,7 @@ class SearchClient:
             search_kwargs["knn"] = {
                 "field": "text_emb",
                 "query_vector": match_emb,
-                "boost": 5.0,  # Increase this if semantic matches should weigh more
+                "boost": 1.0,  # Increase this if semantic matches should weigh more
                 "k": 50,
                 "num_candidates": 100,
                 "filter": {
@@ -233,8 +276,9 @@ class SearchClient:
         for h in hits:
             text = h['_source'].get('text')
             displayed_text = text if len(text) <= 50 else (text[:50] + "...")
-            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}...")
-        return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
+            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
+        return [FactDoc(doc_id=h["_id"], **h["_source"])
+                for h in hits if not score_threshold or (h["_score"] >= score_threshold)]
 
     async def get_user_context(
             self,

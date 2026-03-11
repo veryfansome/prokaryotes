@@ -109,7 +109,7 @@ class TopicClassifyingObserver(Observer):
                         "topic_words": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "A flat list of topic words or phrases.",
+                            "description": "A flat list of atomic topic words or phrases.",
                         },
                     },
                     "additionalProperties": False,
