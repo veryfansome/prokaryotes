@@ -12,10 +12,7 @@ from prokaryotes.models_v1 import (
     PersonContext,
     QuestionDoc,
     ResponseDoc,
-    TextEmbeddingPrompt,
-    TextEmbeddingRequest,
 )
-from prokaryotes.utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
 
