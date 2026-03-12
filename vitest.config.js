@@ -5,8 +5,8 @@ export default defineConfig({
         environment: 'jsdom',
         include: ['tests/**/*.test.js'],
         globals: true,
-    },
-    coverage: {
-        reporter: ['text', 'json-summary'],
+        coverage: {
+            reporter: ['text', 'json-summary'],
+        },
     },
 });
