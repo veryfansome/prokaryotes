@@ -82,6 +82,30 @@
             opacity: 1;
         }
 
+        .message.user .message-actions {
+            align-self: flex-end;
+            margin-right: 0.15rem;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .message.user .fork-indicator {
+            font-size: 0.75rem;
+            color: #6b7280;
+            min-width: 2.25rem;
+            text-align: center;
+            user-select: none;
+        }
+
+        .message.user .fork-nav-btn {
+            width: 28px;
+            height: 28px;
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+
         .message.assistant .message-content {
             background: transparent;
             border: none;
@@ -306,36 +330,159 @@
         let messages = [];
         let isGenerating = false;
         let editSession = null;
+        let editingParentId = null;
+        let nextMessageId = 1;
 
-        function cloneMessages(sourceMessages) {
-            return sourceMessages.map(message => ({ ...message }));
+        const messageTree = new Map();
+        messageTree.set(0, {
+            id: 0,
+            role: 'root',
+            content: '',
+            parentId: null,
+            children: [],
+            activeChildId: null,
+        });
+
+        function setInputHeight() {
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + 'px';
+        }
+
+        function getNode(nodeId) {
+            return messageTree.get(nodeId) || null;
+        }
+
+        function createMessageNode(role, content, parentId) {
+            const parentNode = getNode(parentId);
+            if (!parentNode) return null;
+
+            const node = {
+                id: nextMessageId++,
+                role: role,
+                content: content,
+                parentId: parentId,
+                children: [],
+                activeChildId: null,
+            };
+
+            messageTree.set(node.id, node);
+            parentNode.children.push(node.id);
+            parentNode.activeChildId = node.id;
+            return node;
+        }
+
+        function getPathIdsToNode(nodeId) {
+            const pathIds = [];
+            let currentId = nodeId;
+
+            while (currentId !== null && currentId !== 0) {
+                const currentNode = getNode(currentId);
+                if (!currentNode) break;
+                pathIds.push(currentId);
+                currentId = currentNode.parentId;
+            }
+
+            return pathIds.reverse();
+        }
+
+        function getActivePathIds() {
+            const pathIds = [];
+            let currentId = getNode(0).activeChildId;
+
+            while (currentId !== null) {
+                const currentNode = getNode(currentId);
+                if (!currentNode) break;
+                pathIds.push(currentId);
+                currentId = currentNode.activeChildId;
+            }
+
+            return pathIds;
+        }
+
+        function getRenderablePathIds() {
+            if (editingParentId !== null) {
+                return getPathIdsToNode(editingParentId);
+            }
+            return getActivePathIds();
+        }
+
+        function syncRenderableMessages() {
+            const pathIds = getRenderablePathIds();
+            messages = pathIds.map(function(nodeId) {
+                const node = getNode(nodeId);
+                return {
+                    id: node.id,
+                    role: node.role,
+                    content: node.content,
+                };
+            });
         }
 
         function renderMessages() {
+            syncRenderableMessages();
             chatWrapper.innerHTML = '';
             messages.forEach((message, index) => {
                 addMessage(message.role, message.content, index);
             });
         }
 
+        function getCurrentLeafId() {
+            const activePathIds = getActivePathIds();
+            if (activePathIds.length === 0) return 0;
+            return activePathIds[activePathIds.length - 1];
+        }
+
+        function activateLeaf(leafId) {
+            const pathIds = getPathIdsToNode(leafId);
+            const rootNode = getNode(0);
+            rootNode.activeChildId = pathIds.length > 0 ? pathIds[0] : null;
+
+            for (let i = 0; i < pathIds.length; i++) {
+                const node = getNode(pathIds[i]);
+                node.activeChildId = i + 1 < pathIds.length ? pathIds[i + 1] : null;
+            }
+        }
+
+        function getConversationMessagesUpTo(nodeId) {
+            const pathIds = getPathIdsToNode(nodeId);
+            return pathIds.map(function(pathNodeId) {
+                const node = getNode(pathNodeId);
+                return {
+                    role: node.role,
+                    content: node.content,
+                };
+            });
+        }
+
+        function getUserSiblingIds(nodeId) {
+            const node = getNode(nodeId);
+            if (!node || node.role !== 'user' || node.parentId === null) return [];
+
+            const parentNode = getNode(node.parentId);
+            if (!parentNode) return [];
+
+            return parentNode.children.filter(function(childId) {
+                const childNode = getNode(childId);
+                return !!childNode && childNode.role === 'user';
+            });
+        }
+
         function cancelEditSession() {
             if (!editSession || isGenerating) return false;
 
-            messages = cloneMessages(editSession.messagesSnapshot);
-            renderMessages();
-
+            activateLeaf(editSession.activeLeafId);
+            editingParentId = editSession.editingParentId;
             chatInput.value = editSession.inputValue;
-            chatInput.style.height = 'auto';
-            chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + 'px';
+            setInputHeight();
             sendButton.disabled = !chatInput.value.trim() || isGenerating;
 
             editSession = null;
+            renderMessages();
             return true;
         }
 
         chatInput.addEventListener('input', function() {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+            setInputHeight();
             sendButton.disabled = !this.value.trim() || isGenerating;
         });
 
@@ -361,8 +508,11 @@
             contentDiv.className = 'message-content';
             contentDiv.textContent = content;
 
+            const messageData = messageIndex !== null ? messages[messageIndex] : null;
+            const messageNode = messageData ? getNode(messageData.id) : null;
+
             // Add click handler for user messages to enable editing
-            if (role === 'user' && messageIndex !== null) {
+            if (role === 'user' && messageNode) {
                 contentDiv.setAttribute('data-message-index', messageIndex);
                 contentDiv.setAttribute('title', 'Click to edit and restart from here');
                 contentDiv.addEventListener('click', function() {
@@ -376,7 +526,7 @@
 
             // Add message actions with regen button
             let regenBtn = null;
-            if (role === 'assistant' && messageIndex !== null) {
+            if (role === 'assistant' && messageNode) {
                 const actionsDiv = document.createElement('div');
                 actionsDiv.className = 'message-actions';
 
@@ -410,10 +560,77 @@
                 messageDiv.appendChild(actionsDiv);
             }
 
+            if (role === 'user' && messageNode) {
+                const siblingUserIds = getUserSiblingIds(messageNode.id);
+                if (siblingUserIds.length > 1) {
+                    const currentIndex = siblingUserIds.indexOf(messageNode.id);
+                    if (currentIndex !== -1) {
+                        const actionsDiv = document.createElement('div');
+                        actionsDiv.className = 'message-actions';
+
+                        const prevBtn = document.createElement('button');
+                        prevBtn.type = 'button';
+                        prevBtn.className = 'icon-btn fork-nav-btn';
+                        prevBtn.setAttribute('aria-label', 'Previous fork');
+                        prevBtn.title = 'Previous fork';
+                        prevBtn.textContent = '⟨';
+                        prevBtn.disabled = isGenerating || currentIndex === 0;
+                        prevBtn.addEventListener('click', function(e) {
+                            e.stopPropagation();
+                            switchUserFork(messageIndex, -1);
+                        });
+
+                        const forkIndicator = document.createElement('span');
+                        forkIndicator.className = 'fork-indicator';
+                        forkIndicator.textContent = `${currentIndex + 1}/${siblingUserIds.length}`;
+
+                        const nextBtn = document.createElement('button');
+                        nextBtn.type = 'button';
+                        nextBtn.className = 'icon-btn fork-nav-btn';
+                        nextBtn.setAttribute('aria-label', 'Next fork');
+                        nextBtn.title = 'Next fork';
+                        nextBtn.textContent = '⟩';
+                        nextBtn.disabled = isGenerating || currentIndex === siblingUserIds.length - 1;
+                        nextBtn.addEventListener('click', function(e) {
+                            e.stopPropagation();
+                            switchUserFork(messageIndex, 1);
+                        });
+
+                        actionsDiv.appendChild(prevBtn);
+                        actionsDiv.appendChild(forkIndicator);
+                        actionsDiv.appendChild(nextBtn);
+                        messageDiv.appendChild(actionsDiv);
+                    }
+                }
+            }
+
             chatWrapper.appendChild(messageDiv);
 
             chatContainer.scrollTop = chatContainer.scrollHeight;
             return { contentDiv, regenBtn };
+        }
+
+        function switchUserFork(messageIndex, direction) {
+            if (messageIndex < 0 || messageIndex >= messages.length || isGenerating) return;
+
+            const messageData = messages[messageIndex];
+            const currentNode = getNode(messageData.id);
+            if (!currentNode || currentNode.role !== 'user' || currentNode.parentId === null) return;
+
+            const parentNode = getNode(currentNode.parentId);
+            if (!parentNode) return;
+
+            const siblingUserIds = getUserSiblingIds(currentNode.id);
+            const currentIndex = siblingUserIds.indexOf(currentNode.id);
+            if (currentIndex === -1) return;
+
+            const targetIndex = currentIndex + direction;
+            if (targetIndex < 0 || targetIndex >= siblingUserIds.length) return;
+
+            parentNode.activeChildId = siblingUserIds[targetIndex];
+            editingParentId = null;
+            editSession = null;
+            renderMessages();
         }
 
         function editMessage(messageIndex) {
@@ -423,41 +640,41 @@
             const messageToEdit = messages[messageIndex];
             if (messageToEdit.role !== 'user') return;
 
+            const messageNode = getNode(messageToEdit.id);
+            if (!messageNode || messageNode.parentId === null) return;
+
             if (!editSession) {
                 editSession = {
-                    messagesSnapshot: cloneMessages(messages),
+                    activeLeafId: getCurrentLeafId(),
                     inputValue: chatInput.value,
+                    editingParentId: editingParentId,
                 };
             }
 
-            // Copy message content to input
+            // Copy message content to input and show history up to the message's parent
             chatInput.value = messageToEdit.content;
-            chatInput.style.height = 'auto';
-            chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + 'px';
-
-            // Remove this message and all subsequent messages from the array
-            messages = messages.slice(0, messageIndex);
-
-            // Remove message elements from DOM starting from messageIndex
-            const allMessages = chatWrapper.querySelectorAll('.message');
-            for (let i = messageIndex; i < allMessages.length; i++) {
-                allMessages[i].remove();
-            }
+            setInputHeight();
+            editingParentId = messageNode.parentId;
+            renderMessages();
 
             // Enable send button and focus input
             sendButton.disabled = false;
             chatInput.focus();
         }
 
-        async function generateAssistantResponse() {
+        async function generateAssistantResponse(parentNodeId) {
             isGenerating = true;
             sendButton.disabled = true;
+            let didCompleteResponse = false;
 
-            const assistantMessageIndex = messages.length;
-            const { contentDiv: assistantContent, regenBtn } = addMessage('assistant', '', assistantMessageIndex);
-
+            const pendingMessageDiv = document.createElement('div');
+            pendingMessageDiv.className = 'message assistant';
+            const assistantContent = document.createElement('div');
+            assistantContent.className = 'message-content';
             assistantContent.innerHTML = '<span class="typing-indicator"></span>';
-            if (regenBtn) regenBtn.disabled = true;
+            pendingMessageDiv.appendChild(assistantContent);
+            chatWrapper.appendChild(pendingMessageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
 
             try {
                 const queryParams = new URLSearchParams({ time_zone: timeZone });
@@ -465,6 +682,7 @@
                     queryParams.append("latitude", latitude)
                     queryParams.append("longitude", longitude)
                 }
+
                 const response = await fetch(`${apiUrl}/chat?${queryParams.toString()}`, {
                     method: 'POST',
                     headers: {
@@ -472,7 +690,7 @@
                     },
                     body: JSON.stringify({
                         conversation_uuid: conversation_uuid,
-                        messages: messages,
+                        messages: getConversationMessagesUpTo(parentNodeId),
                     }),
                 });
 
@@ -530,14 +748,17 @@
                     processStreamLine(finalLine);
                 }
 
-                messages.push({ role: 'assistant', content: fullResponse });
-                if (regenBtn) regenBtn.disabled = false;
+                createMessageNode('assistant', fullResponse, parentNodeId);
+                didCompleteResponse = true;
             } catch (error) {
                 console.error('Error:', error);
                 assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;
             } finally {
                 isGenerating = false;
                 sendButton.disabled = !chatInput.value.trim();
+                if (didCompleteResponse) {
+                    renderMessages();
+                }
             }
         }
 
@@ -548,32 +769,37 @@
             const messageToRegenerate = messages[messageIndex];
             if (messageToRegenerate.role !== 'assistant') return;
 
-            // Remove this message and all subsequent messages from the array
-            messages = messages.slice(0, messageIndex);
+            const assistantNode = getNode(messageToRegenerate.id);
+            if (!assistantNode || assistantNode.parentId === null) return;
 
-            // Remove message elements from DOM starting from messageIndex
-            const allMessages = chatWrapper.querySelectorAll('.message');
-            for (let i = messageIndex; i < allMessages.length; i++) {
-                allMessages[i].remove();
-            }
+            const parentNode = getNode(assistantNode.parentId);
+            if (!parentNode) return;
+
+            parentNode.activeChildId = null;
+            editingParentId = null;
+            editSession = null;
+            renderMessages();
 
             // Regenerate the assistant response
-            await generateAssistantResponse();
+            await generateAssistantResponse(parentNode.id);
         }
 
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message || isGenerating) return;
 
+            const parentNodeId = editingParentId !== null ? editingParentId : getCurrentLeafId();
+
             editSession = null;
+            editingParentId = null;
             chatInput.value = '';
             chatInput.style.height = 'auto';
 
-            const userMessageIndex = messages.length;
-            messages.push({ role: 'user', content: message });
-            addMessage('user', message, userMessageIndex);
+            const userNode = createMessageNode('user', message, parentNodeId);
+            if (!userNode) return;
 
-            await generateAssistantResponse();
+            renderMessages();
+            await generateAssistantResponse(userNode.id);
         }
 
         document.addEventListener('mousedown', function(event) {
