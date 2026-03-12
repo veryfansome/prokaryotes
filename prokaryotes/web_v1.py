@@ -180,15 +180,25 @@ class ProkaryoteV1(WebBase):
 
         # TODO: Observer that identifies when a conversation reaches an inflection point and earlier parts can be
         #       summarized and truncated.
+        # NOTE: Alternatively, we can just use a heuristic based on length.
+
         # TODO: Way to truncate prompts in a way that preserves context but saves tokens.
         # NOTE: User keeps and sends the full conversation with all messages so any truncation is server side only.
         #       This means when a prompt is received, we need to efficiently retrieve the truncated view of that
         #       conversation to do the actual LLM completion.
         # NOTE: Alternatively, we could truncate aggressively and just rely on facts.
+        # NOTE: Occasionally, we might need to determine if the user is referring to something that was sent but has
+        #       been truncated and need to be looked up.
 
-        # payload arrives                       >
-        #                                       <   assistant responds, returns UUID, and save a summary
-        # next payload includes previous UUID   >
+        # Payload arrives        >
+        #                        *   Here, in this function, we search for the most recent PromptDoc labeled with
+        #                            the current conversation UUID, that has a non-empty summary field. If something is
+        #                            found, diff the messages to figure out which messages are not covered, then.
+        #                            truncate everything above the summary.
+        #                        <   Assistant returns new prompt UUID, responds, then indexes the prompt and response.
+        #                        *   A controller watches for new prompts, checks the context length after truncation
+        #                            and decides to update a summary field on the PromptDoc.
+        # Pext payload arrives   >
 
         search_query_text = await run_in_threadpool(
             prep_chat_message_text_for_search, " ".join(m.content for m in payload.messages if m.role == "user"),
