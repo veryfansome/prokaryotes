@@ -220,6 +220,7 @@ class ProkaryoteV1(WebBase):
                 response_generator=self.llm_client.stream_response(
                     context_window, model,
                     reasoning_effort=reasoning_effort,
+                    stream_ndjson=True,
                     tool_callbacks=self.tools_callbacks,
                     tool_params=self.tools_params,
                 ),
@@ -244,9 +245,14 @@ class ProkaryoteV1(WebBase):
         error = None
         generated_response = ""
         try:
-            async for chunk in response_generator:
-                generated_response += chunk
-                yield json.dumps({"chunk": chunk}) + "\n"
+            async for str_to_yield in response_generator:
+                if not str_to_yield:
+                    logger.warning(f"Received empty '{str_to_yield}' to yield")
+                    continue
+                # Should be NDJSON
+                if str_to_yield.startswith('{"text_delta":'):
+                    generated_response += json.loads(str_to_yield)["text_delta"]
+                yield str_to_yield
         except Exception as e:
             error = str(e)
             raise

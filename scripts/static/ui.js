@@ -13,11 +13,11 @@ export function parseStreamPayloadLine(line) {
         throw new Error(`Invalid stream payload: ${line}`);
     }
 
-    if ('chunk' in payload) {
-        if (typeof payload.chunk !== 'string') {
-            throw new Error('Invalid stream payload: chunk must be a string');
+    if ('text_delta' in payload) {
+        if (typeof payload.text_delta !== 'string') {
+            throw new Error('Invalid stream payload: text_delta must be a string');
         }
-        return { type: 'chunk', chunk: payload.chunk };
+        return { type: 'text_delta', text_delta: payload.text_delta };
     }
 
     if ('prompt_uuid' in payload) {
@@ -526,11 +526,11 @@ export function createChatApp({
                     return;
                 }
 
-                if (parsed.type === 'chunk') {
+                if (parsed.type === 'text_delta') {
                     if (fullResponse === '') {
                         assistantContent.textContent = '';
                     }
-                    fullResponse += parsed.chunk;
+                    fullResponse += parsed.text_delta;
                     assistantContent.textContent = fullResponse;
                     chatContainer.scrollTop = chatContainer.scrollHeight;
                     return;
