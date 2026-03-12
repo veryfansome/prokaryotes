@@ -97,6 +97,9 @@ class WebBase:
             return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
         return FileResponse(self.static_dir / "ui.html")
 
+    async def get_ui_js(self):
+        return FileResponse(self.static_dir / "ui.js")
+
     def init(self):
         """Synchronous setup steps"""
         self.redis_client = get_redis_client()
@@ -124,6 +127,7 @@ class WebBase:
         self.app.add_api_route("/logout", self.get_logout, methods=["GET"], include_in_schema=False)
         self.app.add_api_route("/register", self.get_register, methods=["GET"], include_in_schema=False)
         self.app.add_api_route("/register", self.post_register, methods=["POST"])
+        self.app.add_api_route("/ui.js", self.get_ui_js, methods=["GET"], include_in_schema=False)
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
