@@ -1,4 +1,5 @@
 const MAX_INPUT_HEIGHT = 200;
+const EDIT_STATUS_TEXT = 'Editing a previous message. Press Esc or click outside to cancel.';
 
 export function parseStreamPayloadLine(line) {
     if (!line || !line.trim()) {
@@ -54,6 +55,7 @@ export function createChatApp({
     const chatWrapper = doc.getElementById('chatWrapper');
     const chatInput = doc.getElementById('chatInput');
     const sendButton = doc.getElementById('sendButton');
+    const editStatus = doc.getElementById('editStatus');
 
     if (!chatContainer || !chatWrapper || !chatInput || !sendButton) {
         throw new Error('Chat UI container elements not found');
@@ -85,6 +87,7 @@ export function createChatApp({
     let isGenerating = false;
     let editSession = null;
     let editingParentId = null;
+    let editingMessageId = null;
     let nextMessageId = 1;
 
     const messageTree = new Map();
@@ -161,6 +164,9 @@ export function createChatApp({
     }
 
     function getRenderablePathIds() {
+        if (editingMessageId !== null) {
+            return getPathIdsToNode(editingMessageId);
+        }
         if (editingParentId !== null) {
             return getPathIdsToNode(editingParentId);
         }
@@ -231,6 +237,34 @@ export function createChatApp({
             const childNode = getNode(childId);
             return Boolean(childNode && childNode.role === 'user');
         });
+    }
+
+    function updateEditModeUi() {
+        if (editStatus) {
+            if (editingMessageId !== null) {
+                editStatus.hidden = false;
+                editStatus.textContent = EDIT_STATUS_TEXT;
+            } else {
+                editStatus.hidden = true;
+                editStatus.textContent = '';
+            }
+        }
+
+        if (editingMessageId === null) {
+            return;
+        }
+
+        const messageIndex = messages.findIndex(message => message.id === editingMessageId);
+        if (messageIndex === -1) {
+            return;
+        }
+
+        const editingMessageEl = chatWrapper.querySelector(
+            `.message.user .message-content[data-message-index=\"${messageIndex}\"]`,
+        );
+        if (editingMessageEl) {
+            editingMessageEl.classList.add('editing-source');
+        }
     }
 
     function addMessage(role, content, messageIndex = null) {
@@ -344,6 +378,7 @@ export function createChatApp({
         messages.forEach((message, index) => {
             addMessage(message.role, message.content, index);
         });
+        updateEditModeUi();
     }
 
     function cancelEditSession() {
@@ -353,6 +388,7 @@ export function createChatApp({
 
         activateLeaf(editSession.activeLeafId);
         editingParentId = editSession.editingParentId;
+        editingMessageId = editSession.editingMessageId;
         chatInput.value = editSession.inputValue;
         setInputHeight(chatInput);
 
@@ -405,6 +441,7 @@ export function createChatApp({
 
         parentNode.activeChildId = siblingUserIds[targetIndex];
         editingParentId = null;
+        editingMessageId = null;
         editSession = null;
         renderMessages();
         updateSendButtonState();
@@ -430,12 +467,14 @@ export function createChatApp({
                 activeLeafId: getCurrentLeafId(),
                 inputValue: chatInput.value,
                 editingParentId,
+                editingMessageId,
             };
         }
 
         chatInput.value = messageToEdit.content;
         setInputHeight(chatInput);
         editingParentId = messageNode.parentId;
+        editingMessageId = messageNode.id;
         renderMessages();
 
         sendButton.disabled = false;
@@ -560,6 +599,7 @@ export function createChatApp({
 
         parentNode.activeChildId = null;
         editingParentId = null;
+        editingMessageId = null;
         editSession = null;
         renderMessages();
 
@@ -576,6 +616,7 @@ export function createChatApp({
 
         editSession = null;
         editingParentId = null;
+        editingMessageId = null;
         chatInput.value = '';
         chatInput.style.height = 'auto';
 
@@ -614,6 +655,7 @@ export function createChatApp({
     doc.addEventListener('mousedown', handleDocumentMouseDown);
 
     updateSendButtonState();
+    updateEditModeUi();
     chatInput.focus();
 
     fetchImpl(`${apiUrl}/conversation`)
@@ -644,6 +686,7 @@ export function createChatApp({
             chatWrapper,
             chatInput,
             sendButton,
+            editStatus,
         },
     };
 }

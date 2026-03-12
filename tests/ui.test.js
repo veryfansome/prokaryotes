@@ -7,6 +7,7 @@ function renderBaseDOM() {
         <div id="chatContainer"><div id="chatWrapper"></div></div>
         <textarea id="chatInput"></textarea>
         <button id="sendButton" disabled>Send</button>
+        <div id="editStatus" hidden></div>
     `;
 }
 
@@ -115,11 +116,15 @@ describe('createChatApp messageTree flow', () => {
         expect(asRoleContent(app.getMessages())).toEqual([
             { role: 'user', content: 'U1' },
             { role: 'assistant', content: 'A1' },
+            { role: 'user', content: 'U2' },
         ]);
+        expect(app.elements.editStatus.hidden).toBe(false);
+        expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
 
         app.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
 
         expect(app.getIsEditing()).toBe(false);
+        expect(app.elements.editStatus.hidden).toBe(true);
         expect(asRoleContent(app.getMessages())).toEqual([
             { role: 'user', content: 'U1' },
             { role: 'assistant', content: 'A1' },
@@ -202,10 +207,13 @@ describe('createChatApp messageTree flow', () => {
 
         app.editMessage(2);
         expect(app.getIsEditing()).toBe(true);
+        expect(app.elements.editStatus.hidden).toBe(false);
+        expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
 
         document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
 
         expect(app.getIsEditing()).toBe(false);
+        expect(app.elements.editStatus.hidden).toBe(true);
         expect(asRoleContent(app.getMessages())).toEqual([
             { role: 'user', content: 'U1' },
             { role: 'assistant', content: 'A1' },

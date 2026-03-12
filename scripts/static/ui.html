@@ -159,6 +159,12 @@
             background-color: #e5e7eb;
         }
 
+        .message.user .message-content.editing-source {
+            outline: 2px solid #2563eb;
+            outline-offset: 2px;
+            background-color: #dbeafe;
+        }
+
         .message.console .message-content {
             font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace;
             font-size: 0.875rem;
@@ -180,6 +186,13 @@
             display: flex;
             gap: 0.75rem;
             align-items: flex-end;
+        }
+
+        .edit-status {
+            max-width: 48rem;
+            margin: 0.5rem auto 0;
+            font-size: 0.875rem;
+            color: #1d4ed8;
         }
 
         .chat-input {
@@ -296,6 +309,7 @@
                 </svg>
             </button>
         </div>
+        <div id="editStatus" class="edit-status" hidden></div>
     </div>
     <script type="module" src="/ui.js"></script>
 </body>
