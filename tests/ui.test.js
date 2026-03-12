@@ -52,8 +52,8 @@ function asRoleContent(messages) {
 }
 
 describe('ui.js helpers', () => {
-    it('parses chunk stream payload', () => {
-        expect(parseStreamPayloadLine('{"chunk":"hello"}')).toEqual({ type: 'chunk', chunk: 'hello' });
+    it('parses text_delta stream payload', () => {
+        expect(parseStreamPayloadLine('{"text_delta":"hello"}')).toEqual({ type: 'text_delta', text_delta: 'hello' });
     });
 
     it('throws on invalid payload json', () => {
@@ -73,7 +73,7 @@ describe('createChatApp messageTree flow', () => {
     });
 
     it('sends a message and streams assistant response', async () => {
-        const fetchMock = createFetchMock([[JSON.stringify({ chunk: 'Hel' }), JSON.stringify({ chunk: 'lo' })]]);
+        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hel' }), JSON.stringify({ text_delta: 'lo' })]]);
 
         const app = createChatApp({
             doc: document,
@@ -93,8 +93,8 @@ describe('createChatApp messageTree flow', () => {
 
     it('cancels edit mode with Escape and restores active branch', async () => {
         const fetchMock = createFetchMock([
-            [JSON.stringify({ chunk: 'A1' })],
-            [JSON.stringify({ chunk: 'A2' })],
+            [JSON.stringify({ text_delta: 'A1' })],
+            [JSON.stringify({ text_delta: 'A2' })],
         ]);
 
         const app = createChatApp({
@@ -135,9 +135,9 @@ describe('createChatApp messageTree flow', () => {
 
     it('shows fork buttons and switches between user forks', async () => {
         const fetchMock = createFetchMock([
-            [JSON.stringify({ chunk: 'A1' })],
-            [JSON.stringify({ chunk: 'A2' })],
-            [JSON.stringify({ chunk: 'AFork' })],
+            [JSON.stringify({ text_delta: 'A1' })],
+            [JSON.stringify({ text_delta: 'A2' })],
+            [JSON.stringify({ text_delta: 'AFork' })],
         ]);
 
         const app = createChatApp({
@@ -187,8 +187,8 @@ describe('createChatApp messageTree flow', () => {
 
     it('cancels edit mode on outside mousedown', async () => {
         const fetchMock = createFetchMock([
-            [JSON.stringify({ chunk: 'A1' })],
-            [JSON.stringify({ chunk: 'A2' })],
+            [JSON.stringify({ text_delta: 'A1' })],
+            [JSON.stringify({ text_delta: 'A2' })],
         ]);
 
         const app = createChatApp({

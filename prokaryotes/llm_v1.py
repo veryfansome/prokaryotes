@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 from openai import AsyncOpenAI
@@ -25,6 +26,7 @@ class LLMClient(Protocol):
             messages: list[ChatMessage],
             model: str,
             reasoning_effort: str = None,
+            stream_ndjson: bool = False,
             text: OpenAIResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
             tool_params: list[OpenAIToolParam] = None,
@@ -61,8 +63,11 @@ class OpenAIClient(LLMClient):
             messages: list[ChatMessage | OpenAIFunctionCallOutput | OpenAIResponseFunctionToolCall],
             callback_tasks: list[asyncio.Task],
             tool_callbacks: dict[str, FunctionToolCallback],
-    ):
-        if event.type == "response.output_item.done" and event.item.type == "function_call":
+            ndjson: bool = False,
+    ) -> str | None:
+        if event.type == "response.output_text.delta":
+            return (json.dumps({"text_delta": event.delta}) + "\n") if ndjson else event.delta
+        elif event.type == "response.output_item.done" and event.item.type == "function_call":
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
             messages.append(event.item)
             callback_task = asyncio.create_task(tool_callbacks[event.item.name].call(
@@ -80,6 +85,7 @@ class OpenAIClient(LLMClient):
             messages: list[ChatMessage],
             model: str,
             reasoning_effort: str = None,
+            stream_ndjson: bool = False,
             text: OpenAIResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
             tool_params: list[OpenAIToolParam] = None,
@@ -93,10 +99,12 @@ class OpenAIClient(LLMClient):
                 text=text,
                 tool_params=tool_params,
         ):
-            if event.type == "response.output_text.delta":
-                yield event.delta
-            else:
-                await self.handle_response_stream_event(event, messages, callback_tasks, tool_callbacks)
+            str_to_yield = await self.handle_response_stream_event(
+                event, messages, callback_tasks, tool_callbacks,
+                ndjson=stream_ndjson,
+            )
+            if str_to_yield:
+                yield str_to_yield
         while callback_tasks:
             callback_results = await asyncio.gather(*callback_tasks)
             callback_tasks = []
@@ -111,10 +119,12 @@ class OpenAIClient(LLMClient):
                         text=text,
                         tool_params=tool_params,
                 ):
-                    if event.type == "response.output_text.delta":
-                        yield event.delta
-                    else:
-                        await self.handle_response_stream_event(event, messages, callback_tasks, tool_callbacks)
+                    str_to_yield = await self.handle_response_stream_event(
+                        event, messages, callback_tasks, tool_callbacks,
+                        ndjson=stream_ndjson,
+                    )
+                    if str_to_yield:
+                        yield str_to_yield
 
 def get_llm_client() -> LLMClient:
     openai_api_key = os.getenv("OPENAI_API_KEY")
