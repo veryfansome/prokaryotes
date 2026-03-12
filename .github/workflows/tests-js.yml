@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/js-tests.yml
+      - .github/workflows/tests-js.yml
       - package.json
       - package-lock.json
       - vitest.config.js
