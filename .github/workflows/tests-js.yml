@@ -1,0 +1,70 @@
+name: tests-js
+
+on:
+  push: &repo_trigger
+    branches:
+      - main
+    paths:
+      - .github/workflows/js-tests.yml
+      - package.json
+      - package-lock.json
+      - vitest.config.js
+      - scripts/static/**/*.js
+      - scripts/static/**/*.html
+      - tests/**/*.js
+  pull_request: *repo_trigger
+
+jobs:
+  tests-js:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run JS tests
+        run: npm run test:js
+
+      - name: Run JS coverage
+        if: github.event_name == 'push'
+        run: npm run test:js:coverage
+
+      - name: Generate JS Coverage Badge
+        if: github.event_name == 'push'
+        run: |
+          pct=$(node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync('coverage/coverage-summary.json','utf8'));console.log(Number(j.total.lines.pct).toFixed(2));")
+          color="red"
+          if awk "BEGIN {exit !($pct >= 90)}"; then color="brightgreen";
+          elif awk "BEGIN {exit !($pct >= 80)}"; then color="green";
+          elif awk "BEGIN {exit !($pct >= 70)}"; then color="yellow";
+          elif awk "BEGIN {exit !($pct >= 60)}"; then color="orange";
+          fi
+          curl -fsSL "https://img.shields.io/badge/js%20coverage-${pct}%25-${color}.svg" -o coverage-js.svg
+
+      - name: Verify Changed files
+        id: verify-changed-files
+        if: github.event_name == 'push'
+        uses: tj-actions/verify-changed-files@v20
+        with:
+          files: coverage-js.svg
+
+      - name: Commit files
+        if: github.event_name == 'push' && steps.verify-changed-files.outputs.files_changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add coverage-js.svg
+          git commit -m "Updated coverage-js.svg"
+          git push

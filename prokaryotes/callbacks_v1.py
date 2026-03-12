@@ -145,6 +145,7 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                             candidate_embs.append(embs_resp.embeddings[idx])
                         else:
                             # TODO: Pass near-duplicates to an LLM judge
+                            # TODO: Alternatively, consolidate near-duplicates into the same fact doc
                             logger.info(
                                 f"Filtering out fact candidate '{candidates_after_exact_dedupe[idx]}'"
                                 f" as a near-duplicate of {[f.text for f in results]}"
