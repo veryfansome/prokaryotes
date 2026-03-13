@@ -104,6 +104,17 @@ export function createChatApp({
         sendButton.disabled = !chatInput.value.trim() || isGenerating;
     }
 
+    function scrollToBottomWhereInputIs() {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+        if (typeof chatInput.scrollIntoView === 'function') {
+            try {
+                chatInput.scrollIntoView({ block: 'end' });
+            } catch {
+                // Ignore scroll API failures in non-browser environments (e.g. tests).
+            }
+        }
+    }
+
     function getNode(nodeId) {
         return messageTree.get(nodeId) || null;
     }
@@ -494,7 +505,7 @@ export function createChatApp({
         assistantContent.innerHTML = '<span class="typing-indicator"></span>';
         pendingMessageDiv.appendChild(assistantContent);
         chatWrapper.appendChild(pendingMessageDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+        scrollToBottomWhereInputIs();
 
         try {
             const query = buildChatQueryParams(timeZone, latitude, longitude);
@@ -532,7 +543,7 @@ export function createChatApp({
                     }
                     fullResponse += parsed.text_delta;
                     assistantContent.textContent = fullResponse;
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                    scrollToBottomWhereInputIs();
                     return;
                 }
 
@@ -573,6 +584,7 @@ export function createChatApp({
             updateSendButtonState();
             if (didCompleteResponse) {
                 renderMessages();
+                scrollToBottomWhereInputIs();
             }
         }
     }

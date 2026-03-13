@@ -91,6 +91,25 @@ describe('createChatApp messageTree flow', () => {
         ]);
     });
 
+    it('keeps scrolling to the textarea while assistant tokens stream', async () => {
+        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hel' }), JSON.stringify({ text_delta: 'lo' })]]);
+
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: fetchMock,
+            navigatorImpl: {},
+        });
+
+        const scrollIntoViewSpy = vi.fn();
+        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+
+        app.elements.chatInput.value = 'Hi';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        await app.sendMessage();
+
+        expect(scrollIntoViewSpy).toHaveBeenCalled();
+    });
+
     it('cancels edit mode with Escape and restores active branch', async () => {
         const fetchMock = createFetchMock([
             [JSON.stringify({ text_delta: 'A1' })],
