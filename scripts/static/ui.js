@@ -105,14 +105,26 @@ export function createChatApp({
     }
 
     function scrollToBottomWhereInputIs() {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+        const scrollToLowestOffsets = () => {
+            chatContainer.scrollTop = Math.max(0, chatContainer.scrollHeight - chatContainer.clientHeight);
+            const scrollingElement = doc.scrollingElement;
+            if (scrollingElement) {
+                scrollingElement.scrollTop = Math.max(0, scrollingElement.scrollHeight - scrollingElement.clientHeight);
+            }
+        };
+
         if (typeof chatInput.scrollIntoView === 'function') {
             try {
-                chatInput.scrollIntoView({ block: 'end' });
+                chatInput.scrollIntoView({ block: 'end', inline: 'nearest' });
             } catch {
                 // Ignore scroll API failures in non-browser environments (e.g. tests).
             }
         }
+
+        scrollToLowestOffsets();
+        // Run twice to account for layout settling during streaming reflows.
+        void chatContainer.offsetHeight;
+        scrollToLowestOffsets();
     }
 
     function getNode(nodeId) {
@@ -490,6 +502,7 @@ export function createChatApp({
 
         sendButton.disabled = false;
         chatInput.focus();
+        scrollToBottomWhereInputIs();
     }
 
     async function generateAssistantResponse(parentNodeId) {
