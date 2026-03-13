@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
-import platform
-from datetime import datetime, timezone
+from datetime import (
+    datetime,
+    timezone,
+)
 from dataclasses import dataclass
 from enum import Enum
 from pydantic import (
@@ -10,6 +11,14 @@ from pydantic import (
     Field,
 )
 from zoneinfo import ZoneInfo
+
+from prokaryotes.utils_v1.os_utils import (
+    get_cwd,
+    get_platform,
+    get_python_version,
+    get_process_uid,
+    uid_to_name,
+)
 
 class ChatMessage(BaseModel):
     role: str
@@ -36,17 +45,27 @@ class PromptPayload(BaseModel):
 
 @dataclass(frozen=True)
 class PromptContext:
-    cwd: str = os.getcwd()
-    latitude: float = None
-    longitude: float = None
-    platform_short: str = platform.platform(terse=True)
-    python_version: str = platform.python_version()
-    received_at: datetime = datetime.now(timezone.utc)
-    time_zone: ZoneInfo = None
+    cwd: str
+    latitude: float
+    longitude: float
+    platform_short: str
+    python_version: str
+    received_at: datetime
+    time_zone: ZoneInfo
+    unix_usr: tuple[int, str]
 
     @classmethod
     def new(cls, latitude: float, longitude: float, time_zone: str) -> PromptContext:
-        return cls(latitude=latitude, longitude=longitude, time_zone=ZoneInfo("UTC" if not time_zone else time_zone))
+        return cls(
+            cwd=get_cwd(),
+            latitude=latitude,
+            longitude=longitude,
+            platform_short=get_platform(),
+            python_version=get_python_version(),
+            received_at=datetime.now(timezone.utc),
+            time_zone=ZoneInfo("UTC" if not time_zone else time_zone),
+            unix_usr=uid_to_name(get_process_uid()),
+        )
 
 class PromptDoc(BaseModel):
     about: list[str]
@@ -66,10 +85,6 @@ class QuestionDoc(BaseModel):
     text: str
     to: list[str]  # Maybe for_?
 
-class TextEmbeddingPrompt(Enum):
-    DOCUMENT = "document"
-    QUERY = "query"
-
 class ResponseDoc(BaseModel):
     about: list[str]
     created_at: datetime
@@ -79,6 +94,10 @@ class ResponseDoc(BaseModel):
     labels: list[str] = Field(default_factory=list)
     text: str
 
+class TextEmbeddingPrompt(Enum):
+    DOCUMENT = "document"
+    QUERY = "query"
+
 class TextEmbeddingRequest(BaseModel):
     batch_size: int = 1
     prompt: TextEmbeddingPrompt
@@ -86,4 +105,14 @@ class TextEmbeddingRequest(BaseModel):
     truncate_to: int | None = None
 
 class TextEmbeddingResponse(BaseModel):
-    embeddings: list[list[float]]
+    embs: list[list[float]]
+
+class ToolCallDoc(BaseModel):
+    doc_id: str | None = Field(default=None, exclude=True)
+    labels: list[str] = Field(default_factory=list)
+    output: str
+    triggers: list[ToolCallTrigger]
+    updated_at: datetime
+
+class ToolCallTrigger(BaseModel):
+    text: str

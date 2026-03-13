@@ -2,14 +2,15 @@ import asyncio
 import logging
 from dotenv import load_dotenv
 
-from prokaryotes.utils import setup_logging
 from prokaryotes.search_v1 import (
-    prompt_mappings,
+    tool_call_mappings,
     fact_mappings,
     get_elastic_search,
+    prompt_mappings,
     question_mappings,
     response_mappings,
 )
+from prokaryotes.utils_v1.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def sync_mappings(replicas: int = 0):
         "prompts": prompt_mappings,
         "questions": question_mappings,
         "responses": response_mappings,
+        "tool-calls": tool_call_mappings,
     }
     es = get_elastic_search()
     for index_name, mappings in schemas.items():

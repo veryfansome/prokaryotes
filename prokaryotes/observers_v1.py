@@ -22,10 +22,8 @@ from prokaryotes.search_v1 import (
     PersonContext,
     SearchClient,
 )
-from prokaryotes.utils import (
-    developer_message_parts,
-    log_async_task_exception,
-)
+from prokaryotes.utils_v1.context_utils import developer_message_parts
+from prokaryotes.utils_v1.logging_utils import log_async_task_exception
 
 logger = logging.getLogger(__name__)
 

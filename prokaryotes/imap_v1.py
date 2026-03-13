@@ -18,7 +18,7 @@ from email.utils import parsedate_to_datetime
 from enum import Enum
 from imapclient import IMAPClient
 
-from prokaryotes.utils import log_future_exception
+from prokaryotes.utils_v1.logging_utils import log_future_exception
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +362,7 @@ def parse_references(blob: str) -> list[str]:
 if __name__ == "__main__":
     from dotenv import load_dotenv
 
-    from prokaryotes.utils import setup_logging
+    from prokaryotes.utils_v1.logging_utils import setup_logging
 
     load_dotenv()
     setup_logging()

@@ -4,12 +4,13 @@ import logging
 import os
 from openai import AsyncOpenAI
 from openai.types.responses import (
-    ResponseFunctionToolCall as OpenAIResponseFunctionToolCall,
-    ResponseStreamEvent as OpenAIResponseStreamEvent,
-    ResponseTextConfigParam as OpenAIResponseTextConfigParam,
-    ToolParam as OpenAIToolParam,
+    ResponseFunctionToolCall,
+    ResponseStreamEvent,
+    ResponseTextConfigParam,
+    ToolParam,
 )
-from openai.types.responses.response_input_param import FunctionCallOutput as OpenAIFunctionCallOutput
+from openai.types.responses import FunctionToolParam
+from openai.types.responses.response_input_param import FunctionCallOutput
 from typing import Any, AsyncGenerator, Protocol, is_typeddict
 
 from prokaryotes.models_v1 import ChatMessage
@@ -17,7 +18,16 @@ from prokaryotes.models_v1 import ChatMessage
 logger = logging.getLogger(__name__)
 
 class FunctionToolCallback(Protocol):
-    async def call(self, arguments: str, call_id: str) -> OpenAIFunctionCallOutput | None:
+    @property
+    def tool_param(self) -> FunctionToolParam:
+        pass
+
+    async def call(
+            self,
+            messages: list[ChatMessage],
+            arguments: str,
+            call_id: str,
+    ) -> FunctionCallOutput | None:
         pass
 
 class LLMClient(Protocol):
@@ -27,9 +37,9 @@ class LLMClient(Protocol):
             model: str,
             reasoning_effort: str = None,
             stream_ndjson: bool = False,
-            text: OpenAIResponseTextConfigParam = None,
+            text: ResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
-            tool_params: list[OpenAIToolParam] = None,
+            tool_params: list[ToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
         yield "[BUG: stream_response not implemented]"
 
@@ -39,12 +49,12 @@ class OpenAIClient(LLMClient):
 
     async def create_response(
             self,
-            messages: list[ChatMessage | OpenAIFunctionCallOutput | OpenAIResponseFunctionToolCall],
+            messages: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             model: str,
             reasoning_effort: str = None,
             stream: bool = False,
-            text: OpenAIResponseTextConfigParam = None,
-            tool_params: list[OpenAIToolParam] = None,
+            text: ResponseTextConfigParam = None,
+            tool_params: list[ToolParam] = None,
     ):
         reasoning_config = {"effort": reasoning_effort if reasoning_effort else "none"}
         return await self.async_openai.responses.create(
@@ -59,8 +69,8 @@ class OpenAIClient(LLMClient):
     @classmethod
     async def handle_response_stream_event(
             cls,
-            event: OpenAIResponseStreamEvent,
-            messages: list[ChatMessage | OpenAIFunctionCallOutput | OpenAIResponseFunctionToolCall],
+            event: ResponseStreamEvent,
+            messages: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             callback_tasks: list[asyncio.Task],
             tool_callbacks: dict[str, FunctionToolCallback],
             ndjson: bool = False,
@@ -71,6 +81,7 @@ class OpenAIClient(LLMClient):
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
             messages.append(event.item)
             callback_task = asyncio.create_task(tool_callbacks[event.item.name].call(
+                messages,
                 event.item.arguments,
                 event.item.call_id,
             ))
@@ -86,9 +97,9 @@ class OpenAIClient(LLMClient):
             model: str,
             reasoning_effort: str = None,
             stream_ndjson: bool = False,
-            text: OpenAIResponseTextConfigParam = None,
+            text: ResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
-            tool_params: list[OpenAIToolParam] = None,
+            tool_params: list[ToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
         # TODO: Optional pre create_response hooks that can be used for recall and to inject new contexts
         callback_tasks = []

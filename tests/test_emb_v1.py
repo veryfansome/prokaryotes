@@ -73,13 +73,13 @@ def test_semantic_similarity(
     payload = {"batch_size": 16, "prompt": "query", "texts": [query], "truncate_to": truncate_to}
     resp = client.post("/embs", json=payload)
     assert resp.status_code == 200, resp
-    qry_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
+    qry_embs = TextEmbeddingResponse.model_validate(resp.json()).embs
 
     # Get embeddings for documents
     payload = {"batch_size": 16, "prompt": "document", "texts": [related_doc, unrelated_doc], "truncate_to": truncate_to}
     resp = client.post("/embs", json=payload)
     assert resp.status_code == 200, resp
-    doc_embs = TextEmbeddingResponse.model_validate(resp.json()).embeddings
+    doc_embs = TextEmbeddingResponse.model_validate(resp.json()).embs
 
     score_unrelated = np.dot(qry_embs[0], doc_embs[1])
     assert score_unrelated < unrelated_doc_threshold, "Unrelated documents should have low similarity"

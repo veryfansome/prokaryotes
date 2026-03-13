@@ -12,6 +12,7 @@ from prokaryotes.models_v1 import (
     PersonContext,
     QuestionDoc,
     ResponseDoc,
+    ToolCallDoc,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,10 +92,37 @@ response_mappings = {
         "importance": {"type": "integer"},
         "labels":     {"type": "keyword"},
         "text": {
-            "type": "text",
-            "analyzer": "standard",
+            "type":            "text",
+            "analyzer":        "standard",
             "search_analyzer": "custom_query_analyzer",
         },
+    }
+}
+
+tool_call_mappings = {
+    "dynamic": "strict",
+    "properties": {
+        "labels": {"type": "keyword"},
+        "output": {"type": "object", "enabled": False},
+        # TODO: It might be interesting to have a non-triggers for contexts that don't trigger the tool, and
+        #       similarity to non-triggers would pull down the score
+        "triggers": {
+            "type": "nested",
+            "properties": {
+                "text": {
+                    "type":            "text",
+                    "analyzer":        "standard",
+                    "search_analyzer": "custom_query_analyzer",
+                },
+                "text_emb": {
+                    "type":       "dense_vector",
+                    "dims":       256,
+                    "index":      True,
+                    "similarity": "cosine",
+                },
+            },
+        },
+        "updated_at": {"type": "date"},
     }
 }
 
@@ -102,22 +130,35 @@ class SearchClient:
     def __init__(self):
         self.es: AsyncElasticsearch | None = None
 
+    async def close(self):
+        await self.es.close()
+
+    async def get_user_context(
+            self,
+            full_name: str,
+            user_id: int,
+            match: str = None,
+            match_emb: list[float] = None,
+    ) -> PersonContext:
+        facts = await self.search_facts(f"user:{user_id}", match=match, match_emb=match_emb)
+        return PersonContext(facts=facts, name=full_name, questions=[], user_id=user_id)
+
     async def index_facts(self, about: list[str], fact_texts: list[str], fact_embs: list[list[float]]):
         """Index a small list of facts."""
-        created_at = datetime.now(timezone.utc)
-        facts = [FactDoc(about=about, created_at=created_at, text=text) for text in fact_texts]
+        now = datetime.now(timezone.utc)
+        docs = [FactDoc(about=about, created_at=now, text=text) for text in fact_texts]
         index_tasks = [
-            self.es.index(index="facts", document=(fact.model_dump() | {"text_emb": fact_embs[idx]}))
-            for idx, fact in enumerate(facts)
+            self.es.index(index="facts", document=(doc.model_dump() | {"text_emb": fact_embs[idx]}))
+            for idx, doc in enumerate(docs)
         ]
         results: list[ObjectApiResponse | Exception] = await asyncio.gather(*index_tasks, return_exceptions=True)
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Failed to index {facts[idx]}", exc_info=result)
+                logger.error(f"Failed to index {docs[idx]}", exc_info=result)
                 # TODO: Retry?
             else:
-                facts[idx].doc_id = result["_id"]
-        return facts
+                docs[idx].doc_id = result["_id"]
+        return docs
 
     async def index_prompt(
             self,
@@ -126,9 +167,9 @@ class SearchClient:
             labels: list[str],
             messages: list[ChatMessage],
     ) -> PromptDoc | None:
-        created_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
         doc = PromptDoc(
-            about=about, created_at=created_at, doc_id=prompt_uuid, labels=labels, messages=messages
+            about=about, created_at=now, doc_id=prompt_uuid, labels=labels, messages=messages
         )
         try:
             await self.es.index(id=prompt_uuid, index="prompts", document=doc.model_dump())
@@ -144,12 +185,26 @@ class SearchClient:
             generated_response: str,
             error: str = None,
     ):
-        created_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
         doc = ResponseDoc(
-            about=about, created_at=created_at, doc_id=prompt_uuid, error=error, labels=labels, text=generated_response
+            about=about, created_at=now, doc_id=prompt_uuid, error=error, labels=labels, text=generated_response
         )
         try:
             await self.es.index(id=prompt_uuid, index="responses", document=doc.model_dump())
+            return doc
+        except Exception:
+            logger.exception(f"Failed to index {doc}")
+
+    async def index_tool_call(self, labels: list[str], output: str, trigger_text: str, trigger_emb: list[float]):
+        now = datetime.now(timezone.utc)
+        doc = ToolCallDoc(
+            labels=labels, output=output, triggers=[], updated_at=now,
+        )
+        try:
+            await self.es.index(index="tool-calls", document=(doc.model_dump() | {"triggers": [{
+                "text": trigger_text,
+                "text_emb": trigger_emb,
+            }]}))
             return doc
         except Exception:
             logger.exception(f"Failed to index {doc}")
@@ -194,18 +249,21 @@ class SearchClient:
         for h in hits:
             text = h['_source'].get('text')
             displayed_text = text if len(text) <= 50 else (text[:50] + "...")
-            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
+            logger.debug(f"FactDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
         return [FactDoc(doc_id=h["_id"], **h["_source"]) for h in hits if h["_score"] >= score_threshold]
 
     async def search_facts(
             self,
             about: str,
+            knn_num_candidates: int = 100,
+            knn_top_k: int = 50,
             match: str = None,
             match_emb: list[float] = None,
-            score_threshold: float = None,
+            min_score: float = None,
     ) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
         shared_filters = [
+            # TODO: Might need to expand to searching multiple about keywords with AND/OR
             {"term": {"about": about}},
             {
                 "bool": {
@@ -258,9 +316,9 @@ class SearchClient:
             search_kwargs["knn"] = {
                 "field": "text_emb",
                 "query_vector": match_emb,
-                "boost": 1.0,  # Increase this if semantic matches should weigh more
-                "k": 50,
-                "num_candidates": 100,
+                "boost": 1.0,
+                "num_candidates": knn_num_candidates,
+                "k": knn_top_k,
                 "filter": {
                     "bool": {
                         "must": shared_filters,
@@ -273,22 +331,91 @@ class SearchClient:
         for h in hits:
             text = h['_source'].get('text')
             displayed_text = text if len(text) <= 50 else (text[:50] + "...")
-            logger.debug(f"Doc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
+            logger.debug(f"FactDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
         return [FactDoc(doc_id=h["_id"], **h["_source"])
-                for h in hits if not score_threshold or (h["_score"] >= score_threshold)]
+                for h in hits if not min_score or (h["_score"] >= min_score)]
 
-    async def get_user_context(
+    async def search_tool_call_by_labels(self, filter_labels: list[str]) -> list[ToolCallDoc]:
+        response = await self.es.search(
+            index="tool-calls",
+            query={
+                "bool": {
+                    "filter": [{"term": {"labels": label}} for label in filter_labels]
+                }
+            }
+        )
+        hits = response["hits"]["hits"]
+        for h in hits:
+            labels = h['_source'].get('labels')
+            logger.debug(f"ToolCallDoc ID: {h['_id']} | Labels: {labels}")
+        return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
+
+    async def search_tool_call_by_trigger(
             self,
-            full_name: str,
-            user_id: int,
-            match: str = None,
-            match_emb: list[float] = None,
-    ) -> PersonContext:
-        facts = await self.search_facts(f"user_{user_id}", match=match, match_emb=match_emb)
-        return PersonContext(facts=facts, name=full_name, questions=[], user_id=user_id)
+            match: str,
+            match_emb: list[float],
+            min_score: float = 1.0,
+            knn_num_candidates: int = 100,
+            knn_top_k: int = 10,
+    ) -> list[ToolCallDoc]:
+        response = await self.es.search(
+            index="tool-calls",
+            knn={
+                "field": "triggers.text_emb",
+                "query_vector": match_emb,
+                "boost": 1.0,
+                "k": knn_top_k,
+                "num_candidates": knn_num_candidates,
+            },
+            query={
+                "bool": {
+                    "should": [
+                        {
+                            "nested": {
+                                "path": "triggers",
+                                "query": {
+                                    "match": {
+                                        "triggers.text": {
+                                            "query": match,
+                                            "boost": 1.0
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    ]
+                }
+            },
+        )
+        hits = response["hits"]["hits"]
+        for h in hits:
+            labels = h['_source'].get('labels')
+            logger.debug(f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Labels: {labels}")
+        return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits if h["_score"] >= min_score]
 
-    async def close(self):
-        await self.es.close()
+    async def update_tool_call(self, doc_id: str, output: str, trigger_text: str, trigger_emb: list[float]):
+        now = datetime.now(timezone.utc)
+        try:
+            await self.es.update(
+                index="tool-calls",
+                id=doc_id,
+                body={
+                    "script": {
+                        "source": """
+                            ctx._source.output = params.output;
+                            ctx._source.triggers.add(params.trigger);
+                            ctx._source.updated_at = params.updated_at;
+                        """,
+                        "params": {
+                            "output": output,
+                            "trigger": {"text": trigger_text, "text_emb": trigger_emb},
+                            "updated_at": now.isoformat(),
+                        }
+                    }
+                }
+            )
+        except Exception:
+            logger.exception(f"Failed to update tool-calls document: id={doc_id}")
 
 def get_elastic_search() -> AsyncElasticsearch:
     uri = os.environ.get("ELASTIC_URI")
