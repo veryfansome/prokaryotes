@@ -104,6 +104,29 @@ export function createChatApp({
         sendButton.disabled = !chatInput.value.trim() || isGenerating;
     }
 
+    function scrollToBottomWhereInputIs() {
+        const scrollToLowestOffsets = () => {
+            chatContainer.scrollTop = Math.max(0, chatContainer.scrollHeight - chatContainer.clientHeight);
+            const scrollingElement = doc.scrollingElement;
+            if (scrollingElement) {
+                scrollingElement.scrollTop = Math.max(0, scrollingElement.scrollHeight - scrollingElement.clientHeight);
+            }
+        };
+
+        if (typeof chatInput.scrollIntoView === 'function') {
+            try {
+                chatInput.scrollIntoView({ block: 'end', inline: 'nearest' });
+            } catch {
+                // Ignore scroll API failures in non-browser environments (e.g. tests).
+            }
+        }
+
+        scrollToLowestOffsets();
+        // Run twice to account for layout settling during streaming reflows.
+        void chatContainer.offsetHeight;
+        scrollToLowestOffsets();
+    }
+
     function getNode(nodeId) {
         return messageTree.get(nodeId) || null;
     }
@@ -479,6 +502,7 @@ export function createChatApp({
 
         sendButton.disabled = false;
         chatInput.focus();
+        scrollToBottomWhereInputIs();
     }
 
     async function generateAssistantResponse(parentNodeId) {
@@ -494,7 +518,7 @@ export function createChatApp({
         assistantContent.innerHTML = '<span class="typing-indicator"></span>';
         pendingMessageDiv.appendChild(assistantContent);
         chatWrapper.appendChild(pendingMessageDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+        scrollToBottomWhereInputIs();
 
         try {
             const query = buildChatQueryParams(timeZone, latitude, longitude);
@@ -532,7 +556,7 @@ export function createChatApp({
                     }
                     fullResponse += parsed.text_delta;
                     assistantContent.textContent = fullResponse;
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                    scrollToBottomWhereInputIs();
                     return;
                 }
 
@@ -573,6 +597,7 @@ export function createChatApp({
             updateSendButtonState();
             if (didCompleteResponse) {
                 renderMessages();
+                scrollToBottomWhereInputIs();
             }
         }
     }

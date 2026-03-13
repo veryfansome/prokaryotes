@@ -91,6 +91,92 @@ describe('createChatApp messageTree flow', () => {
         ]);
     });
 
+    it('keeps scrolling to the textarea while assistant tokens stream', async () => {
+        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hel' }), JSON.stringify({ text_delta: 'lo' })]]);
+
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: fetchMock,
+            navigatorImpl: {},
+        });
+
+        const scrollIntoViewSpy = vi.fn();
+        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+
+        app.elements.chatInput.value = 'Hi';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        await app.sendMessage();
+
+        expect(scrollIntoViewSpy).toHaveBeenCalled();
+    });
+
+    it('scrolls the chat container to its lowest possible offset', async () => {
+        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hello' })]]);
+
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: fetchMock,
+            navigatorImpl: {},
+        });
+
+        let scrollTop = 0;
+        Object.defineProperty(app.elements.chatContainer, 'clientHeight', {
+            configurable: true,
+            get: () => 600,
+        });
+        Object.defineProperty(app.elements.chatContainer, 'scrollHeight', {
+            configurable: true,
+            get: () => 1600,
+        });
+        Object.defineProperty(app.elements.chatContainer, 'scrollTop', {
+            configurable: true,
+            get: () => scrollTop,
+            set: value => {
+                scrollTop = value;
+            },
+        });
+
+        app.elements.chatInput.scrollIntoView = vi.fn();
+        app.elements.chatInput.value = 'Hi';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        await app.sendMessage();
+
+        expect(scrollTop).toBe(1000);
+    });
+
+    it('scrolls textarea into view when editing a previous user message by click', async () => {
+        const fetchMock = createFetchMock([
+            [JSON.stringify({ text_delta: 'A1' })],
+            [JSON.stringify({ text_delta: 'A2' })],
+        ]);
+
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: fetchMock,
+            navigatorImpl: {},
+        });
+
+        app.elements.chatInput.value = 'U1';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        await app.sendMessage();
+
+        app.elements.chatInput.value = 'U2';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        await app.sendMessage();
+
+        const scrollIntoViewSpy = vi.fn();
+        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+
+        const editableMessage = app.elements.chatWrapper.querySelector(
+            '.message.user .message-content[data-message-index="2"]',
+        );
+        expect(editableMessage).not.toBeNull();
+        editableMessage.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(app.getIsEditing()).toBe(true);
+        expect(scrollIntoViewSpy).toHaveBeenCalled();
+    });
+
     it('cancels edit mode with Escape and restores active branch', async () => {
         const fetchMock = createFetchMock([
             [JSON.stringify({ text_delta: 'A1' })],
