@@ -15,19 +15,18 @@ from typing import (
     AsyncGenerator,
 )
 
-from prokaryotes.callbacks_v1 import (
-    ListDirectoryCallback,
-    ReadFileCallback,
-    SearchEmailFunctionToolCallback,
-)
 from prokaryotes.graph_v1 import GraphClient
-from prokaryotes.llm_v1 import get_llm_client
+from prokaryotes.llm_v1 import (
+    FunctionToolCallback,
+    get_llm_client,
+)
 from prokaryotes.models_v1 import (
     ChatMessage,
     PromptPayload,
     PromptContext,
     TextEmbeddingPrompt,
     TextEmbeddingRequest,
+    ToolCallDoc,
 )
 from prokaryotes.observers_v1 import (
     TopicClassifyingObserver,
@@ -37,18 +36,16 @@ from prokaryotes.search_v1 import (
     PersonContext,
     SearchClient,
 )
-from prokaryotes.tool_params_v1 import (
-    list_directory_tool_param,
-    read_file_tool_param,
-    search_email_tool_param,
-    web_search_tool_param,
-)
-from prokaryotes.utils import (
-    developer_message_parts,
+from prokaryotes.tools_v1.builtin_params import web_search_tool_param
+from prokaryotes.tools_v1.read_file import ReadFileCallback
+from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
+from prokaryotes.tools_v1.search_email import SearchEmailCallback
+from prokaryotes.utils_v1.context_utils import developer_message_parts
+from prokaryotes.utils_v1.text_utils import (
     get_text_embeddings,
-    prep_chat_message_text_for_search,
+    normalize_text_for_search,
 )
-from prokaryotes.web_base import WebBase
+from prokaryotes.web_base_v1 import WebBase
 
 logger = logging.getLogger(__name__)
 
@@ -58,21 +55,36 @@ class ProkaryoteV1(WebBase):
         self.graph_client = GraphClient()
         self.llm_client = get_llm_client()
         self.search_client = SearchClient()
-        self.tools_callbacks = {
-            list_directory_tool_param["name"]: ListDirectoryCallback(),
-            read_file_tool_param["name"]: ReadFileCallback(),
-            search_email_tool_param["name"]: SearchEmailFunctionToolCallback(self.search_client),
-        }
-        self.tools_params = [
-            list_directory_tool_param,
-            read_file_tool_param,
-            search_email_tool_param,
-            web_search_tool_param,
+
+        tools: list[FunctionToolCallback] = [
+            ReadFileCallback(self.search_client),
+            ScanDirectoryCallback(self.search_client),
+            SearchEmailCallback(self.search_client),
         ]
+        self.tools_callbacks = {t.tool_param["name"]: t for t in tools}
+        self.tools_params = [t.tool_param for t in tools]
+        self.tools_params.append(web_search_tool_param)
 
     @classmethod
-    def developer_message(cls, prompt_context: PromptContext, user_context: PersonContext):
+    def developer_message(
+            cls,
+            prompt_context: PromptContext,
+            user_context: PersonContext,
+            tool_calls: list[ToolCallDoc],
+    ):
         message_parts = developer_message_parts(prompt_context, user_context)
+
+        if tool_calls:
+            message_parts.append("---")
+            message_parts.append("## Tool outputs")
+            for tool_call_doc in tool_calls:
+                updated_at = tool_call_doc.updated_at.astimezone(prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
+                message_parts.append(
+                    f"### {', '.join(tool_call_doc.labels)}\n"
+                    f"Updated at: {updated_at}\n"
+                    f"<pre><code>{tool_call_doc.output}</code></pre>"
+                )
+
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         # TODO: Maybe this should be guided by user preferences
@@ -86,18 +98,19 @@ class ProkaryoteV1(WebBase):
 
     async def finalize(
             self,
-            user_id: int,
-            conversation_uuid: str,
-            prompt_uuid: str,
-            payload_messages: list[ChatMessage],
+            error: str,
             generated_response: str,
+            payload: PromptPayload,
+            prompt_uuid: str,
+            tool_calls: list[ToolCallDoc],
             topic_observer: TopicClassifyingObserver,
+            user_context: PersonContext,
             user_fact_observer: UserFactsSavingObserver,
-            error: str = None
+            user_id: int,
     ):
         common_labels = [
-            f"conversation_{conversation_uuid}",
-            f"user_{user_id}",
+            f"conversation:{payload.conversation_uuid}",
+            f"user:{user_id}",
         ]
         topics = await topic_observer.get_topics()
         prompt, response = await asyncio.gather(
@@ -105,7 +118,7 @@ class ProkaryoteV1(WebBase):
                 about=topics,
                 prompt_uuid=prompt_uuid,
                 labels=common_labels,
-                messages=payload_messages,
+                messages=payload.messages,
             ),
             self.search_client.index_response(
                 about=topics,
@@ -181,6 +194,7 @@ class ProkaryoteV1(WebBase):
         # TODO: Observer that identifies when a conversation reaches an inflection point and earlier parts can be
         #       summarized and truncated.
         # NOTE: Alternatively, we can just use a heuristic based on length.
+        #       e.g. model cutoff - developer message len
 
         # TODO: Way to truncate prompts in a way that preserves context but saves tokens.
         # NOTE: User keeps and sends the full conversation with all messages so any truncation is server side only.
@@ -200,33 +214,45 @@ class ProkaryoteV1(WebBase):
         #                            and decides to update a summary field on the PromptDoc.
         # Pext payload arrives   >
 
-        search_query_text = await run_in_threadpool(
-            prep_chat_message_text_for_search, " ".join(m.content for m in payload.messages if m.role == "user"),
+        # TODO: Maybe a running log of what actions have been taken in each conversation would be helpful
+
+        search_text = await run_in_threadpool(
+            normalize_text_for_search,
+            # TODO: Concatenating all message might not be ideal
+            " ".join(m.content for m in payload.messages if m.role == "user"),
         )
-        logger.info(f"Search query text: {search_query_text}")
-        emb_resp = None
-        if search_query_text:
-            emb_resp = await get_text_embeddings(TextEmbeddingRequest(
-                prompt=TextEmbeddingPrompt.QUERY,
-                texts=[search_query_text],  # TODO: Concatenating all message might not be ideal
-                truncate_to=256,
-            ))
-        user_context = await self.search_client.get_user_context(
-            session["full_name"], session["user_id"],
-            match=(search_query_text if search_query_text else None),
-            match_emb=(emb_resp.embeddings[0] if emb_resp else None),
+        logger.info(f"Search text: {search_text}")
+        search_emb = (await get_text_embeddings(TextEmbeddingRequest(
+            prompt=TextEmbeddingPrompt.QUERY,
+            texts=[search_text],
+            truncate_to=256,
+        ))).embs[0]
+
+        tool_calls, user_context = await asyncio.gather(
+            self.search_client.search_tool_call_by_trigger(
+                search_text, search_emb,
+                knn_top_k=3
+            ),
+            self.search_client.get_user_context(
+                session["full_name"], session["user_id"],
+                match=search_text,
+                match_emb=search_emb,
+            ),
         )
 
         user_fact_observer = UserFactsSavingObserver(prompt_context, user_context, self.llm_client, self.search_client)
         user_fact_observer.observe_in_background(payload.messages)
 
-        context_window = [ChatMessage(role="developer", content=self.developer_message(prompt_context, user_context))]
+        context_window = [
+            ChatMessage(
+                role="developer",
+                content=self.developer_message(prompt_context, user_context, tool_calls)
+            )
+        ]
         context_window.extend(payload.messages)
         return StreamingResponse(
             self.stream_and_finalize(
-                user_id=user_context.user_id,
-                conversation_uuid=payload.conversation_uuid,
-                payload_messages=payload.messages,
+                payload=payload,
                 response_generator=self.llm_client.stream_response(
                     context_window, model,
                     reasoning_effort=reasoning_effort,
@@ -234,20 +260,24 @@ class ProkaryoteV1(WebBase):
                     tool_callbacks=self.tools_callbacks,
                     tool_params=self.tools_params,
                 ),
+                tool_calls=tool_calls,
                 topic_observer=topic_observer,
+                user_context=user_context,
                 user_fact_observer=user_fact_observer,
+                user_id=user_context.user_id,
             ),
             media_type="text/event-stream",
         )
 
     async def stream_and_finalize(
             self,
-            user_id: int,
-            conversation_uuid: str,
-            payload_messages: list[ChatMessage],
+            payload: PromptPayload,
             response_generator: AsyncGenerator[str, Any],
+            tool_calls: list[ToolCallDoc],
             topic_observer: TopicClassifyingObserver,
+            user_context: PersonContext,
             user_fact_observer: UserFactsSavingObserver,
+            user_id: int,
     ) -> AsyncGenerator[str, Any]:
         prompt_uuid = str(uuid.uuid4())
         yield json.dumps({"prompt_uuid": prompt_uuid}) + "\n"
@@ -268,12 +298,13 @@ class ProkaryoteV1(WebBase):
             raise
         finally:
             self.background_and_forget(self.finalize(
-                user_id=user_id,
-                conversation_uuid=conversation_uuid,
-                prompt_uuid=prompt_uuid,
-                payload_messages=payload_messages,
+                error=error,
                 generated_response=generated_response,
+                payload=payload,
+                prompt_uuid=prompt_uuid,
+                tool_calls=tool_calls,
                 topic_observer=topic_observer,
+                user_context=user_context,
                 user_fact_observer=user_fact_observer,
-                error=error
+                user_id=user_id,
             ))

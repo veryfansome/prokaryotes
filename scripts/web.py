@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 
-from prokaryotes.utils import setup_logging
+from prokaryotes.utils_v1.logging_utils import setup_logging
 from prokaryotes.web_v1 import ProkaryoteV1
 
 load_dotenv()

@@ -1,6 +1,7 @@
 import asyncio
 import asyncpg
 import bcrypt
+import httpx
 import logging
 import os
 from abc import abstractmethod
@@ -29,7 +30,8 @@ from starsessions.stores.redis import RedisStore
 from typing import Coroutine
 from urllib.parse import urlencode
 
-from prokaryotes.utils import log_async_task_exception
+from prokaryotes.utils_v1 import http_utils
+from prokaryotes.utils_v1.logging_utils import log_async_task_exception
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,7 @@ class WebBase:
     async def lifespan(self, app: FastAPI):
         """Asynchronous setup/teardown steps"""
         logger.info("Entering setup")
+        http_utils.httpx_client = httpx.AsyncClient()
         self.postgres_pool = await get_postgres_pool()
         await self.on_start()
         yield
@@ -142,6 +145,7 @@ class WebBase:
             if pending_tasks:
                 logger.warning(f"Exiting with {len(pending_tasks)} tasks pending")
         await asyncio.gather(
+            http_utils.httpx_client.aclose(),
             self.on_stop(),
             self.postgres_pool.close(),
             self.redis_client.close(),

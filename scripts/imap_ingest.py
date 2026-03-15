@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 from prokaryotes.imap_v1 import IngestController
-from prokaryotes.utils import setup_logging
+from prokaryotes.utils_v1.logging_utils import setup_logging
 
 load_dotenv()
 setup_logging()

@@ -38,9 +38,9 @@ class EmbeddingV1:
             trunc = embs[:, :req.truncate_to]
             # Re-normalize truncated vectors
             norms = np.linalg.norm(trunc, axis=1, keepdims=True)
-            return TextEmbeddingResponse(embeddings=(trunc / np.where(norms > 0, norms, 1.0)).tolist())
+            return TextEmbeddingResponse(embs=(trunc / np.where(norms > 0, norms, 1.0)).tolist())
         else:
-            return TextEmbeddingResponse(embeddings=embs.tolist())
+            return TextEmbeddingResponse(embs=embs.tolist())
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
