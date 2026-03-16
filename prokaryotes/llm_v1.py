@@ -10,6 +10,7 @@ from openai.types.responses import (
     ToolParam,
 )
 from openai.types.responses import FunctionToolParam
+from openai.types.responses.response_create_params import ToolChoice
 from openai.types.responses.response_input_param import FunctionCallOutput
 from typing import Any, AsyncGenerator, Protocol, is_typeddict
 
@@ -24,7 +25,7 @@ class FunctionToolCallback(Protocol):
 
     async def call(
             self,
-            messages: list[ChatMessage],
+            context_snapshot: list[ChatMessage],
             arguments: str,
             call_id: str,
     ) -> FunctionCallOutput | None:
@@ -33,12 +34,13 @@ class FunctionToolCallback(Protocol):
 class LLMClient(Protocol):
     async def stream_response(
             self,
-            messages: list[ChatMessage],
+            context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             model: str,
             reasoning_effort: str = None,
             stream_ndjson: bool = False,
             text: ResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
+            tool_choice: ToolChoice = "auto",
             tool_params: list[ToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
         yield "[BUG: stream_response not implemented]"
@@ -49,19 +51,21 @@ class OpenAIClient(LLMClient):
 
     async def create_response(
             self,
-            messages: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
+            context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             model: str,
             reasoning_effort: str = None,
             stream: bool = False,
             text: ResponseTextConfigParam = None,
+            tool_choice: ToolChoice = "auto",
             tool_params: list[ToolParam] = None,
     ):
         reasoning_config = {"effort": reasoning_effort if reasoning_effort else "none"}
         return await self.async_openai.responses.create(
             model=model,
-            input=[(m if (is_typeddict(m) or not isinstance(m, ChatMessage)) else m.model_dump()) for m in messages],
+            input=[(m if (is_typeddict(m) or not isinstance(m, ChatMessage)) else m.model_dump()) for m in context_window],
             text=text,
             tools=tool_params if tool_params else None,
+            tool_choice=tool_choice,
             reasoning=reasoning_config,
             stream=stream,
         )
@@ -70,7 +74,7 @@ class OpenAIClient(LLMClient):
     async def handle_response_stream_event(
             cls,
             event: ResponseStreamEvent,
-            messages: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
+            context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             callback_tasks: list[asyncio.Task],
             tool_callbacks: dict[str, FunctionToolCallback],
             ndjson: bool = False,
@@ -79,9 +83,13 @@ class OpenAIClient(LLMClient):
             return (json.dumps({"text_delta": event.delta}) + "\n") if ndjson else event.delta
         elif event.type == "response.output_item.done" and event.item.type == "function_call":
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
-            messages.append(event.item)
+            context_window.append(event.item)
             callback_task = asyncio.create_task(tool_callbacks[event.item.name].call(
-                messages,
+                # Since context_window is shared, we provide each tool call with stable filtered snapshot
+                [
+                    obj.model_copy() for obj in context_window
+                    if isinstance(obj, (ChatMessage,)) and obj.role in {"assistant", "user"}
+                ],
                 event.item.arguments,
                 event.item.call_id,
             ))
@@ -93,25 +101,26 @@ class OpenAIClient(LLMClient):
 
     async def stream_response(
             self,
-            messages: list[ChatMessage],
+            context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             model: str,
             reasoning_effort: str = None,
             stream_ndjson: bool = False,
             text: ResponseTextConfigParam = None,
             tool_callbacks: dict[str, FunctionToolCallback] = None,
+            tool_choice: ToolChoice = "auto",
             tool_params: list[ToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
         # TODO: Optional pre create_response hooks that can be used for recall and to inject new contexts
         callback_tasks = []
         async for event in await self.create_response(
-                messages, model,
+                context_window, model,
                 reasoning_effort=reasoning_effort,
                 stream=True,
                 text=text,
                 tool_params=tool_params,
         ):
             str_to_yield = await self.handle_response_stream_event(
-                event, messages, callback_tasks, tool_callbacks,
+                event, context_window, callback_tasks, tool_callbacks,
                 ndjson=stream_ndjson,
             )
             if str_to_yield:
@@ -122,16 +131,16 @@ class OpenAIClient(LLMClient):
             # Continuation will fail if all requested function call results are not returned. All FunctionToolCallback
             # calls *MUST* return something if continuation is required.
             if all(item is not None for item in callback_results):
-                messages.extend(result for result in callback_results if result is not None)
+                context_window.extend(result for result in callback_results if result is not None)
                 async for event in await self.create_response(
-                        messages, model,
+                        context_window, model,
                         reasoning_effort=reasoning_effort,
                         stream=True,
                         text=text,
                         tool_params=tool_params,
                 ):
                     str_to_yield = await self.handle_response_stream_event(
-                        event, messages, callback_tasks, tool_callbacks,
+                        event, context_window, callback_tasks, tool_callbacks,
                         ndjson=stream_ndjson,
                     )
                     if str_to_yield:

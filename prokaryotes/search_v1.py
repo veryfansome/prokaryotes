@@ -104,9 +104,7 @@ tool_call_mappings = {
     "properties": {
         "labels": {"type": "keyword"},
         "output": {"type": "object", "enabled": False},
-        # TODO: It might be interesting to have a non-triggers for contexts that don't trigger the tool, and
-        #       similarity to non-triggers would pull down the score
-        "triggers": {
+        "anchors": {
             "type": "nested",
             "properties": {
                 "text": {
@@ -195,16 +193,28 @@ class SearchClient:
         except Exception:
             logger.exception(f"Failed to index {doc}")
 
-    async def index_tool_call(self, labels: list[str], output: str, trigger_text: str, trigger_emb: list[float]):
+    async def index_tool_call(
+            self,
+            labels: list[str],
+            output: str,
+            anchor_emb: list[float] = None,
+            anchor_text: str = None,
+    ):
         now = datetime.now(timezone.utc)
         doc = ToolCallDoc(
-            labels=labels, output=output, triggers=[], updated_at=now,
+            anchors=[], labels=labels, output=output, updated_at=now,
         )
+        anchor = {}
+        if anchor_text:
+            anchor["text"] = anchor_text
+            if anchor_emb:
+                anchor["text_emb"] = anchor_emb
         try:
-            await self.es.index(index="tool-calls", document=(doc.model_dump() | {"triggers": [{
-                "text": trigger_text,
-                "text_emb": trigger_emb,
-            }]}))
+            result = await self.es.index(
+                index="tool-calls",
+                document=(doc.model_dump() | {"anchors": [anchor]} if anchor_text else {})
+            )
+            doc.doc_id = result["_id"]
             return doc
         except Exception:
             logger.exception(f"Failed to index {doc}")
@@ -350,18 +360,19 @@ class SearchClient:
             logger.debug(f"ToolCallDoc ID: {h['_id']} | Labels: {labels}")
         return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
 
-    async def search_tool_call_by_trigger(
+    async def search_tool_call_by_anchor(
             self,
             match: str,
             match_emb: list[float],
-            min_score: float = 1.0,
+            min_score: float = 2.0,
             knn_num_candidates: int = 100,
-            knn_top_k: int = 10,
+            knn_top_k: int = 30,
+            top_k: int = 10,
     ) -> list[ToolCallDoc]:
         response = await self.es.search(
             index="tool-calls",
             knn={
-                "field": "triggers.text_emb",
+                "field": "anchors.text_emb",
                 "query_vector": match_emb,
                 "boost": 1.0,
                 "k": knn_top_k,
@@ -372,10 +383,10 @@ class SearchClient:
                     "should": [
                         {
                             "nested": {
-                                "path": "triggers",
+                                "path": "anchors",
                                 "query": {
                                     "match": {
-                                        "triggers.text": {
+                                        "anchors.text": {
                                             "query": match,
                                             "boost": 1.0
                                         }
@@ -386,6 +397,7 @@ class SearchClient:
                     ]
                 }
             },
+            size=top_k,
         )
         hits = response["hits"]["hits"]
         for h in hits:
@@ -393,24 +405,37 @@ class SearchClient:
             logger.debug(f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Labels: {labels}")
         return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits if h["_score"] >= min_score]
 
-    async def update_tool_call(self, doc_id: str, output: str, trigger_text: str, trigger_emb: list[float]):
+    async def update_tool_call(
+            self,
+            doc_id: str,
+            anchor_emb: list[float] = None,
+            anchor_text: str = None,
+            output: str = None,
+    ):
         now = datetime.now(timezone.utc)
+        script = [
+            "ctx._source.updated_at = params.updated_at;",
+        ]
+        anchor = {}
+        if anchor_text:
+            script.append("ctx._source.anchors.add(params.anchor);")
+            anchor["text"] = anchor_text
+            if anchor_emb:
+                anchor["text_emb"] = anchor_emb
+        if output:
+            script.append("ctx._source.output = params.output;")
         try:
             await self.es.update(
                 index="tool-calls",
                 id=doc_id,
                 body={
                     "script": {
-                        "source": """
-                            ctx._source.output = params.output;
-                            ctx._source.triggers.add(params.trigger);
-                            ctx._source.updated_at = params.updated_at;
-                        """,
-                        "params": {
-                            "output": output,
-                            "trigger": {"text": trigger_text, "text_emb": trigger_emb},
-                            "updated_at": now.isoformat(),
-                        }
+                        "source": "\n".join(script),
+                        "params": (
+                            {"updated_at": now.isoformat()}
+                            | ({"anchor": anchor} if anchor_text else {})
+                            | ({"output": output} if output else {})
+                        )
                     }
                 }
             )

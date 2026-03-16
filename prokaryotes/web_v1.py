@@ -8,7 +8,8 @@ from fastapi import (
     Request,
 )
 from fastapi.responses import StreamingResponse
-from starlette.concurrency import run_in_threadpool
+from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_input_param import FunctionCallOutput
 from starsessions import load_session
 from typing import (
     Any,
@@ -24,8 +25,6 @@ from prokaryotes.models_v1 import (
     ChatMessage,
     PromptPayload,
     PromptContext,
-    TextEmbeddingPrompt,
-    TextEmbeddingRequest,
     ToolCallDoc,
 )
 from prokaryotes.observers_v1 import (
@@ -41,10 +40,7 @@ from prokaryotes.tools_v1.read_file import ReadFileCallback
 from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
 from prokaryotes.tools_v1.search_email import SearchEmailCallback
 from prokaryotes.utils_v1.context_utils import developer_message_parts
-from prokaryotes.utils_v1.text_utils import (
-    get_text_embeddings,
-    normalize_text_for_search,
-)
+from prokaryotes.utils_v1.text_utils import normalize_text_for_search_and_embed
 from prokaryotes.web_base_v1 import WebBase
 
 logger = logging.getLogger(__name__)
@@ -57,8 +53,8 @@ class ProkaryoteV1(WebBase):
         self.search_client = SearchClient()
 
         tools: list[FunctionToolCallback] = [
-            ReadFileCallback(self.search_client),
-            ScanDirectoryCallback(self.search_client),
+            ReadFileCallback(self.llm_client, self.search_client),
+            ScanDirectoryCallback(self.llm_client, self.search_client),
             SearchEmailCallback(self.search_client),
         ]
         self.tools_callbacks = {t.tool_param["name"]: t for t in tools}
@@ -75,12 +71,13 @@ class ProkaryoteV1(WebBase):
         message_parts = developer_message_parts(prompt_context, user_context)
 
         if tool_calls:
+            # TODO: Maybe there should be some heuristic here about what to prioritize
             message_parts.append("---")
-            message_parts.append("## Tool outputs")
+            message_parts.append("## Recalled tool outputs")
             for tool_call_doc in tool_calls:
                 updated_at = tool_call_doc.updated_at.astimezone(prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
                 message_parts.append(
-                    f"### {', '.join(tool_call_doc.labels)}\n"
+                    f"\n### {', '.join(tool_call_doc.labels)}\n"
                     f"Updated at: {updated_at}\n"
                     f"<pre><code>{tool_call_doc.output}</code></pre>"
                 )
@@ -98,9 +95,10 @@ class ProkaryoteV1(WebBase):
 
     async def finalize(
             self,
+            context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
+            conversation_uuid: str,
             error: str,
             generated_response: str,
-            payload: PromptPayload,
             prompt_uuid: str,
             tool_calls: list[ToolCallDoc],
             topic_observer: TopicClassifyingObserver,
@@ -109,7 +107,7 @@ class ProkaryoteV1(WebBase):
             user_id: int,
     ):
         common_labels = [
-            f"conversation:{payload.conversation_uuid}",
+            f"conversation:{conversation_uuid}",
             f"user:{user_id}",
         ]
         topics = await topic_observer.get_topics()
@@ -118,7 +116,11 @@ class ProkaryoteV1(WebBase):
                 about=topics,
                 prompt_uuid=prompt_uuid,
                 labels=common_labels,
-                messages=payload.messages,
+                messages=[
+                    # Drop developer message, FunctionCallOutput, and ResponseFunctionToolCall
+                    msg for msg in context_window
+                    if isinstance(msg, (ChatMessage,)) and msg.role in {"assistant", "user"}
+                ],
             ),
             self.search_client.index_response(
                 about=topics,
@@ -128,6 +130,8 @@ class ProkaryoteV1(WebBase):
                 error=error,
             ),
         )
+
+        # TODO: Evaluate recalled tool outs and facts?
 
         tasks = []
 
@@ -216,22 +220,15 @@ class ProkaryoteV1(WebBase):
 
         # TODO: Maybe a running log of what actions have been taken in each conversation would be helpful
 
-        search_text = await run_in_threadpool(
-            normalize_text_for_search,
-            # TODO: Concatenating all message might not be ideal
-            " ".join(m.content for m in payload.messages if m.role == "user"),
-        )
+        # TODO: How far back to look should be LLM-decided so that it is context aware
+        last_two_user_messages = " ".join([m.content for m in payload.messages if m.role == "user"][-2:])
+        search_text, search_emb = await normalize_text_for_search_and_embed(last_two_user_messages)
         logger.info(f"Search text: {search_text}")
-        search_emb = (await get_text_embeddings(TextEmbeddingRequest(
-            prompt=TextEmbeddingPrompt.QUERY,
-            texts=[search_text],
-            truncate_to=256,
-        ))).embs[0]
 
         tool_calls, user_context = await asyncio.gather(
-            self.search_client.search_tool_call_by_trigger(
+            self.search_client.search_tool_call_by_anchor(
                 search_text, search_emb,
-                knn_top_k=3
+                top_k=3,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
@@ -252,7 +249,8 @@ class ProkaryoteV1(WebBase):
         context_window.extend(payload.messages)
         return StreamingResponse(
             self.stream_and_finalize(
-                payload=payload,
+                context_window=context_window,
+                conversation_uuid=payload.conversation_uuid,
                 response_generator=self.llm_client.stream_response(
                     context_window, model,
                     reasoning_effort=reasoning_effort,
@@ -271,7 +269,8 @@ class ProkaryoteV1(WebBase):
 
     async def stream_and_finalize(
             self,
-            payload: PromptPayload,
+            context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
+            conversation_uuid: str,
             response_generator: AsyncGenerator[str, Any],
             tool_calls: list[ToolCallDoc],
             topic_observer: TopicClassifyingObserver,
@@ -298,9 +297,10 @@ class ProkaryoteV1(WebBase):
             raise
         finally:
             self.background_and_forget(self.finalize(
+                context_window=context_window,
+                conversation_uuid=conversation_uuid,
                 error=error,
                 generated_response=generated_response,
-                payload=payload,
                 prompt_uuid=prompt_uuid,
                 tool_calls=tool_calls,
                 topic_observer=topic_observer,

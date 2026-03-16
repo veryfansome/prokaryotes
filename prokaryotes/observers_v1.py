@@ -3,9 +3,9 @@ import json
 import logging
 from abc import ABC
 from openai.types.responses import (
-    FunctionToolParam as OpenAIFunctionToolParam,
-    ResponseFormatTextJSONSchemaConfigParam as OpenAIResponseFormatTextJSONSchemaParam,
-    ResponseTextConfigParam as OpenAIResponseTextConfigParam,
+    FunctionToolParam,
+    ResponseFormatTextJSONSchemaConfigParam,
+    ResponseTextConfigParam,
 )
 
 from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
@@ -63,13 +63,13 @@ class Observer(ABC):
     def reasoning_effort(self) -> str:
         return "none"
 
-    def text_param(self) -> OpenAIResponseTextConfigParam:
-        return OpenAIResponseTextConfigParam(verbosity="low")
+    def text_param(self) -> ResponseTextConfigParam:
+        return ResponseTextConfigParam(verbosity="low")
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {}
 
-    def tool_params(self) -> list[OpenAIFunctionToolParam]:
+    def tool_params(self) -> list[FunctionToolParam]:
         return []
 
 class TopicClassifyingObserver(Observer):
@@ -96,9 +96,9 @@ class TopicClassifyingObserver(Observer):
             logger.exception(f"Failed to get topic words from '{self.response_text}'")
             return []
 
-    def text_param(self) -> OpenAIResponseTextConfigParam:
-        return OpenAIResponseTextConfigParam(
-            format=OpenAIResponseFormatTextJSONSchemaParam(
+    def text_param(self) -> ResponseTextConfigParam:
+        return ResponseTextConfigParam(
+            format=ResponseFormatTextJSONSchemaConfigParam(
                 name="topic_words",
                 type="json_schema",
                 schema={
@@ -169,8 +169,8 @@ class UserFactsSavingObserver(Observer):
         else:
             return "high"
 
-    def text_param(self) -> OpenAIResponseTextConfigParam:
-        return OpenAIResponseTextConfigParam(format=OpenAIResponseFormatTextJSONSchemaParam(
+    def text_param(self) -> ResponseTextConfigParam:
+        return ResponseTextConfigParam(format=ResponseFormatTextJSONSchemaConfigParam(
             name="tool_called",
             type="json_schema",
             schema={
@@ -191,9 +191,9 @@ class UserFactsSavingObserver(Observer):
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {"save_user_facts": self.callback}
 
-    def tool_params(self) -> list[OpenAIFunctionToolParam]:
+    def tool_params(self) -> list[FunctionToolParam]:
         return [
-            OpenAIFunctionToolParam(
+            FunctionToolParam(
                 type="function",
                 name="save_user_facts",
                 description=(
@@ -245,11 +245,11 @@ class UserQuestionsSavingObserver(Observer):
     def reasoning_effort(self) -> str:
         return "none"
 
-    def text_param(self) -> OpenAIResponseTextConfigParam:
-        return OpenAIResponseTextConfigParam(verbosity="low")
+    def text_param(self) -> ResponseTextConfigParam:
+        return ResponseTextConfigParam(verbosity="low")
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
         return {}
 
-    def tool_params(self) -> list[OpenAIFunctionToolParam]:
+    def tool_params(self) -> list[FunctionToolParam]:
         return []

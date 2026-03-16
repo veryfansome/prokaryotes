@@ -5,6 +5,7 @@ import logging
 from openai.types.responses import FunctionToolParam
 from openai.types.responses.response_input_param import FunctionCallOutput
 
+from prokaryotes.llm_v1 import LLMClient
 from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.tools_v1.base import PathToolCallback
@@ -20,8 +21,8 @@ from prokaryotes.utils_v1.os_utils import (
 logger = logging.getLogger(__name__)
 
 class ScanDirectoryCallback(PathToolCallback):
-    def __init__(self, search_client: SearchClient):
-        super().__init__(search_client)
+    def __init__(self, llm_client: LLMClient, search_client: SearchClient):
+        super().__init__(llm_client, search_client)
 
     @property
     def tool_param(self) -> FunctionToolParam:
@@ -41,7 +42,8 @@ class ScanDirectoryCallback(PathToolCallback):
                         "items": {"type": "string"},
                         "description": (
                             "A flat list of filter strings."
-                            " Exclude entries that don't contain any of the specified strings as substrings in its name."
+                            " Entries that don't include any specified substrings will be excluded."
+                            " Leave empty unless directed otherwise."
                         ),
                     },
                 },
@@ -51,7 +53,7 @@ class ScanDirectoryCallback(PathToolCallback):
             strict=True,
         )
 
-    async def call(self, messages: list[ChatMessage], arguments: str, call_id: str) -> FunctionCallOutput:
+    async def call(self, context_snapshot: list[ChatMessage], arguments: str, call_id: str) -> FunctionCallOutput:
         contents = []
         entry_cnt_limit = 100
         error = ""
@@ -104,7 +106,7 @@ class ScanDirectoryCallback(PathToolCallback):
         output = "\n".join(contents)
         if error:
             output = f"{output}\n\n{error}"
-        indexing_task = asyncio.create_task(self.index(messages, output, arguments["path"]))
+        indexing_task = asyncio.create_task(self.index(context_snapshot, output, arguments["path"]))
         indexing_task.add_done_callback(log_async_task_exception)
         return FunctionCallOutput(
             type="function_call_output",

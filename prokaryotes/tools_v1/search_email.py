@@ -38,7 +38,7 @@ class SearchEmailCallback(FunctionToolCallback):
             strict=True,
         )
 
-    async def call(self, messages: list[ChatMessage], arguments: str, call_id: str) -> FunctionCallOutput:
+    async def call(self, context_snapshot: list[ChatMessage], arguments: str, call_id: str) -> FunctionCallOutput:
         return FunctionCallOutput(
             type="function_call_output",
             call_id=call_id,
