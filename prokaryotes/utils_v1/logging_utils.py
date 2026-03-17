@@ -23,7 +23,8 @@ def setup_logging(
         httpx_level: str = None,
         imapclient_level: str = None,
         openai_level: str = None,
-        prokaryotes_search_level: str = None,
+        prokaryotes_search_v1_level: str = None,
+        prokaryotes_tools_v1_level: str = None,
         root_level: str = None,
 ):
     if not httpcore_level:
@@ -34,8 +35,10 @@ def setup_logging(
         imapclient_level = os.getenv("IMAPCLIENT_LOG_LEVEL", "INFO")
     if not openai_level:
         openai_level = os.getenv("OPENAI_LOG_LEVEL", "INFO")
-    if not prokaryotes_search_level:
-        prokaryotes_search_level = os.getenv("PROKARYOTES_SEARCH_LOG_LEVEL", "DEBUG")
+    if not prokaryotes_search_v1_level:
+        prokaryotes_search_v1_level = os.getenv("PROKARYOTES_SEARCH_V1_LOG_LEVEL", "DEBUG")
+    if not prokaryotes_tools_v1_level:
+        prokaryotes_tools_v1_level = os.getenv("PROKARYOTES_TOOLS_V1_LOG_LEVEL", "DEBUG")
     if not root_level:
         root_level = os.getenv("LOG_LEVEL", "INFO")
 
@@ -77,7 +80,12 @@ def setup_logging(
                 "propagate": False,
             },
             "prokaryotes.search_v1": {
-                "level": prokaryotes_search_level,
+                "level": prokaryotes_search_v1_level,
+                "handlers": ["console"],
+                "propagate": False,
+            },
+            "prokaryotes.tools_v1": {
+                "level": prokaryotes_tools_v1_level,
                 "handlers": ["console"],
                 "propagate": False,
             },

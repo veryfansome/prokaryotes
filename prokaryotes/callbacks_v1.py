@@ -19,7 +19,7 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
         self.search_client = search_client
         self.user_context = user_context
 
-    async def call(self, messages: list[ChatMessage], arguments: str, call_id: str) -> None:
+    async def call(self, context_snapshot: list[ChatMessage], arguments: str, call_id: str) -> None:
         try:
             arguments: dict[str, list[str]] = json.loads(arguments)
             if "facts" in arguments and arguments["facts"]:

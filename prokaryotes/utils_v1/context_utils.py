@@ -43,14 +43,3 @@ def developer_message_parts(prompt_context: PromptContext, user_context: PersonC
     )
     message_parts.append(f"| - | The assistant is a Python app |")
     return message_parts
-
-def find_last_user_message(
-        messages: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall]
-) -> ChatMessage | None:
-    return next(
-        (
-            msg for msg in reversed(messages)
-            if isinstance(msg, (ChatMessage,)) and msg.role == "user"
-        ),
-        None
-    )

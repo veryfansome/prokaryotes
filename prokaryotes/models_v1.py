@@ -107,12 +107,12 @@ class TextEmbeddingRequest(BaseModel):
 class TextEmbeddingResponse(BaseModel):
     embs: list[list[float]]
 
+class ToolCallAnchor(BaseModel):
+    text: str
+
 class ToolCallDoc(BaseModel):
+    anchors: list[ToolCallAnchor]
     doc_id: str | None = Field(default=None, exclude=True)
     labels: list[str] = Field(default_factory=list)
     output: str
-    triggers: list[ToolCallTrigger]
     updated_at: datetime
-
-class ToolCallTrigger(BaseModel):
-    text: str
