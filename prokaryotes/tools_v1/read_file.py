@@ -8,7 +8,7 @@ from openai.types.responses.response_input_param import FunctionCallOutput
 from prokaryotes.llm_v1 import LLMClient
 from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.search_v1 import SearchClient
-from prokaryotes.tools_v1.base import PathToolCallback
+from prokaryotes.tools_v1.base_path_tool import PathToolCallback
 from prokaryotes.utils_v1.logging_utils import log_async_task_exception
 
 logger = logging.getLogger(__name__)
