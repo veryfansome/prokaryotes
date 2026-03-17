@@ -17,7 +17,7 @@ class TopicClassifyingObserver(Observer):
     def developer_message(self) -> str | None:
         message_parts = [
             "---",
-            "## Assistant instructions",
+            "## Instructions",
             (
                 "Consider the most recently received message."
                 " Pick 1-3 words (or phrases) that best conveys the current topic."

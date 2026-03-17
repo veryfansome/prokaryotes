@@ -27,6 +27,7 @@ from prokaryotes.models_v1 import (
     PromptContext,
     ToolCallDoc,
 )
+from prokaryotes.observer_v1.context_observer import ContextFilteringObserver
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
 from prokaryotes.observer_v1.user_fact_observer import UserFactsSavingObserver
 from prokaryotes.search_v1 import (
@@ -188,23 +189,18 @@ class ProkaryoteV1(WebBase):
         if len(payload.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
+        preprocessing_tasks = []
+
+        context_observer: ContextFilteringObserver | None = None
+        if len(payload.messages) > 4:  # After third user message
+            context_observer = ContextFilteringObserver(payload.messages, self.llm_client)
+            context_observer.observe_in_background(payload.messages)
+            preprocessing_tasks.append(context_observer.bg_task)
+
         topic_observer = TopicClassifyingObserver(self.llm_client)
         topic_observer.observe_in_background(payload.messages)
 
         prompt_context = PromptContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
-
-        # TODO: Observer that identifies when a conversation reaches an inflection point and earlier parts can be
-        #       summarized and truncated.
-        # NOTE: Alternatively, we can just use a heuristic based on length.
-        #       e.g. model cutoff - developer message len
-
-        # TODO: Way to truncate prompts in a way that preserves context but saves tokens.
-        # NOTE: User keeps and sends the full conversation with all messages so any truncation is server side only.
-        #       This means when a prompt is received, we need to efficiently retrieve the truncated view of that
-        #       conversation to do the actual LLM completion.
-        # NOTE: Alternatively, we could truncate aggressively and just rely on facts.
-        # NOTE: Occasionally, we might need to determine if the user is referring to something that was sent but has
-        #       been truncated and need to be looked up.
 
         # Payload arrives        >
         #                        *   Here, in this function, we search for the most recent PromptDoc labeled with
@@ -218,9 +214,19 @@ class ProkaryoteV1(WebBase):
 
         # TODO: Maybe a running log of what actions have been taken in each conversation would be helpful
 
-        # TODO: How far back to look should be LLM-decided so that it is context aware
-        last_two_user_messages = " ".join([m.content for m in payload.messages if m.role == "user"][-2:])
-        search_text, search_emb = await normalize_text_for_search_and_embed(last_two_user_messages)
+        if preprocessing_tasks:
+            await asyncio.gather(*preprocessing_tasks)
+
+        # TODO: Use this filtered view as the context window but create a tool that allows access to the full history
+        filtered_user_messages = (
+            # First two user messages before context observer takes over
+            " ".join([m.content for m in payload.messages if m.role == "user"][-2:]) if context_observer is None
+            else " ".join([
+                m.content for m in await context_observer.get_filtered_context()
+                if m.role == "user"
+            ])
+        )
+        search_text, search_emb = await normalize_text_for_search_and_embed(filtered_user_messages)
         logger.info(f"Search text: {search_text}")
 
         tool_calls, user_context = await asyncio.gather(
