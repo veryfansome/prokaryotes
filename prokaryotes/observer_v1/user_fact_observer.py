@@ -1,14 +1,12 @@
 import asyncio
 import json
 import logging
-from abc import ABC
 from openai.types.responses import (
     FunctionToolParam,
     ResponseFormatTextJSONSchemaConfigParam,
     ResponseTextConfigParam,
 )
 
-from prokaryotes.callbacks_v1 import SaveUserFactsFunctionToolCallback
 from prokaryotes.llm_v1 import (
     FunctionToolCallback,
     LLMClient,
@@ -17,106 +15,88 @@ from prokaryotes.models_v1 import (
     ChatMessage,
     FactDoc,
     PromptContext,
+    TextEmbeddingPrompt,
+    TextEmbeddingRequest,
 )
+from prokaryotes.observer_v1.base import Observer
 from prokaryotes.search_v1 import (
     PersonContext,
     SearchClient,
 )
 from prokaryotes.utils_v1.context_utils import developer_message_parts
-from prokaryotes.utils_v1.logging_utils import log_async_task_exception
+from prokaryotes.utils_v1.text_utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
 
-class Observer(ABC):
-    def __init__(self, llm_client: LLMClient, model: str = "gpt-5.1"):
-        self.bg_task = None
-        self.llm_client = llm_client
-        self.model = model
-        self.response_text = ""
+class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
+    def __init__(self, user_context: PersonContext, search_client: SearchClient):
+        self.saved_facts = []
+        self.search_client = search_client
+        self.user_context = user_context
 
-    def developer_message(self) -> str | None:
-        pass
-
-    async def observe(self, messages: list[ChatMessage]):
-        context_window = []
-        developer_message = self.developer_message()
-        if developer_message:
-            logger.debug(f"{self.__class__.__name__} developer message:\n{developer_message}")
-            context_window.append(ChatMessage(role="developer", content=developer_message))
-        # TODO: Roll long contexts off but in a way that can be recalled
-        context_window.extend(messages)
-
-        async for chunk in self.llm_client.stream_response(
-                context_window, self.model,
-                reasoning_effort=self.reasoning_effort(),
-                text=self.text_param(),
-                tool_callbacks=self.tool_callbacks(),
-                tool_params=self.tool_params(),
-        ):
-            self.response_text += chunk
-        logger.info(f"{self.__class__.__name__} response text: {self.response_text}")
-
-    def observe_in_background(self, messages: list[ChatMessage]):
-        self.bg_task = asyncio.create_task(self.observe(messages))
-        self.bg_task.add_done_callback(log_async_task_exception)
-
-    def reasoning_effort(self) -> str:
-        return "none"
-
-    def text_param(self) -> ResponseTextConfigParam:
-        return ResponseTextConfigParam(verbosity="low")
-
-    def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
-        return {}
-
-    def tool_params(self) -> list[FunctionToolParam]:
-        return []
-
-class TopicClassifyingObserver(Observer):
-    def __init__(self, llm_client: LLMClient, **kwargs):
-        super().__init__(llm_client, **kwargs)
-
-    def developer_message(self) -> str | None:
-        message_parts = [
-            "---",
-            "## Assistant instructions",
-            (
-                "Consider the most recently received message."
-                " Pick 1-3 words (or phrases) that best conveys the current topic."
-            ),
-        ]
-        return "\n".join(message_parts)
-
-    async def get_topics(self) -> list[str]:
+    async def call(self, context_snapshot: list[ChatMessage], arguments: str, call_id: str) -> None:
         try:
-            await self.bg_task
-            data = json.loads(self.response_text)
-            return data["topic_words"]
+            arguments: dict[str, list[str]] = json.loads(arguments)
+            if "facts" in arguments and arguments["facts"]:
+                normalized_candidates = []
+                for candidate in arguments["facts"]:
+                    candidate = " ".join(candidate.strip(" .!?\r\n").split())
+                    if candidate:
+                        normalized_candidates.append(candidate)
+                len_before_dedupe = len(normalized_candidates)
+                # Exact-duplicate filtering
+                existing_fact_texts = {fact.text.casefold() for fact in self.user_context.facts}
+                candidates_after_exact_dedupe = [
+                    candidate for candidate in normalized_candidates
+                    if candidate.casefold() not in existing_fact_texts
+                ]
+                len_after_exact_dedupe = len(candidates_after_exact_dedupe)
+                logger.info(
+                    f"Filtered out {len_before_dedupe - len_after_exact_dedupe} candidate facts after exact dedupe"
+                )
+                # Near-duplicate filtering
+                if candidates_after_exact_dedupe:
+                    embs_resp = await get_text_embeddings(
+                        TextEmbeddingRequest(batch_size=16, prompt=TextEmbeddingPrompt.DOCUMENT,
+                                             texts=candidates_after_exact_dedupe,
+                                             truncate_to=256)
+                    )
+                    search_tasks = []
+                    for idx, fact in enumerate(candidates_after_exact_dedupe):
+                        search_tasks.append(asyncio.create_task(
+                            self.search_client.knn_dedupe_facts(
+                                about=f"user:{self.user_context.user_id}",
+                                match_emb=embs_resp.embs[idx],
+                                score_threshold=0.95
+                            )
+                        ))
+                    search_results = await asyncio.gather(*search_tasks)
+                    candidates_to_index = []
+                    candidate_embs = []
+                    for idx, results in enumerate(search_results):
+                        if not results:
+                            candidates_to_index.append(candidates_after_exact_dedupe[idx])
+                            candidate_embs.append(embs_resp.embs[idx])
+                        else:
+                            # TODO: Pass near-duplicates to an LLM judge
+                            # TODO: Alternatively, consolidate near-duplicates into the same fact doc
+                            logger.info(
+                                f"Filtering out fact candidate '{candidates_after_exact_dedupe[idx]}'"
+                                f" as a near-duplicate of {[f.text for f in results]}"
+                            )
+                    len_after_knn_dedupe = len(candidates_to_index)
+                    logger.info(
+                        f"Filtered out {len_after_exact_dedupe - len_after_knn_dedupe} candidate facts after knn dedupe"
+                    )
+                    self.saved_facts = await self.search_client.index_facts(
+                        [f"user:{self.user_context.user_id}"],
+                        candidates_after_exact_dedupe, embs_resp.embs,
+                    )
+            else:
+                logging.warning(f"Missing or empty facts in {arguments} (user {self.user_context.user_id})")
         except Exception:
-            logger.exception(f"Failed to get topic words from '{self.response_text}'")
-            return []
-
-    def text_param(self) -> ResponseTextConfigParam:
-        return ResponseTextConfigParam(
-            format=ResponseFormatTextJSONSchemaConfigParam(
-                name="topic_words",
-                type="json_schema",
-                schema={
-                    "type": "object",
-                    "properties": {
-                        "topic_words": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "A flat list of atomic topic words or phrases.",
-                        },
-                    },
-                    "additionalProperties": False,
-                    "required": ["topic_words"],
-                },
-                strict=True,
-            ),
-            verbosity="low",
-        )
+            logging.exception(f"Failed to save user {self.user_context.user_id} facts")
+        return None  # No continuation
 
 class UserFactsSavingObserver(Observer):
     def __init__(
@@ -199,7 +179,7 @@ class UserFactsSavingObserver(Observer):
                 description=(
                     "Add new facts to the user's \"User info\" section."
                     " Call this function whenever the user mentions private information that can't be easily looked up."
-                    
+
                     " This includes knowledge about the user or their personal life, including:"
                     " family, friends, colleagues, past events, opinions and preferences,"
                     " hobbies, goals, projects, and more."
@@ -222,34 +202,3 @@ class UserFactsSavingObserver(Observer):
                 strict=True,
             )
         ]
-
-# TODO: Flesh out question saving
-class UserQuestionsSavingObserver(Observer):
-    def __init__(
-            self,
-            prompt_context: PromptContext,
-            user_context: PersonContext,
-            llm_client: LLMClient,
-            search_client: SearchClient,
-            **kwargs
-    ):
-        super().__init__(llm_client, **kwargs)
-        self.prompt_context = prompt_context
-        self.search_client = search_client
-        self.user_context = user_context
-
-
-    def developer_message(self) -> str | None:
-        pass
-
-    def reasoning_effort(self) -> str:
-        return "none"
-
-    def text_param(self) -> ResponseTextConfigParam:
-        return ResponseTextConfigParam(verbosity="low")
-
-    def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
-        return {}
-
-    def tool_params(self) -> list[FunctionToolParam]:
-        return []

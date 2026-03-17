@@ -27,15 +27,13 @@ from prokaryotes.models_v1 import (
     PromptContext,
     ToolCallDoc,
 )
-from prokaryotes.observers_v1 import (
-    TopicClassifyingObserver,
-    UserFactsSavingObserver,
-)
+from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
+from prokaryotes.observer_v1.user_fact_observer import UserFactsSavingObserver
 from prokaryotes.search_v1 import (
     PersonContext,
     SearchClient,
 )
-from prokaryotes.tools_v1.builtin_params import web_search_tool_param
+from prokaryotes.tools_v1.builtins import web_search_tool_param
 from prokaryotes.tools_v1.read_file import ReadFileCallback
 from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
 from prokaryotes.tools_v1.search_email import SearchEmailCallback
