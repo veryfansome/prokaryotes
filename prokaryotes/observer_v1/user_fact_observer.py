@@ -115,7 +115,7 @@ class UserFactsSavingObserver(Observer):
     def developer_message(self) -> str | None:
         message_parts = developer_message_parts(self.prompt_context, self.user_context)
         message_parts.append("---")
-        message_parts.append("## Assistant instructions")
+        message_parts.append("## Instructions")
         if self.user_context.facts:
             message_parts.append(
                 "Consider what is already known about the user in the \"User info\" section above."
