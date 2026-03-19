@@ -41,31 +41,38 @@ class ReadFileCallback(PathToolCallback):
         contents = ""
         error = ""
         file_size_limit = 20_000  # TODO: For larger files, better to use the file API
+        path = ""
         try:
             arguments: dict[str, str] = json.loads(arguments)
-            if "path" in arguments and arguments["path"].strip():
-                async with aiofiles.open(arguments["path"], mode="rb") as f:
-                    stat_info = await aiofiles.os.stat(f.fileno())
-                    if stat_info.st_size >= file_size_limit:
-                        raise Exception(
-                            "File too large."
-                            f" {stat_info.st_size} bytes exceeds size limit of {file_size_limit}"
-                        )
-                    first_kb = await f.read(1024)
-                    if b'\x00' in first_kb:
-                        raise Exception(f"File looks binary")
-                    await f.seek(0)  # Go back to start
-                    contents = (await f.read()).decode("utf-8", errors="replace")
+            unsafe_path = arguments.get("path", "")
+            if isinstance(unsafe_path, str):
+                path = unsafe_path.strip()
+                if path:
+                    async with aiofiles.open(path, mode="rb") as f:
+                        stat_info = await aiofiles.os.stat(f.fileno())
+                        if stat_info.st_size >= file_size_limit:
+                            raise Exception(
+                                "File too large."
+                                f" {stat_info.st_size} bytes exceeds size limit of {file_size_limit}"
+                            )
+                        first_kb = await f.read(1024)
+                        if b'\x00' in first_kb:
+                            raise Exception(f"File looks binary")
+                        await f.seek(0)  # Go back to start
+                        contents = (await f.read()).decode("utf-8", errors="replace")
+                else:
+                    raise Exception(f"Missing or empty path in {arguments}")
             else:
-                raise Exception(f"Missing or empty path in {arguments}")
+                raise Exception(f"Invalid path in {arguments}")
         except Exception as e:
             logger.exception(f"Failed to read file {arguments}")
             error = str(e)
         output = contents
         if error:
             output = f"{output}\n\n{error}"
-        indexing_task = asyncio.create_task(self.index(context_snapshot, output, arguments["path"]))
-        indexing_task.add_done_callback(log_async_task_exception)
+        if path:
+            indexing_task = asyncio.create_task(self.index(context_snapshot, output, path))
+            indexing_task.add_done_callback(log_async_task_exception)
         return FunctionCallOutput(
             type="function_call_output",
             call_id=call_id,

@@ -58,33 +58,42 @@ class ScanDirectoryCallback(PathToolCallback):
         entry_cnt_limit = 100
         error = ""
         rows = []
+        path = ""
         try:
             arguments: dict[str, str] = json.loads(arguments)
             inclusion_filters = arguments.get("inclusion_filters", [])
+            if inclusion_filters:
+                contents.append(f"With inclusion filters: {', '.join(inclusion_filters)}\n")
+
             entry_cnt = 0
-            if "path" in arguments and arguments["path"].strip():
-                with await aiofiles.os.scandir(arguments["path"]) as entries:
-                    for entry in entries:
-                        if inclusion_filters and not any(f in entry.name for f in inclusion_filters):
-                            continue
-                        if entry_cnt >= entry_cnt_limit:
-                            raise Exception(
-                                f"Too many files, {entry_cnt_limit} entry limit reached."
-                                " Try inclusion_filters."
-                            )
-                        stat_info = await aiofiles.os.stat(entry.path)
-                        rows.append((
-                            st_mode_to_symbolic_mode(stat_info.st_mode),
-                            str(stat_info.st_nlink),
-                            uid_to_name(stat_info.st_uid),
-                            gid_to_name(stat_info.st_gid),
-                            format_st_size(stat_info.st_size),
-                            format_st_mtime(stat_info.st_mtime),
-                            entry.name,
-                        ))
-                        entry_cnt += 1
+            unsafe_path = arguments.get("path", "")
+            if isinstance(unsafe_path, str):
+                path = unsafe_path.strip()
+                if path:
+                    with await aiofiles.os.scandir(path) as entries:
+                        for entry in entries:
+                            if inclusion_filters and not any(f in entry.name for f in inclusion_filters):
+                                continue
+                            if entry_cnt >= entry_cnt_limit:
+                                raise Exception(
+                                    f"Too many files, {entry_cnt_limit} entry limit reached."
+                                    " Try inclusion_filters."
+                                )
+                            stat_info = await aiofiles.os.stat(entry.path)
+                            rows.append((
+                                st_mode_to_symbolic_mode(stat_info.st_mode),
+                                str(stat_info.st_nlink),
+                                uid_to_name(stat_info.st_uid),
+                                gid_to_name(stat_info.st_gid),
+                                format_st_size(stat_info.st_size),
+                                format_st_mtime(stat_info.st_mtime),
+                                entry.name,
+                            ))
+                            entry_cnt += 1
+                else:
+                    raise Exception(f"Missing or empty path in {arguments}")
             else:
-                raise Exception(f"Missing or empty path in {arguments}")
+                raise Exception(f"Invalid path in {arguments}")
         except Exception as e:
             logger.exception(f"Failed to scan directory {arguments}")
             error = str(e)
@@ -106,8 +115,9 @@ class ScanDirectoryCallback(PathToolCallback):
         output = "\n".join(contents)
         if error:
             output = f"{output}\n\n{error}"
-        indexing_task = asyncio.create_task(self.index(context_snapshot, output, arguments["path"]))
-        indexing_task.add_done_callback(log_async_task_exception)
+        if path:
+            indexing_task = asyncio.create_task(self.index(context_snapshot, output, path))
+            indexing_task.add_done_callback(log_async_task_exception)
         return FunctionCallOutput(
             type="function_call_output",
             call_id=call_id,
