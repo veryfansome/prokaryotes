@@ -11,7 +11,7 @@ from functools import (
 )
 
 @lru_cache(maxsize=128)
-def format_st_mtime(mtime: int) -> str:
+def format_st_mtime(mtime: float) -> str:
     dt = datetime.fromtimestamp(mtime)
     # Like ls
     six_months_ago = time.time() - (6 * 30 * 24 * 60 * 60)

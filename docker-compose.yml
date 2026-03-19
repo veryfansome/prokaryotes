@@ -131,7 +131,7 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     entrypoint: uv
-    command: ["run", "pytest", "-vvv", "-n", "auto"]
+    command: ["run", "pytest", "-vvv"]
 
   # Apps
 
