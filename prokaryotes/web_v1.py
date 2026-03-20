@@ -35,6 +35,7 @@ from prokaryotes.search_v1 import (
     SearchClient,
 )
 from prokaryotes.tools_v1.builtins import web_search_tool_param
+from prokaryotes.tools_v1.get_chat_history import ChatHistoryCallback
 from prokaryotes.tools_v1.read_file import ReadFileCallback
 from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
 from prokaryotes.tools_v1.search_email import SearchEmailCallback
@@ -63,17 +64,18 @@ class ProkaryoteV1(WebBase):
     @classmethod
     def developer_message(
             cls,
+            hidden_message_count: int,
             prompt_context: PromptContext,
-            user_context: PersonContext,
-            tool_calls: list[ToolCallDoc],
+            recalled_tool_calls: list[ToolCallDoc],
+            recalled_user_context: PersonContext,
     ):
-        message_parts = developer_message_parts(prompt_context, user_context)
+        message_parts = developer_message_parts(prompt_context, recalled_user_context)
 
-        if tool_calls:
+        if recalled_tool_calls:
             # TODO: Maybe there should be some heuristic here about what to prioritize
             message_parts.append("---")
             message_parts.append("## Recalled tool outputs")
-            for tool_call_doc in tool_calls:
+            for tool_call_doc in recalled_tool_calls:
                 updated_at = tool_call_doc.updated_at.astimezone(prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
                 message_parts.append(
                     f"\n### {', '.join(tool_call_doc.labels)}\n"
@@ -83,10 +85,16 @@ class ProkaryoteV1(WebBase):
 
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
-        # TODO: Maybe this should be guided by user preferences
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
-        message_parts.append("- Don't offer platitudes or untruths.")
-        message_parts.append("- Don't project confidence when you are uncertain.")
+        # TODO: Maybe this should be guided by user preferences
+        #message_parts.append("- Don't offer platitudes or untruths.")
+        #message_parts.append("- Don't project confidence when you are uncertain.")
+        if hidden_message_count > 0:
+            message_parts.append(
+                f"- {hidden_message_count} {'messages have' if hidden_message_count > 1 else 'message has'} been"
+                " filtered out of the context window. If some required context seems missing, use the"
+                " `get_chat_history` function tool."
+            )
 
         message = "\n".join(message_parts)
         logger.info(f"Foreground developer message:\n{message}")
@@ -103,11 +111,10 @@ class ProkaryoteV1(WebBase):
             topic_observer: TopicClassifyingObserver,
             user_context: PersonContext,
             user_fact_observer: UserFactsSavingObserver,
-            user_id: int,
     ):
         common_labels = [
             f"conversation:{conversation_uuid}",
-            f"user:{user_id}",
+            f"user:{user_context.user_id}",
         ]
         topics = await topic_observer.get_topics()
         prompt, response = await asyncio.gather(
@@ -186,13 +193,15 @@ class ProkaryoteV1(WebBase):
         if not session:
             raise HTTPException(status_code=400, detail="Session expired")
 
-        if len(payload.messages) == 0:
+        payload_messages_len = len(payload.messages)
+
+        if payload_messages_len == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
         preprocessing_tasks = []
 
         context_observer: ContextFilteringObserver | None = None
-        if len(payload.messages) > 4:  # After third user message
+        if payload_messages_len > 4:  # After third user message
             context_observer = ContextFilteringObserver(payload.messages, self.llm_client)
             context_observer.observe_in_background(payload.messages)
             preprocessing_tasks.append(context_observer.bg_task)
@@ -200,36 +209,19 @@ class ProkaryoteV1(WebBase):
         topic_observer = TopicClassifyingObserver(self.llm_client)
         topic_observer.observe_in_background(payload.messages)
 
-        prompt_context = PromptContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
-
-        # Payload arrives        >
-        #                        *   Here, in this function, we search for the most recent PromptDoc labeled with
-        #                            the current conversation UUID, that has a non-empty summary field. If something is
-        #                            found, diff the messages to figure out which messages are not covered, then.
-        #                            truncate everything above the summary.
-        #                        <   Assistant returns new prompt UUID, responds, then indexes the prompt and response.
-        #                        *   A controller watches for new prompts, checks the context length after truncation
-        #                            and decides to update a summary field on the PromptDoc.
-        # Pext payload arrives   >
-
-        # TODO: Maybe a running log of what actions have been taken in each conversation would be helpful
-
         if preprocessing_tasks:
             await asyncio.gather(*preprocessing_tasks)
 
-        # TODO: Use this filtered view as the context window but create a tool that allows access to the full history
-        filtered_user_messages = (
-            # First two user messages before context observer takes over
-            " ".join([m.content for m in payload.messages if m.role == "user"][-2:]) if context_observer is None
-            else " ".join([
-                m.content for m in await context_observer.get_filtered_context()
-                if m.role == "user"
-            ])
+        context_window = (await context_observer.get_filtered_context()) if context_observer else payload.messages
+        search_text, search_emb = await normalize_text_for_search_and_embed(
+            " ".join(m.content for m in context_window if m.role == "user")
         )
-        search_text, search_emb = await normalize_text_for_search_and_embed(filtered_user_messages)
         logger.info(f"Search text: {search_text}")
 
-        tool_calls, user_context = await asyncio.gather(
+        (
+            recalled_tool_calls,
+            recalled_user_context,
+        ) = await asyncio.gather(
             self.search_client.search_tool_call_by_anchor(
                 search_text, search_emb,
                 top_k=3,
@@ -238,19 +230,37 @@ class ProkaryoteV1(WebBase):
                 session["full_name"], session["user_id"],
                 match=search_text,
                 match_emb=search_emb,
+                min_facts_score=1.5,
             ),
         )
 
-        user_fact_observer = UserFactsSavingObserver(prompt_context, user_context, self.llm_client, self.search_client)
-        user_fact_observer.observe_in_background(payload.messages)
+        prompt_context = PromptContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
-        context_window = [
-            ChatMessage(
-                role="developer",
-                content=self.developer_message(prompt_context, user_context, tool_calls)
-            )
-        ]
-        context_window.extend(payload.messages)
+        user_fact_observer = UserFactsSavingObserver(
+            prompt_context,
+            recalled_user_context,
+            self.llm_client,
+            self.search_client,
+        )
+        user_fact_observer.observe_in_background(context_window)
+
+        context_window.insert(0, ChatMessage(
+            role="developer",
+            content=self.developer_message(
+                payload_messages_len - len(context_window),
+                prompt_context,
+                recalled_tool_calls,
+                recalled_user_context,
+            ),
+        ))
+
+        tools_callbacks = self.tools_callbacks
+        tools_params = self.tools_params
+        if context_observer:
+            chat_history_tool = ChatHistoryCallback(payload.messages, model)
+            tools_callbacks[chat_history_tool.tool_param["name"]] = chat_history_tool
+            tools_params.append(chat_history_tool.tool_param)
+
         return StreamingResponse(
             self.stream_and_finalize(
                 context_window=context_window,
@@ -259,14 +269,13 @@ class ProkaryoteV1(WebBase):
                     context_window, model,
                     reasoning_effort=reasoning_effort,
                     stream_ndjson=True,
-                    tool_callbacks=self.tools_callbacks,
-                    tool_params=self.tools_params,
+                    tool_callbacks=tools_callbacks,
+                    tool_params=tools_params,
                 ),
-                tool_calls=tool_calls,
+                tool_calls=recalled_tool_calls,
                 topic_observer=topic_observer,
-                user_context=user_context,
+                user_context=recalled_user_context,
                 user_fact_observer=user_fact_observer,
-                user_id=user_context.user_id,
             ),
             media_type="text/event-stream",
         )
@@ -280,7 +289,6 @@ class ProkaryoteV1(WebBase):
             topic_observer: TopicClassifyingObserver,
             user_context: PersonContext,
             user_fact_observer: UserFactsSavingObserver,
-            user_id: int,
     ) -> AsyncGenerator[str, Any]:
         prompt_uuid = str(uuid.uuid4())
         yield json.dumps({"prompt_uuid": prompt_uuid}) + "\n"
@@ -310,5 +318,4 @@ class ProkaryoteV1(WebBase):
                 topic_observer=topic_observer,
                 user_context=user_context,
                 user_fact_observer=user_fact_observer,
-                user_id=user_id,
             ))

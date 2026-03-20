@@ -137,8 +137,14 @@ class SearchClient:
             user_id: int,
             match: str = None,
             match_emb: list[float] = None,
+            min_facts_score: float = None,
     ) -> PersonContext:
-        facts = await self.search_facts(f"user:{user_id}", match=match, match_emb=match_emb)
+        facts = await self.search_facts(
+            f"user:{user_id}",
+            match=match,
+            match_emb=match_emb,
+            min_score=min_facts_score,
+        )
         return PersonContext(facts=facts, name=full_name, questions=[], user_id=user_id)
 
     async def index_facts(self, about: list[str], fact_texts: list[str], fact_embs: list[list[float]]):
@@ -364,7 +370,7 @@ class SearchClient:
             self,
             match: str,
             match_emb: list[float],
-            min_score: float = 2.0,
+            min_score: float = 1.5,
             knn_num_candidates: int = 100,
             knn_top_k: int = 30,
             top_k: int = 10,
