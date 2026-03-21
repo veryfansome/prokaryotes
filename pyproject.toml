@@ -22,6 +22,8 @@ dependencies = [
     "redis",
     "sentence-transformers",
     "starsessions[redis]",
+    "torch==2.10.0+cpu; sys_platform == 'linux'",
+    "torch==2.10.0; sys_platform == 'darwin'",
     "uvicorn",
 ]
 
@@ -54,3 +56,11 @@ testpaths = [
 
 [tool.setuptools.packages.find]
 include = ["prokaryotes*"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+"torch" = { index = "pytorch-cpu" }
