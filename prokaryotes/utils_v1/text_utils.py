@@ -10,8 +10,12 @@ from prokaryotes.models_v1 import (
 )
 from prokaryotes.utils_v1 import http_utils
 
-async def get_text_embeddings(req: TextEmbeddingRequest):
-    resp = await http_utils.httpx_client.post(os.getenv("EMBEDDINGS_URL"), json=req.model_dump(mode="json"))
+async def get_text_embeddings(req: TextEmbeddingRequest, timeout: float = 10.0) -> TextEmbeddingResponse:
+    resp = await http_utils.httpx_client.post(
+        os.getenv("EMBEDDINGS_URL"),
+        json=req.model_dump(mode="json"),
+        timeout=timeout
+    )
     resp.raise_for_status()
     return TextEmbeddingResponse.model_validate(resp.json())
 

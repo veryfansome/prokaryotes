@@ -14,6 +14,7 @@ from starsessions import load_session
 from typing import (
     Any,
     AsyncGenerator,
+    is_typeddict,
 )
 
 from prokaryotes.graph_v1 import GraphClient
@@ -107,14 +108,14 @@ class ProkaryoteV1(WebBase):
             error: str,
             generated_response: str,
             prompt_uuid: str,
-            tool_calls: list[ToolCallDoc],
+            recalled_tool_calls: list[ToolCallDoc],
+            recalled_user_context: PersonContext,
             topic_observer: TopicClassifyingObserver,
-            user_context: PersonContext,
             user_fact_observer: UserFactsSavingObserver,
     ):
         common_labels = [
             f"conversation:{conversation_uuid}",
-            f"user:{user_context.user_id}",
+            f"user:{recalled_user_context.user_id}",
         ]
         topics = await topic_observer.get_topics()
         prompt, response = await asyncio.gather(
@@ -136,6 +137,16 @@ class ProkaryoteV1(WebBase):
                 error=error,
             ),
         )
+
+        # TODO: Move output indexing here
+
+        func_call_triggers = {}
+        func_call_outputs = {}
+        for obj in context_window:
+            if is_typeddict(obj):
+                func_call_outputs[obj.call_id] = obj
+            elif isinstance(obj, ResponseFunctionToolCall):
+                func_call_triggers[obj.call_id] = obj
 
         # TODO: Evaluate recalled tool outs and facts?
 
@@ -265,6 +276,8 @@ class ProkaryoteV1(WebBase):
             self.stream_and_finalize(
                 context_window=context_window,
                 conversation_uuid=payload.conversation_uuid,
+                recalled_tool_calls=recalled_tool_calls,
+                recalled_user_context=recalled_user_context,
                 response_generator=self.llm_client.stream_response(
                     context_window, model,
                     reasoning_effort=reasoning_effort,
@@ -272,9 +285,7 @@ class ProkaryoteV1(WebBase):
                     tool_callbacks=tools_callbacks,
                     tool_params=tools_params,
                 ),
-                tool_calls=recalled_tool_calls,
                 topic_observer=topic_observer,
-                user_context=recalled_user_context,
                 user_fact_observer=user_fact_observer,
             ),
             media_type="text/event-stream",
@@ -284,10 +295,10 @@ class ProkaryoteV1(WebBase):
             self,
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
+            recalled_tool_calls: list[ToolCallDoc],
+            recalled_user_context: PersonContext,
             response_generator: AsyncGenerator[str, Any],
-            tool_calls: list[ToolCallDoc],
             topic_observer: TopicClassifyingObserver,
-            user_context: PersonContext,
             user_fact_observer: UserFactsSavingObserver,
     ) -> AsyncGenerator[str, Any]:
         prompt_uuid = str(uuid.uuid4())
@@ -314,8 +325,8 @@ class ProkaryoteV1(WebBase):
                 error=error,
                 generated_response=generated_response,
                 prompt_uuid=prompt_uuid,
-                tool_calls=tool_calls,
+                recalled_tool_calls=recalled_tool_calls,
+                recalled_user_context=recalled_user_context,
                 topic_observer=topic_observer,
-                user_context=user_context,
                 user_fact_observer=user_fact_observer,
             ))

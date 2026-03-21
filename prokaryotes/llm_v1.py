@@ -12,6 +12,7 @@ from openai.types.responses import (
 from openai.types.responses import FunctionToolParam
 from openai.types.responses.response_create_params import ToolChoice
 from openai.types.responses.response_input_param import FunctionCallOutput
+from openai.types.shared_params import Reasoning
 from typing import Any, AsyncGenerator, Protocol, is_typeddict
 
 from prokaryotes.models_v1 import ChatMessage
@@ -59,14 +60,17 @@ class OpenAIClient(LLMClient):
             tool_choice: ToolChoice = "auto",
             tool_params: list[ToolParam] = None,
     ):
-        reasoning_config = {"effort": reasoning_effort if reasoning_effort else "none"}
         return await self.async_openai.responses.create(
             model=model,
+            include=([
+                "web_search_call.action.sources",
+                "web_search_call.results",
+            ] if any(is_typeddict(param) and param["type"] == "web_search" for param in tool_params) else []),
             input=[(m if (is_typeddict(m) or not isinstance(m, ChatMessage)) else m.model_dump()) for m in context_window],
             text=text,
             tools=tool_params if tool_params else None,
             tool_choice=tool_choice,
-            reasoning=reasoning_config,
+            reasoning=Reasoning(effort=reasoning_effort if reasoning_effort else "none"),
             stream=stream,
         )
 
@@ -98,6 +102,7 @@ class OpenAIClient(LLMClient):
             logger.info(event)
         else:
             logger.debug(event)
+        return None
 
     async def stream_response(
             self,
