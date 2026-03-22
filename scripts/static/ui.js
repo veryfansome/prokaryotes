@@ -1,4 +1,5 @@
 const MAX_INPUT_HEIGHT = 200;
+const BOTTOM_SCROLL_TOLERANCE = 2;
 const EDIT_STATUS_TEXT = 'Editing a previous message. Press Esc or click outside to cancel.';
 
 export function parseStreamPayloadLine(line) {
@@ -85,6 +86,7 @@ export function createChatApp({
     let conversationUuid = '';
     let messages = [];
     let isGenerating = false;
+    let isAutoScrollSuspended = false;
     let editSession = null;
     let editingParentId = null;
     let editingMessageId = null;
@@ -125,6 +127,31 @@ export function createChatApp({
         // Run twice to account for layout settling during streaming reflows.
         void chatContainer.offsetHeight;
         scrollToLowestOffsets();
+    }
+
+    function isElementAtBottom(element) {
+        if (!element) {
+            return true;
+        }
+        const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+        return maxScrollTop - element.scrollTop <= BOTTOM_SCROLL_TOLERANCE;
+    }
+
+    function isScrolledToBottom() {
+        return isElementAtBottom(chatContainer) && isElementAtBottom(doc.scrollingElement);
+    }
+
+    function maybeAutoScrollDuringGeneration() {
+        if (!isAutoScrollSuspended) {
+            scrollToBottomWhereInputIs();
+        }
+    }
+
+    function handleScrollDuringGeneration() {
+        if (!isGenerating) {
+            return;
+        }
+        isAutoScrollSuspended = !isScrolledToBottom();
     }
 
     function getNode(nodeId) {
@@ -390,18 +417,31 @@ export function createChatApp({
         }
 
         chatWrapper.appendChild(messageDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
 
         return { contentDiv, regenBtn };
     }
 
-    function renderMessages() {
+    function renderMessages({ scrollToBottom = true } = {}) {
+        const previousChatScrollTop = chatContainer.scrollTop;
+        const scrollingElement = doc.scrollingElement;
+        const previousPageScrollTop = scrollingElement ? scrollingElement.scrollTop : 0;
+
         syncRenderableMessages();
         chatWrapper.innerHTML = '';
         messages.forEach((message, index) => {
             addMessage(message.role, message.content, index);
         });
         updateEditModeUi();
+
+        if (scrollToBottom) {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return;
+        }
+
+        chatContainer.scrollTop = previousChatScrollTop;
+        if (scrollingElement) {
+            scrollingElement.scrollTop = previousPageScrollTop;
+        }
     }
 
     function cancelEditSession() {
@@ -507,6 +547,7 @@ export function createChatApp({
 
     async function generateAssistantResponse(parentNodeId) {
         isGenerating = true;
+        isAutoScrollSuspended = false;
         sendButton.disabled = true;
 
         let didCompleteResponse = false;
@@ -518,7 +559,7 @@ export function createChatApp({
         assistantContent.innerHTML = '<span class="typing-indicator"></span>';
         pendingMessageDiv.appendChild(assistantContent);
         chatWrapper.appendChild(pendingMessageDiv);
-        scrollToBottomWhereInputIs();
+        maybeAutoScrollDuringGeneration();
 
         try {
             const query = buildChatQueryParams(timeZone, latitude, longitude);
@@ -556,7 +597,7 @@ export function createChatApp({
                     }
                     fullResponse += parsed.text_delta;
                     assistantContent.textContent = fullResponse;
-                    scrollToBottomWhereInputIs();
+                    maybeAutoScrollDuringGeneration();
                     return;
                 }
 
@@ -596,8 +637,10 @@ export function createChatApp({
             isGenerating = false;
             updateSendButtonState();
             if (didCompleteResponse) {
-                renderMessages();
-                scrollToBottomWhereInputIs();
+                renderMessages({ scrollToBottom: !isAutoScrollSuspended });
+                if (!isAutoScrollSuspended) {
+                    scrollToBottomWhereInputIs();
+                }
             }
         }
     }
@@ -669,9 +712,22 @@ export function createChatApp({
     }
 
     chatInput.addEventListener('input', () => {
+        if (isGenerating && isAutoScrollSuspended) {
+            isAutoScrollSuspended = false;
+            scrollToBottomWhereInputIs();
+        }
         setInputHeight(chatInput);
         updateSendButtonState();
     });
+
+    chatContainer.addEventListener('scroll', handleScrollDuringGeneration, { passive: true });
+    const scrollingElement = doc.scrollingElement;
+    if (scrollingElement && scrollingElement !== chatContainer) {
+        scrollingElement.addEventListener('scroll', handleScrollDuringGeneration, { passive: true });
+    }
+    if (doc.defaultView) {
+        doc.defaultView.addEventListener('scroll', handleScrollDuringGeneration, { passive: true });
+    }
 
     chatInput.addEventListener('keydown', handleKeyDown);
     sendButton.addEventListener('click', () => {

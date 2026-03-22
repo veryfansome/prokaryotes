@@ -47,6 +47,92 @@ function createFetchMock(chatPayloads) {
     });
 }
 
+function createControllableFetchMock() {
+    const encoder = new TextEncoder();
+    let controller = null;
+
+    const body = new ReadableStream({
+        start(streamController) {
+            controller = streamController;
+        },
+    });
+
+    const fetchMock = vi.fn(async (url) => {
+        if (url.endsWith('/conversation')) {
+            return {
+                ok: true,
+                json: async () => ({ conversation_uuid: 'conv-123' }),
+            };
+        }
+
+        if (url.includes('/chat?')) {
+            return {
+                ok: true,
+                body,
+            };
+        }
+
+        throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const waitForReady = async () => {
+        while (!controller) {
+            await Promise.resolve();
+        }
+    };
+
+    return {
+        fetchMock,
+        waitForReady,
+        pushTextDelta(text) {
+            controller.enqueue(encoder.encode(`${JSON.stringify({ text_delta: text })}\n`));
+        },
+        close() {
+            controller.close();
+        },
+    };
+}
+
+function mockScrollableContainer(
+    container,
+    { scrollHeight = 1600, clientHeight = 600, initialScrollTop = 1000 } = {},
+) {
+    let currentScrollTop = initialScrollTop;
+    let currentScrollHeight = scrollHeight;
+
+    Object.defineProperty(container, 'clientHeight', {
+        configurable: true,
+        get: () => clientHeight,
+    });
+    Object.defineProperty(container, 'scrollHeight', {
+        configurable: true,
+        get: () => currentScrollHeight,
+    });
+    Object.defineProperty(container, 'scrollTop', {
+        configurable: true,
+        get: () => currentScrollTop,
+        set: value => {
+            currentScrollTop = value;
+        },
+    });
+
+    return {
+        getMaxScrollTop: () => Math.max(0, currentScrollHeight - clientHeight),
+        getScrollTop: () => currentScrollTop,
+        setScrollTop: value => {
+            currentScrollTop = value;
+        },
+        setScrollHeight: value => {
+            currentScrollHeight = value;
+        },
+    };
+}
+
+async function flushAsyncWork() {
+    await Promise.resolve();
+    await Promise.resolve();
+}
+
 function asRoleContent(messages) {
     return messages.map(message => ({ role: message.role, content: message.content }));
 }
@@ -119,21 +205,10 @@ describe('createChatApp messageTree flow', () => {
             navigatorImpl: {},
         });
 
-        let scrollTop = 0;
-        Object.defineProperty(app.elements.chatContainer, 'clientHeight', {
-            configurable: true,
-            get: () => 600,
-        });
-        Object.defineProperty(app.elements.chatContainer, 'scrollHeight', {
-            configurable: true,
-            get: () => 1600,
-        });
-        Object.defineProperty(app.elements.chatContainer, 'scrollTop', {
-            configurable: true,
-            get: () => scrollTop,
-            set: value => {
-                scrollTop = value;
-            },
+        const scrollState = mockScrollableContainer(app.elements.chatContainer, {
+            clientHeight: 600,
+            initialScrollTop: 0,
+            scrollHeight: 1600,
         });
 
         app.elements.chatInput.scrollIntoView = vi.fn();
@@ -141,7 +216,88 @@ describe('createChatApp messageTree flow', () => {
         app.elements.chatInput.dispatchEvent(new Event('input'));
         await app.sendMessage();
 
-        expect(scrollTop).toBe(1000);
+        expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
+    });
+
+    it('pauses auto-scroll while generating when user scrolls up, then resumes at bottom', async () => {
+        const controlledFetch = createControllableFetchMock();
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: controlledFetch.fetchMock,
+            navigatorImpl: {},
+        });
+
+        const scrollIntoViewSpy = vi.fn();
+        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+        const scrollState = mockScrollableContainer(app.elements.chatContainer);
+
+        app.elements.chatInput.value = 'Hi';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        const sendPromise = app.sendMessage();
+        await controlledFetch.waitForReady();
+
+        controlledFetch.pushTextDelta('first');
+        await flushAsyncWork();
+        const callsBeforePause = scrollIntoViewSpy.mock.calls.length;
+
+        scrollState.setScrollTop(200);
+        app.elements.chatContainer.dispatchEvent(new Event('scroll'));
+        await flushAsyncWork();
+
+        controlledFetch.pushTextDelta('second');
+        await flushAsyncWork();
+        expect(scrollIntoViewSpy.mock.calls.length).toBe(callsBeforePause);
+
+        scrollState.setScrollTop(scrollState.getMaxScrollTop());
+        app.elements.chatContainer.dispatchEvent(new Event('scroll'));
+        await flushAsyncWork();
+
+        controlledFetch.pushTextDelta('third');
+        controlledFetch.close();
+        await sendPromise;
+
+        expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsBeforePause);
+    });
+
+    it('resumes auto-scroll while generating when user starts typing', async () => {
+        const controlledFetch = createControllableFetchMock();
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: controlledFetch.fetchMock,
+            navigatorImpl: {},
+        });
+
+        const scrollIntoViewSpy = vi.fn();
+        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+        const scrollState = mockScrollableContainer(app.elements.chatContainer);
+
+        app.elements.chatInput.value = 'Hi';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        const sendPromise = app.sendMessage();
+        await controlledFetch.waitForReady();
+
+        controlledFetch.pushTextDelta('first');
+        await flushAsyncWork();
+
+        scrollState.setScrollTop(200);
+        app.elements.chatContainer.dispatchEvent(new Event('scroll'));
+        await flushAsyncWork();
+
+        controlledFetch.pushTextDelta('second');
+        await flushAsyncWork();
+        const callsWhilePaused = scrollIntoViewSpy.mock.calls.length;
+
+        app.elements.chatInput.value = 'draft';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+        await flushAsyncWork();
+        expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsWhilePaused);
+
+        const callsAfterTyping = scrollIntoViewSpy.mock.calls.length;
+        controlledFetch.pushTextDelta('third');
+        controlledFetch.close();
+        await sendPromise;
+
+        expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsAfterTyping);
     });
 
     it('scrolls textarea into view when editing a previous user message by click', async () => {
