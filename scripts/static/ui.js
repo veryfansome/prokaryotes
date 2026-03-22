@@ -1,5 +1,6 @@
 const MAX_INPUT_HEIGHT = 200;
 const BOTTOM_SCROLL_TOLERANCE = 2;
+const INPUT_VISIBILITY_TOLERANCE = 2;
 const EDIT_STATUS_TEXT = 'Editing a previous message. Press Esc or click outside to cancel.';
 
 export function parseStreamPayloadLine(line) {
@@ -143,6 +144,22 @@ export function createChatApp({
 
     function maybeAutoScrollDuringGeneration() {
         if (!isAutoScrollSuspended) {
+            scrollToBottomWhereInputIs();
+        }
+    }
+
+    function ensureInputBottomVisible() {
+        if (doc.activeElement !== chatInput || typeof chatInput.getBoundingClientRect !== 'function') {
+            return;
+        }
+
+        const windowRef = doc.defaultView;
+        if (!windowRef || typeof windowRef.innerHeight !== 'number') {
+            return;
+        }
+
+        const inputRect = chatInput.getBoundingClientRect();
+        if (inputRect.bottom > windowRef.innerHeight - INPUT_VISIBILITY_TOLERANCE) {
             scrollToBottomWhereInputIs();
         }
     }
@@ -712,11 +729,13 @@ export function createChatApp({
     }
 
     chatInput.addEventListener('input', () => {
+        setInputHeight(chatInput);
         if (isGenerating && isAutoScrollSuspended) {
             isAutoScrollSuspended = false;
             scrollToBottomWhereInputIs();
+        } else {
+            ensureInputBottomVisible();
         }
-        setInputHeight(chatInput);
         updateSendButtonState();
     });
 

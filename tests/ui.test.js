@@ -300,6 +300,37 @@ describe('createChatApp messageTree flow', () => {
         expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsAfterTyping);
     });
 
+    it('keeps textarea bottom visible while typing multiline input', () => {
+        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'A1' })]]);
+        const app = createChatApp({
+            doc: document,
+            fetchImpl: fetchMock,
+            navigatorImpl: {},
+        });
+
+        const scrollIntoViewSpy = vi.fn();
+        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+        app.elements.chatInput.getBoundingClientRect = vi.fn(() => ({
+            bottom: 900,
+            height: 120,
+            left: 0,
+            right: 0,
+            top: 780,
+            width: 0,
+            x: 0,
+            y: 780,
+            toJSON() {
+                return {};
+            },
+        }));
+
+        app.elements.chatInput.focus();
+        app.elements.chatInput.value = 'line1\nline2';
+        app.elements.chatInput.dispatchEvent(new Event('input'));
+
+        expect(scrollIntoViewSpy).toHaveBeenCalled();
+    });
+
     it('scrolls textarea into view when editing a previous user message by click', async () => {
         const fetchMock = createFetchMock([
             [JSON.stringify({ text_delta: 'A1' })],
