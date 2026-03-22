@@ -9,9 +9,11 @@ from prokaryotes.models_v1 import (
     FactDoc,
     PromptDoc,
     ResponseDoc,
+    ToolCallDoc,
 )
 
 logger = logging.getLogger(__name__)
+
 
 class GraphClient:
     def __init__(self):
@@ -37,6 +39,28 @@ class GraphClient:
                 'fact_text': fact.text,
             } for fact in facts]
             await tx.run(cypher, input_structs=input_structs)
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
+    async def create_tool_call_to_prompt_edge(self, prompt: PromptDoc, tool_call: ToolCallDoc):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (p:Prompt {doc_id: input_struct.prompt_id})
+        WITH input_struct, p
+        MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
+        SET t.labels = input_struct.tool_call_labels
+        WITH p, t
+        MERGE (t)-[:CALLED_FOR]->(p)
+        """
+        async def _edge(tx):
+            await tx.run(cypher, input_structs=[{
+                'prompt_id': prompt.doc_id,
+                'tool_call_id': tool_call.doc_id,
+                'tool_call_labels': sorted(tool_call.labels),
+            }])
         try:
             async with self.driver.session() as session:
                 return await session.execute_write(_edge)
@@ -87,6 +111,7 @@ class GraphClient:
 
     def init_client(self):
         self.driver = get_neo4j_driver()
+
 
 def get_neo4j_driver() -> AsyncDriver:
     auth = os.environ.get("NEO4J_AUTH")

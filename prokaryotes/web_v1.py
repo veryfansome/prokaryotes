@@ -14,11 +14,11 @@ from starsessions import load_session
 from typing import (
     Any,
     AsyncGenerator,
-    is_typeddict,
 )
 
 from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import (
+    FunctionCallOutputIndexer,
     FunctionToolCallback,
     get_llm_client,
 )
@@ -46,6 +46,7 @@ from prokaryotes.web_base_v1 import WebBase
 
 logger = logging.getLogger(__name__)
 
+
 class ProkaryoteV1(WebBase):
     def __init__(self, static_dir: str):
         super().__init__(static_dir)
@@ -58,9 +59,9 @@ class ProkaryoteV1(WebBase):
             ScanDirectoryCallback(self.llm_client, self.search_client),
             SearchEmailCallback(self.search_client),
         ]
-        self.tools_callbacks = {t.tool_param["name"]: t for t in tools}
-        self.tools_params = [t.tool_param for t in tools]
-        self.tools_params.append(web_search_tool_param)
+        self.tool_callbacks = {t.tool_param["name"]: t for t in tools}
+        self.tool_params = [t.tool_param for t in tools]
+        self.tool_params.append(web_search_tool_param)
 
     @classmethod
     def developer_message(
@@ -87,9 +88,6 @@ class ProkaryoteV1(WebBase):
         message_parts.append("---")
         message_parts.append("## Assistant instructions")
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
-        # TODO: Maybe this should be guided by user preferences
-        #message_parts.append("- Don't offer platitudes or untruths.")
-        #message_parts.append("- Don't project confidence when you are uncertain.")
         if hidden_message_count > 0:
             message_parts.append(
                 f"- {hidden_message_count} {'messages have' if hidden_message_count > 1 else 'message has'} been"
@@ -113,6 +111,11 @@ class ProkaryoteV1(WebBase):
             topic_observer: TopicClassifyingObserver,
             user_fact_observer: UserFactsSavingObserver,
     ):
+        prompt_messages = [
+            # Drop developer message, FunctionCallOutput, and ResponseFunctionToolCall
+            msg for msg in context_window
+            if isinstance(msg, ChatMessage) and msg.role in {"assistant", "user"}
+        ]
         common_labels = [
             f"conversation:{conversation_uuid}",
             f"user:{recalled_user_context.user_id}",
@@ -123,11 +126,7 @@ class ProkaryoteV1(WebBase):
                 about=topics,
                 prompt_uuid=prompt_uuid,
                 labels=common_labels,
-                messages=[
-                    # Drop developer message, FunctionCallOutput, and ResponseFunctionToolCall
-                    msg for msg in context_window
-                    if isinstance(msg, (ChatMessage,)) and msg.role in {"assistant", "user"}
-                ],
+                messages=prompt_messages,
             ),
             self.search_client.index_response(
                 about=topics,
@@ -138,28 +137,40 @@ class ProkaryoteV1(WebBase):
             ),
         )
 
-        # TODO: Move output indexing here
-
-        func_call_triggers = {}
-        func_call_outputs = {}
-        for obj in context_window:
-            if is_typeddict(obj):
-                func_call_outputs[obj.call_id] = obj
-            elif isinstance(obj, ResponseFunctionToolCall):
-                func_call_triggers[obj.call_id] = obj
-
         # TODO: Evaluate recalled tool outs and facts?
 
         tasks = []
 
+        func_call_resp = {}
+        func_call_outputs = {}
+        for obj in context_window:
+            if isinstance(obj, ResponseFunctionToolCall):
+                func_call_resp[obj.call_id] = obj
+            elif isinstance(obj, dict) and "call_id" in obj and "output" in obj:
+                func_call_outputs[obj["call_id"]] = obj["output"]
+        for call_id, output in func_call_outputs.items():
+            call_resp = func_call_resp[call_id]
+            tool_callback = self.tool_callbacks[call_resp.name]
+            if isinstance(tool_callback, FunctionCallOutputIndexer):
+                tool_call = await tool_callback.index(prompt_messages, call_resp.arguments, output)
+                tasks.append(asyncio.create_task(
+                    self.graph_client.create_tool_call_to_prompt_edge(prompt, tool_call)
+                ))
+
         if prompt and topics:
-            tasks.append(asyncio.create_task(self.graph_client.create_topic_to_prompt_edge(prompt, topics)))
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_topic_to_prompt_edge(prompt, topics)
+            ))
         if response and topics:
-            tasks.append(asyncio.create_task(self.graph_client.create_topic_to_response_edge(response, topics)))
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_topic_to_response_edge(response, topics)
+            ))
 
         saved_facts = await user_fact_observer.get_saved_facts()
         if prompt and saved_facts:
-            tasks.append(asyncio.create_task(self.graph_client.create_fact_to_prompt_edge(prompt, saved_facts)))
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_fact_to_prompt_edge(prompt, saved_facts)
+            ))
 
         await asyncio.gather(*tasks)
 
@@ -217,13 +228,14 @@ class ProkaryoteV1(WebBase):
             context_observer.observe_in_background(payload.messages)
             preprocessing_tasks.append(context_observer.bg_task)
 
-        topic_observer = TopicClassifyingObserver(self.llm_client)
-        topic_observer.observe_in_background(payload.messages)
-
         if preprocessing_tasks:
             await asyncio.gather(*preprocessing_tasks)
 
         context_window = (await context_observer.get_filtered_context()) if context_observer else payload.messages
+
+        topic_observer = TopicClassifyingObserver(self.llm_client)
+        topic_observer.observe_in_background(context_window)
+
         search_text, search_emb = await normalize_text_for_search_and_embed(
             " ".join(m.content for m in context_window if m.role == "user")
         )
@@ -265,10 +277,10 @@ class ProkaryoteV1(WebBase):
             ),
         ))
 
-        tools_callbacks = self.tools_callbacks
-        tools_params = self.tools_params
+        tools_callbacks = self.tool_callbacks.copy()
+        tools_params = self.tool_params.copy()
         if context_observer:
-            chat_history_tool = ChatHistoryCallback(payload.messages, model)
+            chat_history_tool = ChatHistoryCallback(payload.messages)
             tools_callbacks[chat_history_tool.tool_param["name"]] = chat_history_tool
             tools_params.append(chat_history_tool.tool_param)
 

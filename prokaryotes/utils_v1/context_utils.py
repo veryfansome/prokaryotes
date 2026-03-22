@@ -1,8 +1,4 @@
-from openai.types.responses import ResponseFunctionToolCall
-from openai.types.responses.response_input_param import FunctionCallOutput
-
 from prokaryotes.models_v1 import (
-    ChatMessage,
     PersonContext,
     PromptContext,
 )
@@ -41,5 +37,5 @@ def developer_message_parts(prompt_context: PromptContext, user_context: PersonC
         "| Recorded at | Fact |\n"
         "|---|---|"
     )
-    message_parts.append(f"| - | The assistant is a Python app |")
+    message_parts.append("| - | The assistant is a Python app |")
     return message_parts

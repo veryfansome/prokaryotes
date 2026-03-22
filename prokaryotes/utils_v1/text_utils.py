@@ -10,6 +10,23 @@ from prokaryotes.models_v1 import (
 )
 from prokaryotes.utils_v1 import http_utils
 
+
+async def get_document_embedding(doc_text: str) -> list[float]:
+    return (await get_text_embeddings(TextEmbeddingRequest(
+        prompt=TextEmbeddingPrompt.DOCUMENT,
+        texts=[doc_text],
+        truncate_to=256,
+    ))).embs[0]
+
+
+async def get_query_embedding(qry_text: str) -> list[float]:
+    return (await get_text_embeddings(TextEmbeddingRequest(
+        prompt=TextEmbeddingPrompt.QUERY,
+        texts=[qry_text],
+        truncate_to=256,
+    ))).embs[0]
+
+
 async def get_text_embeddings(req: TextEmbeddingRequest, timeout: float = 10.0) -> TextEmbeddingResponse:
     resp = await http_utils.httpx_client.post(
         os.getenv("EMBEDDINGS_URL"),
@@ -19,6 +36,7 @@ async def get_text_embeddings(req: TextEmbeddingRequest, timeout: float = 10.0) 
     resp.raise_for_status()
     return TextEmbeddingResponse.model_validate(resp.json())
 
+
 def normalize_text_for_search(text: str) -> str:
     text = mistune.html(text.lower())
     soup = BeautifulSoup(text, "lxml")
@@ -26,11 +44,8 @@ def normalize_text_for_search(text: str) -> str:
         code_tag.decompose()
     return soup.get_text().strip()
 
+
 async def normalize_text_for_search_and_embed(text: str) -> tuple[str, list[float]]:
     normalized_text = await run_in_threadpool(normalize_text_for_search, text)
-    emb = (await get_text_embeddings(TextEmbeddingRequest(
-        prompt=TextEmbeddingPrompt.QUERY,
-        texts=[normalized_text],
-        truncate_to=256,
-    ))).embs[0]
+    emb = await get_query_embedding(normalized_text)
     return normalized_text, emb

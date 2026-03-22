@@ -8,10 +8,10 @@ from prokaryotes.models_v1 import ChatMessage
 
 logger = logging.getLogger(__name__)
 
+
 class ChatHistoryCallback(FunctionToolCallback):
-    def __init__(self, messages: list[ChatMessage], model: str):
+    def __init__(self, messages: list[ChatMessage]):
         self.messages = messages
-        self.model = model
         self.valid_roles = ["all", "assistant", "user"]
 
     @property
@@ -38,7 +38,7 @@ class ChatHistoryCallback(FunctionToolCallback):
             strict=True,
         )
 
-    async def call(self, context_snapshot: list[ChatMessage], arguments: str, call_id: str) -> FunctionCallOutput:
+    async def call(self, arguments: str, call_id: str) -> FunctionCallOutput:
         history = self.messages
         role_filter = None
         try:

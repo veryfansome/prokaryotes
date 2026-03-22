@@ -13,24 +13,45 @@ from openai.types.responses import FunctionToolParam
 from openai.types.responses.response_create_params import ToolChoice
 from openai.types.responses.response_input_param import FunctionCallOutput
 from openai.types.shared_params import Reasoning
-from typing import Any, AsyncGenerator, Protocol, is_typeddict
+from typing import (
+    Any,
+    AsyncGenerator,
+    Protocol,
+    is_typeddict,
+    runtime_checkable,
+)
 
-from prokaryotes.models_v1 import ChatMessage
+from prokaryotes.models_v1 import (
+    ChatMessage,
+    ToolCallDoc,
+)
 
 logger = logging.getLogger(__name__)
 
+
+@runtime_checkable
+class FunctionCallOutputIndexer(Protocol):
+    async def index(
+            self,
+            prompt_messages: list[ChatMessage],
+            arguments: str,
+            output: str,
+    ) -> ToolCallDoc | None:
+        pass
+
+
 class FunctionToolCallback(Protocol):
     @property
-    def tool_param(self) -> FunctionToolParam:
+    def tool_param(self) -> FunctionToolParam:  # type: ignore
         pass
 
     async def call(
             self,
-            context_snapshot: list[ChatMessage],
             arguments: str,
             call_id: str,
     ) -> FunctionCallOutput | None:
         pass
+
 
 class LLMClient(Protocol):
     async def stream_response(
@@ -46,6 +67,7 @@ class LLMClient(Protocol):
     ) -> AsyncGenerator[str, Any]:
         yield "[BUG: stream_response not implemented]"
 
+
 class OpenAIClient(LLMClient):
     def __init__(self, openai_api_key: str):
         self.async_openai = AsyncOpenAI(api_key=openai_api_key)
@@ -60,7 +82,7 @@ class OpenAIClient(LLMClient):
             tool_choice: ToolChoice = "auto",
             tool_params: list[ToolParam] = None,
     ):
-        return await self.async_openai.responses.create(
+        return await self.async_openai.responses.create(  # type: ignore
             model=model,
             include=([
                 "web_search_call.action.sources",
@@ -79,7 +101,7 @@ class OpenAIClient(LLMClient):
             cls,
             event: ResponseStreamEvent,
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
-            callback_tasks: list[asyncio.Task],
+            callback_tasks: list[asyncio.Task[FunctionCallOutput | None]],
             tool_callbacks: dict[str, FunctionToolCallback],
             ndjson: bool = False,
     ) -> str | None:
@@ -88,15 +110,12 @@ class OpenAIClient(LLMClient):
         elif event.type == "response.output_item.done" and event.item.type == "function_call":
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
             context_window.append(event.item)
-            callback_task = asyncio.create_task(tool_callbacks[event.item.name].call(
-                # Since context_window is shared, we provide each tool call with stable filtered snapshot
-                [
-                    obj.model_copy() for obj in context_window
-                    if isinstance(obj, (ChatMessage,)) and obj.role in {"assistant", "user"}
-                ],
-                event.item.arguments,
-                event.item.call_id,
-            ))
+            callback_task: asyncio.Task[FunctionCallOutput | None] = asyncio.create_task(
+                tool_callbacks[event.item.name].call(
+                    event.item.arguments,
+                    event.item.call_id,
+                )
+            )
             callback_tasks.append(callback_task)
         elif event.type.startswith("response.web_search_call"):
             logger.info(event)
@@ -115,13 +134,13 @@ class OpenAIClient(LLMClient):
             tool_choice: ToolChoice = "auto",
             tool_params: list[ToolParam] = None,
     ) -> AsyncGenerator[str, Any]:
-        # TODO: Optional pre create_response hooks that can be used for recall and to inject new contexts
-        callback_tasks = []
+        callback_tasks: asyncio.Task[FunctionCallOutput | None] = []
         async for event in await self.create_response(
                 context_window, model,
                 reasoning_effort=reasoning_effort,
                 stream=True,
                 text=text,
+                tool_choice=tool_choice,
                 tool_params=tool_params,
         ):
             str_to_yield = await self.handle_response_stream_event(
@@ -142,6 +161,7 @@ class OpenAIClient(LLMClient):
                         reasoning_effort=reasoning_effort,
                         stream=True,
                         text=text,
+                        tool_choice=tool_choice,
                         tool_params=tool_params,
                 ):
                     str_to_yield = await self.handle_response_stream_event(
@@ -150,6 +170,7 @@ class OpenAIClient(LLMClient):
                     )
                     if str_to_yield:
                         yield str_to_yield
+
 
 def get_llm_client() -> LLMClient:
     openai_api_key = os.getenv("OPENAI_API_KEY")

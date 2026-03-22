@@ -1,10 +1,7 @@
 import json
-from unittest.mock import AsyncMock
-
 import pytest
 from openai.types.responses.response_input_param import FunctionCallOutput
 
-from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
 
 
@@ -14,14 +11,12 @@ class _DummyClient:
 
 def _make_callback() -> ScanDirectoryCallback:
     callback = ScanDirectoryCallback(_DummyClient(), _DummyClient())
-    callback.index = AsyncMock(return_value=None)
     return callback
 
 
 async def _run_call(callback: ScanDirectoryCallback, arguments: dict | str) -> FunctionCallOutput:
     payload = arguments if isinstance(arguments, str) else json.dumps(arguments)
     return await callback.call(
-        context_snapshot=[ChatMessage(role="user", content="scan this directory")],
         arguments=payload,
         call_id="test-call-id",
     )
@@ -118,27 +113,25 @@ async def test_malformed_json_does_not_crash_call():
     callback = _make_callback()
     result = await _run_call(callback, "{bad")
     assert "Expecting property name enclosed in double quotes" in result["output"]
-    callback.index.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [
-    {"path": 123, "inclusion_filters": []},
-])
-async def test_invalid_path_does_not_crash_call(arguments):
-    callback = _make_callback()
-    result = await _run_call(callback, arguments)
-    assert "Invalid path" in result["output"]
-    callback.index.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("arguments", [
     {"inclusion_filters": []},
     {"path": "   ", "inclusion_filters": []},
+    {"path": 123, "inclusion_filters": []},
 ])
-async def test_missing_or_blank_path_does_not_crash_call(arguments):
+async def test_missing_or_blank_or_invalid_path_does_not_crash_call(arguments):
     callback = _make_callback()
     result = await _run_call(callback, arguments)
-    assert "Missing or empty path" in result["output"]
-    callback.index.assert_not_called()
+    assert "Missing, empty, or invalid path" in result["output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [
+    {"path": "abc", "inclusion_filters": "[]"},
+])
+async def test_invalid_inclusion_filters_does_not_crash_call(arguments):
+    callback = _make_callback()
+    result = await _run_call(callback, arguments)
+    assert "Invalid arguments: inclusion_filters should be a list[str]" in result["output"]
