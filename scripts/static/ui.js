@@ -1,4 +1,19 @@
+/*
+ * File organization plan for future changes:
+ * 1) constants + exported pure helpers
+ * 2) createChatApp setup
+ * 3) message-tree/state helpers
+ * 4) rendering helpers
+ * 5) user actions
+ * 6) network/stream side effects
+ * 7) event handlers + listener wiring
+ * 8) exports + bootstrap
+ */
+
+// 1) constants + exported pure helpers
 const MAX_INPUT_HEIGHT = 200;
+const BOTTOM_SCROLL_TOLERANCE = 2;
+const INPUT_VISIBILITY_TOLERANCE = 2;
 const EDIT_STATUS_TEXT = 'Editing a previous message. Press Esc or click outside to cancel.';
 
 export function parseStreamPayloadLine(line) {
@@ -45,6 +60,7 @@ function cloneMessages(sourceMessages) {
     return sourceMessages.map(message => ({ ...message }));
 }
 
+// 2) createChatApp setup
 export function createChatApp({
     doc = document,
     fetchImpl = fetch,
@@ -85,6 +101,7 @@ export function createChatApp({
     let conversationUuid = '';
     let messages = [];
     let isGenerating = false;
+    let isAutoScrollSuspended = false;
     let editSession = null;
     let editingParentId = null;
     let editingMessageId = null;
@@ -100,33 +117,7 @@ export function createChatApp({
         activeChildId: null,
     });
 
-    function updateSendButtonState() {
-        sendButton.disabled = !chatInput.value.trim() || isGenerating;
-    }
-
-    function scrollToBottomWhereInputIs() {
-        const scrollToLowestOffsets = () => {
-            chatContainer.scrollTop = Math.max(0, chatContainer.scrollHeight - chatContainer.clientHeight);
-            const scrollingElement = doc.scrollingElement;
-            if (scrollingElement) {
-                scrollingElement.scrollTop = Math.max(0, scrollingElement.scrollHeight - scrollingElement.clientHeight);
-            }
-        };
-
-        if (typeof chatInput.scrollIntoView === 'function') {
-            try {
-                chatInput.scrollIntoView({ block: 'end', inline: 'nearest' });
-            } catch {
-                // Ignore scroll API failures in non-browser environments (e.g. tests).
-            }
-        }
-
-        scrollToLowestOffsets();
-        // Run twice to account for layout settling during streaming reflows.
-        void chatContainer.offsetHeight;
-        scrollToLowestOffsets();
-    }
-
+    // 3) message-tree/state helpers
     function getNode(nodeId) {
         return messageTree.get(nodeId) || null;
     }
@@ -262,6 +253,68 @@ export function createChatApp({
         });
     }
 
+    // 4) rendering helpers
+    function updateSendButtonState() {
+        sendButton.disabled = !chatInput.value.trim() || isGenerating;
+    }
+
+    function scrollToBottomWhereInputIs() {
+        const scrollToLowestOffsets = () => {
+            chatContainer.scrollTop = Math.max(0, chatContainer.scrollHeight - chatContainer.clientHeight);
+            const scrollingElement = doc.scrollingElement;
+            if (scrollingElement) {
+                scrollingElement.scrollTop = Math.max(0, scrollingElement.scrollHeight - scrollingElement.clientHeight);
+            }
+        };
+
+        if (typeof chatInput.scrollIntoView === 'function') {
+            try {
+                chatInput.scrollIntoView({ block: 'end', inline: 'nearest' });
+            } catch {
+                // Ignore scroll API failures in non-browser environments (e.g. tests).
+            }
+        }
+
+        scrollToLowestOffsets();
+        // Run twice to account for layout settling during streaming reflows.
+        void chatContainer.offsetHeight;
+        scrollToLowestOffsets();
+    }
+
+    function isElementAtBottom(element) {
+        if (!element) {
+            return true;
+        }
+        const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+        return maxScrollTop - element.scrollTop <= BOTTOM_SCROLL_TOLERANCE;
+    }
+
+    function isScrolledToBottom() {
+        return isElementAtBottom(chatContainer) && isElementAtBottom(doc.scrollingElement);
+    }
+
+    function maybeAutoScrollDuringGeneration() {
+        if (!isAutoScrollSuspended) {
+            scrollToBottomWhereInputIs();
+        }
+    }
+
+    function ensureInputBottomVisible() {
+        if (doc.activeElement !== chatInput || typeof chatInput.getBoundingClientRect !== 'function') {
+            return;
+        }
+
+        const windowRef = doc.defaultView;
+        if (!windowRef || typeof windowRef.innerHeight !== 'number') {
+            return;
+        }
+
+        const inputRect = chatInput.getBoundingClientRect();
+        if (inputRect.bottom > windowRef.innerHeight - INPUT_VISIBILITY_TOLERANCE) {
+            scrollToBottomWhereInputIs();
+        }
+    }
+
     function updateEditModeUi() {
         if (editStatus) {
             if (editingMessageId !== null) {
@@ -390,20 +443,34 @@ export function createChatApp({
         }
 
         chatWrapper.appendChild(messageDiv);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
 
         return { contentDiv, regenBtn };
     }
 
-    function renderMessages() {
+    function renderMessages({ scrollToBottom = true } = {}) {
+        const previousChatScrollTop = chatContainer.scrollTop;
+        const scrollingElement = doc.scrollingElement;
+        const previousPageScrollTop = scrollingElement ? scrollingElement.scrollTop : 0;
+
         syncRenderableMessages();
         chatWrapper.innerHTML = '';
         messages.forEach((message, index) => {
             addMessage(message.role, message.content, index);
         });
         updateEditModeUi();
+
+        if (scrollToBottom) {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return;
+        }
+
+        chatContainer.scrollTop = previousChatScrollTop;
+        if (scrollingElement) {
+            scrollingElement.scrollTop = previousPageScrollTop;
+        }
     }
 
+    // 5) user actions
     function cancelEditSession() {
         if (!editSession || isGenerating) {
             return false;
@@ -419,20 +486,6 @@ export function createChatApp({
         renderMessages();
         updateSendButtonState();
         return true;
-    }
-
-    function handleKeyDown(event) {
-        if (event.key === 'Escape') {
-            if (cancelEditSession()) {
-                event.preventDefault();
-            }
-            return;
-        }
-
-        if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            void sendMessage();
-        }
     }
 
     function switchUserFork(messageIndex, direction) {
@@ -505,103 +558,6 @@ export function createChatApp({
         scrollToBottomWhereInputIs();
     }
 
-    async function generateAssistantResponse(parentNodeId) {
-        isGenerating = true;
-        sendButton.disabled = true;
-
-        let didCompleteResponse = false;
-
-        const pendingMessageDiv = doc.createElement('div');
-        pendingMessageDiv.className = 'message assistant';
-        const assistantContent = doc.createElement('div');
-        assistantContent.className = 'message-content';
-        assistantContent.innerHTML = '<span class="typing-indicator"></span>';
-        pendingMessageDiv.appendChild(assistantContent);
-        chatWrapper.appendChild(pendingMessageDiv);
-        scrollToBottomWhereInputIs();
-
-        try {
-            const query = buildChatQueryParams(timeZone, latitude, longitude);
-            const response = await fetchImpl(`${apiUrl}/chat?${query}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    conversation_uuid: conversationUuid,
-                    messages: getConversationMessagesUpTo(parentNodeId),
-                }),
-            });
-
-            if (!response.ok) {
-                const error = await response.json();
-                const errorDetail = error?.detail || response.statusText;
-                throw new Error(`HTTP ${response.status} error: ${errorDetail}`);
-            }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let fullResponse = '';
-            let streamBuffer = '';
-
-            const processLine = line => {
-                const parsed = parseStreamPayloadLine(line);
-                if (!parsed) {
-                    return;
-                }
-
-                if (parsed.type === 'text_delta') {
-                    if (fullResponse === '') {
-                        assistantContent.textContent = '';
-                    }
-                    fullResponse += parsed.text_delta;
-                    assistantContent.textContent = fullResponse;
-                    scrollToBottomWhereInputIs();
-                    return;
-                }
-
-                if (parsed.type === 'prompt') {
-                    console.log('Prompt:', parsed.payload);
-                }
-            };
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-
-                streamBuffer += decoder.decode(value, { stream: true });
-                let newlineIndex = streamBuffer.indexOf('\n');
-                while (newlineIndex !== -1) {
-                    const line = streamBuffer.slice(0, newlineIndex).trim();
-                    streamBuffer = streamBuffer.slice(newlineIndex + 1);
-                    processLine(line);
-                    newlineIndex = streamBuffer.indexOf('\n');
-                }
-            }
-
-            streamBuffer += decoder.decode();
-            const finalLine = streamBuffer.trim();
-            if (finalLine) {
-                processLine(finalLine);
-            }
-
-            createMessageNode('assistant', fullResponse, parentNodeId);
-            didCompleteResponse = true;
-        } catch (error) {
-            console.error('Error:', error);
-            assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;
-        } finally {
-            isGenerating = false;
-            updateSendButtonState();
-            if (didCompleteResponse) {
-                renderMessages();
-                scrollToBottomWhereInputIs();
-            }
-        }
-    }
-
     async function regenerateMessage(messageIndex) {
         if (messageIndex < 0 || messageIndex >= messages.length) {
             return;
@@ -655,6 +611,140 @@ export function createChatApp({
         await generateAssistantResponse(userNode.id);
     }
 
+    // 6) network/stream side effects
+    async function generateAssistantResponse(parentNodeId) {
+        isGenerating = true;
+        isAutoScrollSuspended = false;
+        sendButton.disabled = true;
+
+        let didCompleteResponse = false;
+
+        const pendingMessageDiv = doc.createElement('div');
+        pendingMessageDiv.className = 'message assistant';
+        const assistantContent = doc.createElement('div');
+        assistantContent.className = 'message-content';
+        assistantContent.innerHTML = '<span class="typing-indicator"></span>';
+        pendingMessageDiv.appendChild(assistantContent);
+        chatWrapper.appendChild(pendingMessageDiv);
+        maybeAutoScrollDuringGeneration();
+
+        try {
+            const query = buildChatQueryParams(timeZone, latitude, longitude);
+            const response = await fetchImpl(`${apiUrl}/chat?${query}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    conversation_uuid: conversationUuid,
+                    messages: getConversationMessagesUpTo(parentNodeId),
+                }),
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                const errorDetail = error?.detail || response.statusText;
+                throw new Error(`HTTP ${response.status} error: ${errorDetail}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let fullResponse = '';
+            let streamBuffer = '';
+
+            const processLine = line => {
+                const parsed = parseStreamPayloadLine(line);
+                if (!parsed) {
+                    return;
+                }
+
+                if (parsed.type === 'text_delta') {
+                    if (fullResponse === '') {
+                        assistantContent.textContent = '';
+                    }
+                    fullResponse += parsed.text_delta;
+                    assistantContent.textContent = fullResponse;
+                    maybeAutoScrollDuringGeneration();
+                    return;
+                }
+
+                if (parsed.type === 'prompt') {
+                    console.log('Prompt:', parsed.payload);
+                }
+            };
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                streamBuffer += decoder.decode(value, { stream: true });
+                let newlineIndex = streamBuffer.indexOf('\n');
+                while (newlineIndex !== -1) {
+                    const line = streamBuffer.slice(0, newlineIndex).trim();
+                    streamBuffer = streamBuffer.slice(newlineIndex + 1);
+                    processLine(line);
+                    newlineIndex = streamBuffer.indexOf('\n');
+                }
+            }
+
+            streamBuffer += decoder.decode();
+            const finalLine = streamBuffer.trim();
+            if (finalLine) {
+                processLine(finalLine);
+            }
+
+            createMessageNode('assistant', fullResponse, parentNodeId);
+            didCompleteResponse = true;
+        } catch (error) {
+            console.error('Error:', error);
+            assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;
+        } finally {
+            isGenerating = false;
+            updateSendButtonState();
+            if (didCompleteResponse) {
+                renderMessages({ scrollToBottom: !isAutoScrollSuspended });
+                if (!isAutoScrollSuspended) {
+                    scrollToBottomWhereInputIs();
+                }
+            }
+        }
+    }
+
+    // 7) event handlers + listener wiring
+    function handleScrollDuringGeneration() {
+        if (!isGenerating) {
+            return;
+        }
+        isAutoScrollSuspended = !isScrolledToBottom();
+    }
+
+    function handleInput() {
+        setInputHeight(chatInput);
+        if (isGenerating && isAutoScrollSuspended) {
+            isAutoScrollSuspended = false;
+            scrollToBottomWhereInputIs();
+        } else {
+            ensureInputBottomVisible();
+        }
+        updateSendButtonState();
+    }
+
+    function handleKeyDown(event) {
+        if (event.key === 'Escape') {
+            if (cancelEditSession()) {
+                event.preventDefault();
+            }
+            return;
+        }
+
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            void sendMessage();
+        }
+    }
+
     function handleDocumentMouseDown(event) {
         if (!editSession || isGenerating) {
             return;
@@ -668,10 +758,16 @@ export function createChatApp({
         }
     }
 
-    chatInput.addEventListener('input', () => {
-        setInputHeight(chatInput);
-        updateSendButtonState();
-    });
+    chatInput.addEventListener('input', handleInput);
+
+    chatContainer.addEventListener('scroll', handleScrollDuringGeneration, { passive: true });
+    const scrollingElement = doc.scrollingElement;
+    if (scrollingElement && scrollingElement !== chatContainer) {
+        scrollingElement.addEventListener('scroll', handleScrollDuringGeneration, { passive: true });
+    }
+    if (doc.defaultView) {
+        doc.defaultView.addEventListener('scroll', handleScrollDuringGeneration, { passive: true });
+    }
 
     chatInput.addEventListener('keydown', handleKeyDown);
     sendButton.addEventListener('click', () => {
@@ -716,6 +812,7 @@ export function createChatApp({
     };
 }
 
+// 8) exports + bootstrap
 export function initChatUI(options) {
     return createChatApp(options);
 }
