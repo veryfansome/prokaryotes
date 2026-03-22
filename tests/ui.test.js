@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildChatQueryParams, createChatApp, parseStreamPayloadLine } from '../scripts/static/ui.js';
 
+// 1) DOM fixtures + network stream mocks
 function renderBaseDOM() {
     document.body.innerHTML = `
         <div id="chatContainer"><div id="chatWrapper"></div></div>
@@ -9,6 +10,10 @@ function renderBaseDOM() {
         <button id="sendButton" disabled>Send</button>
         <div id="editStatus" hidden></div>
     `;
+}
+
+function textDelta(text) {
+    return JSON.stringify({ text_delta: text });
 }
 
 function streamFromJsonLines(lines) {
@@ -26,7 +31,7 @@ function streamFromJsonLines(lines) {
 function createFetchMock(chatPayloads) {
     let chatCall = 0;
 
-    return vi.fn(async (url) => {
+    return vi.fn(async url => {
         if (url.endsWith('/conversation')) {
             return {
                 ok: true,
@@ -57,7 +62,7 @@ function createControllableFetchMock() {
         },
     });
 
-    const fetchMock = vi.fn(async (url) => {
+    const fetchMock = vi.fn(async url => {
         if (url.endsWith('/conversation')) {
             return {
                 ok: true,
@@ -85,7 +90,7 @@ function createControllableFetchMock() {
         fetchMock,
         waitForReady,
         pushTextDelta(text) {
-            controller.enqueue(encoder.encode(`${JSON.stringify({ text_delta: text })}\n`));
+            controller.enqueue(encoder.encode(`${textDelta(text)}\n`));
         },
         close() {
             controller.close();
@@ -128,6 +133,41 @@ function mockScrollableContainer(
     };
 }
 
+// 2) shared test helpers
+function setupApp({
+    chatPayloads = [[textDelta('Hello')]],
+    fetchImpl = null,
+    navigatorImpl = {},
+    doc = document,
+} = {}) {
+    const effectiveFetchImpl = fetchImpl || createFetchMock(chatPayloads);
+    return createChatApp({
+        doc,
+        fetchImpl: effectiveFetchImpl,
+        navigatorImpl,
+    });
+}
+
+function setChatInput(app, text) {
+    app.elements.chatInput.value = text;
+    app.elements.chatInput.dispatchEvent(new Event('input'));
+}
+
+function startSendMessage(app, text) {
+    setChatInput(app, text);
+    return app.sendMessage();
+}
+
+async function sendUserMessage(app, text) {
+    await startSendMessage(app, text);
+}
+
+async function seedConversation(app, userMessages) {
+    for (const userMessage of userMessages) {
+        await sendUserMessage(app, userMessage);
+    }
+}
+
 async function flushAsyncWork() {
     await Promise.resolve();
     await Promise.resolve();
@@ -137,7 +177,8 @@ function asRoleContent(messages) {
     return messages.map(message => ({ role: message.role, content: message.content }));
 }
 
-describe('ui.js helpers', () => {
+// 3) pure helper tests
+describe('parseStreamPayloadLine', () => {
     it('parses text_delta stream payload', () => {
         expect(parseStreamPayloadLine('{"text_delta":"hello"}')).toEqual({ type: 'text_delta', text_delta: 'hello' });
     });
@@ -145,7 +186,9 @@ describe('ui.js helpers', () => {
     it('throws on invalid payload json', () => {
         expect(() => parseStreamPayloadLine('{bad json}')).toThrow('Invalid stream payload');
     });
+});
 
+describe('buildChatQueryParams', () => {
     it('builds query string with optional geolocation', () => {
         expect(buildChatQueryParams('America/Los_Angeles', null, null)).toBe('time_zone=America%2FLos_Angeles');
         expect(buildChatQueryParams('America/Los_Angeles', 1.23, 4.56)).toContain('latitude=1.23');
@@ -153,345 +196,264 @@ describe('ui.js helpers', () => {
     });
 });
 
+// 4) createChatApp integration tests
 describe('createChatApp messageTree flow', () => {
     beforeEach(() => {
         renderBaseDOM();
     });
 
-    it('sends a message and streams assistant response', async () => {
-        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hel' }), JSON.stringify({ text_delta: 'lo' })]]);
+    describe('send + stream flow', () => {
+        it('sends a message and streams assistant response', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('Hel'), textDelta('lo')]],
+            });
 
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
+            await sendUserMessage(app, 'Hi');
+
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'Hi' },
+                { role: 'assistant', content: 'Hello' },
+            ]);
         });
-
-        app.elements.chatInput.value = 'Hi';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        expect(asRoleContent(app.getMessages())).toEqual([
-            { role: 'user', content: 'Hi' },
-            { role: 'assistant', content: 'Hello' },
-        ]);
     });
 
-    it('keeps scrolling to the textarea while assistant tokens stream', async () => {
-        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hel' }), JSON.stringify({ text_delta: 'lo' })]]);
+    describe('scroll behavior', () => {
+        it('keeps scrolling to the textarea while assistant tokens stream', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('Hel'), textDelta('lo')]],
+            });
 
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
+            const scrollIntoViewSpy = vi.fn();
+            app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+
+            await sendUserMessage(app, 'Hi');
+
+            expect(scrollIntoViewSpy).toHaveBeenCalled();
         });
 
-        const scrollIntoViewSpy = vi.fn();
-        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+        it('scrolls the chat container to its lowest possible offset', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('Hello')]],
+            });
 
-        app.elements.chatInput.value = 'Hi';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
+            const scrollState = mockScrollableContainer(app.elements.chatContainer, {
+                clientHeight: 600,
+                initialScrollTop: 0,
+                scrollHeight: 1600,
+            });
 
-        expect(scrollIntoViewSpy).toHaveBeenCalled();
+            app.elements.chatInput.scrollIntoView = vi.fn();
+            await sendUserMessage(app, 'Hi');
+
+            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
+        });
+
+        it('pauses auto-scroll while generating when user scrolls up, then resumes at bottom', async () => {
+            const controlledFetch = createControllableFetchMock();
+            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
+
+            const scrollIntoViewSpy = vi.fn();
+            app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+            const scrollState = mockScrollableContainer(app.elements.chatContainer);
+
+            const sendPromise = startSendMessage(app, 'Hi');
+            await controlledFetch.waitForReady();
+
+            controlledFetch.pushTextDelta('first');
+            await flushAsyncWork();
+            const callsBeforePause = scrollIntoViewSpy.mock.calls.length;
+
+            scrollState.setScrollTop(200);
+            app.elements.chatContainer.dispatchEvent(new Event('scroll'));
+            await flushAsyncWork();
+
+            controlledFetch.pushTextDelta('second');
+            await flushAsyncWork();
+            expect(scrollIntoViewSpy.mock.calls.length).toBe(callsBeforePause);
+
+            scrollState.setScrollTop(scrollState.getMaxScrollTop());
+            app.elements.chatContainer.dispatchEvent(new Event('scroll'));
+            await flushAsyncWork();
+
+            controlledFetch.pushTextDelta('third');
+            controlledFetch.close();
+            await sendPromise;
+
+            expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsBeforePause);
+        });
+
+        it('resumes auto-scroll while generating when user starts typing', async () => {
+            const controlledFetch = createControllableFetchMock();
+            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
+
+            const scrollIntoViewSpy = vi.fn();
+            app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+            const scrollState = mockScrollableContainer(app.elements.chatContainer);
+
+            const sendPromise = startSendMessage(app, 'Hi');
+            await controlledFetch.waitForReady();
+
+            controlledFetch.pushTextDelta('first');
+            await flushAsyncWork();
+
+            scrollState.setScrollTop(200);
+            app.elements.chatContainer.dispatchEvent(new Event('scroll'));
+            await flushAsyncWork();
+
+            controlledFetch.pushTextDelta('second');
+            await flushAsyncWork();
+            const callsWhilePaused = scrollIntoViewSpy.mock.calls.length;
+
+            setChatInput(app, 'draft');
+            await flushAsyncWork();
+            expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsWhilePaused);
+
+            const callsAfterTyping = scrollIntoViewSpy.mock.calls.length;
+            controlledFetch.pushTextDelta('third');
+            controlledFetch.close();
+            await sendPromise;
+
+            expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsAfterTyping);
+        });
+
+        it('keeps textarea bottom visible while typing multiline input', () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('A1')]],
+            });
+
+            const scrollIntoViewSpy = vi.fn();
+            app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+            app.elements.chatInput.getBoundingClientRect = vi.fn(() => ({
+                bottom: 900,
+                height: 120,
+                left: 0,
+                right: 0,
+                top: 780,
+                width: 0,
+                x: 0,
+                y: 780,
+                toJSON() {
+                    return {};
+                },
+            }));
+
+            app.elements.chatInput.focus();
+            setChatInput(app, 'line1\nline2');
+
+            expect(scrollIntoViewSpy).toHaveBeenCalled();
+        });
     });
 
-    it('scrolls the chat container to its lowest possible offset', async () => {
-        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'Hello' })]]);
+    describe('edit mode', () => {
+        it('scrolls textarea into view when editing a previous user message by click', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('A1')], [textDelta('A2')]],
+            });
 
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
+            await seedConversation(app, ['U1', 'U2']);
+
+            const scrollIntoViewSpy = vi.fn();
+            app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
+
+            const editableMessage = app.elements.chatWrapper.querySelector(
+                '.message.user .message-content[data-message-index="2"]',
+            );
+            expect(editableMessage).not.toBeNull();
+            editableMessage.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+            expect(app.getIsEditing()).toBe(true);
+            expect(scrollIntoViewSpy).toHaveBeenCalled();
         });
 
-        const scrollState = mockScrollableContainer(app.elements.chatContainer, {
-            clientHeight: 600,
-            initialScrollTop: 0,
-            scrollHeight: 1600,
+        it('cancels edit mode with Escape and restores active branch', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('A1')], [textDelta('A2')]],
+            });
+
+            await seedConversation(app, ['U1', 'U2']);
+
+            app.editMessage(2);
+            expect(app.getIsEditing()).toBe(true);
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'U1' },
+                { role: 'assistant', content: 'A1' },
+                { role: 'user', content: 'U2' },
+            ]);
+            expect(app.elements.editStatus.hidden).toBe(false);
+            expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
+
+            app.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+            expect(app.getIsEditing()).toBe(false);
+            expect(app.elements.editStatus.hidden).toBe(true);
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'U1' },
+                { role: 'assistant', content: 'A1' },
+                { role: 'user', content: 'U2' },
+                { role: 'assistant', content: 'A2' },
+            ]);
         });
 
-        app.elements.chatInput.scrollIntoView = vi.fn();
-        app.elements.chatInput.value = 'Hi';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
+        it('cancels edit mode on outside mousedown', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('A1')], [textDelta('A2')]],
+            });
 
-        expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
+            await seedConversation(app, ['U1', 'U2']);
+
+            app.editMessage(2);
+            expect(app.getIsEditing()).toBe(true);
+            expect(app.elements.editStatus.hidden).toBe(false);
+            expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
+
+            document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+
+            expect(app.getIsEditing()).toBe(false);
+            expect(app.elements.editStatus.hidden).toBe(true);
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'U1' },
+                { role: 'assistant', content: 'A1' },
+                { role: 'user', content: 'U2' },
+                { role: 'assistant', content: 'A2' },
+            ]);
+        });
     });
 
-    it('pauses auto-scroll while generating when user scrolls up, then resumes at bottom', async () => {
-        const controlledFetch = createControllableFetchMock();
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: controlledFetch.fetchMock,
-            navigatorImpl: {},
+    describe('fork navigation', () => {
+        it('shows fork buttons and switches between user forks', async () => {
+            const app = setupApp({
+                chatPayloads: [[textDelta('A1')], [textDelta('A2')], [textDelta('AFork')]],
+            });
+
+            await seedConversation(app, ['U1', 'U2']);
+
+            app.editMessage(2);
+            await sendUserMessage(app, 'U2 - forked');
+
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'U1' },
+                { role: 'assistant', content: 'A1' },
+                { role: 'user', content: 'U2 - forked' },
+                { role: 'assistant', content: 'AFork' },
+            ]);
+
+            const indicator = app.elements.chatWrapper.querySelector('.message.user .fork-indicator');
+            expect(indicator).not.toBeNull();
+            expect(indicator.textContent).toBe('2/2');
+
+            const previousForkButton = app.elements.chatWrapper.querySelector('.message.user .fork-nav-btn');
+            expect(previousForkButton).not.toBeNull();
+            previousForkButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'U1' },
+                { role: 'assistant', content: 'A1' },
+                { role: 'user', content: 'U2' },
+                { role: 'assistant', content: 'A2' },
+            ]);
+
+            const switchedIndicator = app.elements.chatWrapper.querySelector('.message.user .fork-indicator');
+            expect(switchedIndicator.textContent).toBe('1/2');
         });
-
-        const scrollIntoViewSpy = vi.fn();
-        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
-        const scrollState = mockScrollableContainer(app.elements.chatContainer);
-
-        app.elements.chatInput.value = 'Hi';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        const sendPromise = app.sendMessage();
-        await controlledFetch.waitForReady();
-
-        controlledFetch.pushTextDelta('first');
-        await flushAsyncWork();
-        const callsBeforePause = scrollIntoViewSpy.mock.calls.length;
-
-        scrollState.setScrollTop(200);
-        app.elements.chatContainer.dispatchEvent(new Event('scroll'));
-        await flushAsyncWork();
-
-        controlledFetch.pushTextDelta('second');
-        await flushAsyncWork();
-        expect(scrollIntoViewSpy.mock.calls.length).toBe(callsBeforePause);
-
-        scrollState.setScrollTop(scrollState.getMaxScrollTop());
-        app.elements.chatContainer.dispatchEvent(new Event('scroll'));
-        await flushAsyncWork();
-
-        controlledFetch.pushTextDelta('third');
-        controlledFetch.close();
-        await sendPromise;
-
-        expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsBeforePause);
-    });
-
-    it('resumes auto-scroll while generating when user starts typing', async () => {
-        const controlledFetch = createControllableFetchMock();
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: controlledFetch.fetchMock,
-            navigatorImpl: {},
-        });
-
-        const scrollIntoViewSpy = vi.fn();
-        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
-        const scrollState = mockScrollableContainer(app.elements.chatContainer);
-
-        app.elements.chatInput.value = 'Hi';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        const sendPromise = app.sendMessage();
-        await controlledFetch.waitForReady();
-
-        controlledFetch.pushTextDelta('first');
-        await flushAsyncWork();
-
-        scrollState.setScrollTop(200);
-        app.elements.chatContainer.dispatchEvent(new Event('scroll'));
-        await flushAsyncWork();
-
-        controlledFetch.pushTextDelta('second');
-        await flushAsyncWork();
-        const callsWhilePaused = scrollIntoViewSpy.mock.calls.length;
-
-        app.elements.chatInput.value = 'draft';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await flushAsyncWork();
-        expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsWhilePaused);
-
-        const callsAfterTyping = scrollIntoViewSpy.mock.calls.length;
-        controlledFetch.pushTextDelta('third');
-        controlledFetch.close();
-        await sendPromise;
-
-        expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsAfterTyping);
-    });
-
-    it('keeps textarea bottom visible while typing multiline input', () => {
-        const fetchMock = createFetchMock([[JSON.stringify({ text_delta: 'A1' })]]);
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
-        });
-
-        const scrollIntoViewSpy = vi.fn();
-        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
-        app.elements.chatInput.getBoundingClientRect = vi.fn(() => ({
-            bottom: 900,
-            height: 120,
-            left: 0,
-            right: 0,
-            top: 780,
-            width: 0,
-            x: 0,
-            y: 780,
-            toJSON() {
-                return {};
-            },
-        }));
-
-        app.elements.chatInput.focus();
-        app.elements.chatInput.value = 'line1\nline2';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-
-        expect(scrollIntoViewSpy).toHaveBeenCalled();
-    });
-
-    it('scrolls textarea into view when editing a previous user message by click', async () => {
-        const fetchMock = createFetchMock([
-            [JSON.stringify({ text_delta: 'A1' })],
-            [JSON.stringify({ text_delta: 'A2' })],
-        ]);
-
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
-        });
-
-        app.elements.chatInput.value = 'U1';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.elements.chatInput.value = 'U2';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        const scrollIntoViewSpy = vi.fn();
-        app.elements.chatInput.scrollIntoView = scrollIntoViewSpy;
-
-        const editableMessage = app.elements.chatWrapper.querySelector(
-            '.message.user .message-content[data-message-index="2"]',
-        );
-        expect(editableMessage).not.toBeNull();
-        editableMessage.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-
-        expect(app.getIsEditing()).toBe(true);
-        expect(scrollIntoViewSpy).toHaveBeenCalled();
-    });
-
-    it('cancels edit mode with Escape and restores active branch', async () => {
-        const fetchMock = createFetchMock([
-            [JSON.stringify({ text_delta: 'A1' })],
-            [JSON.stringify({ text_delta: 'A2' })],
-        ]);
-
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
-        });
-
-        app.elements.chatInput.value = 'U1';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.elements.chatInput.value = 'U2';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.editMessage(2);
-        expect(app.getIsEditing()).toBe(true);
-        expect(asRoleContent(app.getMessages())).toEqual([
-            { role: 'user', content: 'U1' },
-            { role: 'assistant', content: 'A1' },
-            { role: 'user', content: 'U2' },
-        ]);
-        expect(app.elements.editStatus.hidden).toBe(false);
-        expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
-
-        app.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
-
-        expect(app.getIsEditing()).toBe(false);
-        expect(app.elements.editStatus.hidden).toBe(true);
-        expect(asRoleContent(app.getMessages())).toEqual([
-            { role: 'user', content: 'U1' },
-            { role: 'assistant', content: 'A1' },
-            { role: 'user', content: 'U2' },
-            { role: 'assistant', content: 'A2' },
-        ]);
-    });
-
-    it('shows fork buttons and switches between user forks', async () => {
-        const fetchMock = createFetchMock([
-            [JSON.stringify({ text_delta: 'A1' })],
-            [JSON.stringify({ text_delta: 'A2' })],
-            [JSON.stringify({ text_delta: 'AFork' })],
-        ]);
-
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
-        });
-
-        app.elements.chatInput.value = 'U1';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.elements.chatInput.value = 'U2';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.editMessage(2);
-        app.elements.chatInput.value = 'U2 - forked';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        expect(asRoleContent(app.getMessages())).toEqual([
-            { role: 'user', content: 'U1' },
-            { role: 'assistant', content: 'A1' },
-            { role: 'user', content: 'U2 - forked' },
-            { role: 'assistant', content: 'AFork' },
-        ]);
-
-        const indicator = app.elements.chatWrapper.querySelector('.message.user .fork-indicator');
-        expect(indicator).not.toBeNull();
-        expect(indicator.textContent).toBe('2/2');
-
-        const previousForkButton = app.elements.chatWrapper.querySelector('.message.user .fork-nav-btn');
-        expect(previousForkButton).not.toBeNull();
-        previousForkButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-
-        expect(asRoleContent(app.getMessages())).toEqual([
-            { role: 'user', content: 'U1' },
-            { role: 'assistant', content: 'A1' },
-            { role: 'user', content: 'U2' },
-            { role: 'assistant', content: 'A2' },
-        ]);
-
-        const switchedIndicator = app.elements.chatWrapper.querySelector('.message.user .fork-indicator');
-        expect(switchedIndicator.textContent).toBe('1/2');
-    });
-
-    it('cancels edit mode on outside mousedown', async () => {
-        const fetchMock = createFetchMock([
-            [JSON.stringify({ text_delta: 'A1' })],
-            [JSON.stringify({ text_delta: 'A2' })],
-        ]);
-
-        const app = createChatApp({
-            doc: document,
-            fetchImpl: fetchMock,
-            navigatorImpl: {},
-        });
-
-        app.elements.chatInput.value = 'U1';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.elements.chatInput.value = 'U2';
-        app.elements.chatInput.dispatchEvent(new Event('input'));
-        await app.sendMessage();
-
-        app.editMessage(2);
-        expect(app.getIsEditing()).toBe(true);
-        expect(app.elements.editStatus.hidden).toBe(false);
-        expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
-
-        document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-
-        expect(app.getIsEditing()).toBe(false);
-        expect(app.elements.editStatus.hidden).toBe(true);
-        expect(asRoleContent(app.getMessages())).toEqual([
-            { role: 'user', content: 'U1' },
-            { role: 'assistant', content: 'A1' },
-            { role: 'user', content: 'U2' },
-            { role: 'assistant', content: 'A2' },
-        ]);
     });
 });
