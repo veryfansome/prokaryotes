@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class Observer:
     def __init__(self, llm_client: LLMClient, model: str = "gpt-5.1"):
-        self.bg_task = None
+        self.bg_task: asyncio.Task | None = None
         self.llm_client = llm_client
         self.model = model
         self.response_text = ""

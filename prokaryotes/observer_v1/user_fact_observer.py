@@ -12,7 +12,6 @@ from prokaryotes.llm_v1 import (
     LLMClient,
 )
 from prokaryotes.models_v1 import (
-    ChatMessage,
     FactDoc,
     PromptContext,
     TextEmbeddingPrompt,
@@ -34,7 +33,7 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
         self.search_client = search_client
         self.user_context = user_context
 
-    async def call(self, context_snapshot: list[ChatMessage], arguments: str, call_id: str) -> None:
+    async def call(self, arguments: str, call_id: str) -> None:
         try:
             arguments: dict[str, list[str]] = json.loads(arguments)
             if "facts" in arguments and arguments["facts"]:
@@ -131,11 +130,12 @@ class UserFactsSavingObserver(Observer):
 
     async def get_saved_facts(self) -> list[FactDoc]:
         try:
-            await self.bg_task
-            return self.callback.saved_facts
+            if self.bg_task:
+                await self.bg_task
+                return self.callback.saved_facts
         except Exception:
-            logger.exception(f"Failed to get saved facts")
-            return []
+            logger.exception("Failed to get saved facts")
+        return []
 
     def reasoning_effort(self) -> str:
         # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.

@@ -113,6 +113,10 @@ class ToolCallAnchor(BaseModel):
 class ToolCallDoc(BaseModel):
     anchors: list[ToolCallAnchor]
     doc_id: str | None = Field(default=None, exclude=True)
+    label_cnt: int
     labels: list[str] = Field(default_factory=list)
     output: str
     updated_at: datetime
+
+    def add_anchor(self, anchor_text: str):
+        self.anchors.append(ToolCallAnchor(text=anchor_text))

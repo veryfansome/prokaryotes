@@ -44,15 +44,16 @@ class ContextFilteringObserver(Observer):
     async def get_filtered_context(self) -> list[ChatMessage]:
         valid_values = list(range(self.messages_len))
         try:
-            await self.bg_task
-            data = json.loads(self.response_text)
-            selected_positions = [idx for idx in sorted(list(set(data["index_positions"]))) if idx in valid_values]
-            if valid_values[-1] not in selected_positions:
-                selected_positions.append(valid_values[-1])  # Append last if excluded
-            return [self.messages[idx] for idx in selected_positions]
+            if self.bg_task:
+                await self.bg_task
+                data = json.loads(self.response_text)
+                selected_positions = [idx for idx in sorted(list(set(data["index_positions"]))) if idx in valid_values]
+                if valid_values[-1] not in selected_positions:
+                    selected_positions.append(valid_values[-1])  # Append last if excluded
+                return [self.messages[idx] for idx in selected_positions]
         except Exception:
             logger.exception(f"Failed to get index positions from '{self.response_text}'")
-            return self.messages[-2:]  # Fallback to last 2
+        return self.messages[-2:]  # Fallback to last 2
 
     def text_param(self) -> ResponseTextConfigParam:
         return ResponseTextConfigParam(

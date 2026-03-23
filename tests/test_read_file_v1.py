@@ -1,10 +1,7 @@
 import json
-from unittest.mock import AsyncMock
-
 import pytest
 from openai.types.responses.response_input_param import FunctionCallOutput
 
-from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.tools_v1.read_file import ReadFileCallback
 
 
@@ -14,14 +11,12 @@ class _DummyClient:
 
 def _make_callback() -> ReadFileCallback:
     callback = ReadFileCallback(_DummyClient(), _DummyClient())
-    callback.index = AsyncMock(return_value=None)
     return callback
 
 
 async def _run_call(callback: ReadFileCallback, arguments: dict | str) -> FunctionCallOutput:
     payload = arguments if isinstance(arguments, str) else json.dumps(arguments)
     return await callback.call(
-        context_snapshot=[ChatMessage(role="user", content="read this file")],
         arguments=payload,
         call_id="test-call-id",
     )
@@ -88,29 +83,16 @@ async def test_malformed_json_does_not_crash_call():
     result = await _run_call(callback, "{bad")
 
     assert "Expecting property name enclosed in double quotes" in result["output"]
-    callback.index.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [
-    {"path": 123},
-])
-async def test_invalid_path_does_not_crash_call(arguments):
-    callback = _make_callback()
-    result = await _run_call(callback, arguments)
-
-    assert "Invalid path" in result["output"]
-    callback.index.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("arguments", [
     {},
     {"path": "   "},
+    {"path": 123},
 ])
 async def test_missing_or_blank_path_does_not_crash_call(arguments):
     callback = _make_callback()
     result = await _run_call(callback, arguments)
 
-    assert "Missing or empty path" in result["output"]
-    callback.index.assert_not_called()
+    assert "Missing, empty, or invalid path" in result["output"]

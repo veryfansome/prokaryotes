@@ -1,6 +1,7 @@
 from openai.types.responses import WebSearchToolParam
 from openai.types.responses.web_search_tool_param import Filters
 
+
 web_search_tool_param = WebSearchToolParam(
     type="web_search",
     filters=Filters(

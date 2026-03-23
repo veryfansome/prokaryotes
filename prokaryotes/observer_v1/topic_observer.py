@@ -27,12 +27,13 @@ class TopicClassifyingObserver(Observer):
 
     async def get_topics(self) -> list[str]:
         try:
-            await self.bg_task
-            data = json.loads(self.response_text)
-            return data["topic_words"]
+            if self.bg_task:
+                await self.bg_task
+                data = json.loads(self.response_text)
+                return data["topic_words"]
         except Exception:
             logger.exception(f"Failed to get topic words from '{self.response_text}'")
-            return []
+        return []
 
     def text_param(self) -> ResponseTextConfigParam:
         return ResponseTextConfigParam(
