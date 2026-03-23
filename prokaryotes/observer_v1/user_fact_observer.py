@@ -87,7 +87,7 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                     )
                     self.saved_facts = await self.search_client.index_facts(
                         [f"user:{self.user_context.user_id}"],
-                        candidates_after_exact_dedupe, embs_resp.embs,
+                        candidates_to_index, candidate_embs,
                     )
             else:
                 logging.warning(f"Missing or empty facts in {arguments} (user {self.user_context.user_id})")

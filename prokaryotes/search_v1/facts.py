@@ -100,7 +100,7 @@ class FactSearcher(ABC):
 
     async def search_facts(
             self,
-            about: str,
+            about: str | list[str] | None = None,
             knn_num_candidates: int = 100,
             knn_top_k: int = 50,
             match: str = None,
@@ -108,20 +108,21 @@ class FactSearcher(ABC):
             min_score: float = None,
     ) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
-        shared_filters = [
-            # TODO: Might need to expand to searching multiple about keywords with AND/OR
-            # TODO: Make `about` optional to enable searching for facts about anything.
-            {"term": {"about": about}},
-            {
-                "bool": {
-                    "should": [
-                        {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
-                        {"range": {"invalid_after": {"gt": now.isoformat()}}},
-                    ],
-                    "minimum_should_match": 1,
-                }
+        shared_filters = []
+        if about:
+            if isinstance(about, str):
+                shared_filters.append({"term": {"about": about}})
+            else:
+                shared_filters.append({"terms": {"about": about}}) # OR
+        shared_filters.append({
+            "bool": {
+                "should": [
+                    {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
+                    {"range": {"invalid_after": {"gt": now.isoformat()}}},
+                ],
+                "minimum_should_match": 1,
             }
-        ]
+        })
         main_query = {
             "filter": shared_filters,
             "must_not": [{"term": {"labels": "deactivated"}}]
