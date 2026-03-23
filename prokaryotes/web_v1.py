@@ -24,6 +24,7 @@ from prokaryotes.llm_v1 import (
 )
 from prokaryotes.models_v1 import (
     ChatMessage,
+    PersonContext,
     PromptPayload,
     PromptContext,
     ToolCallDoc,
@@ -31,10 +32,7 @@ from prokaryotes.models_v1 import (
 from prokaryotes.observer_v1.context_observer import ContextFilteringObserver
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
 from prokaryotes.observer_v1.user_fact_observer import UserFactsSavingObserver
-from prokaryotes.search_v1 import (
-    PersonContext,
-    SearchClient,
-)
+from prokaryotes.search_v1 import SearchClient
 from prokaryotes.tools_v1.builtins import web_search_tool_param
 from prokaryotes.tools_v1.get_chat_history import ChatHistoryCallback
 from prokaryotes.tools_v1.read_file import ReadFileCallback

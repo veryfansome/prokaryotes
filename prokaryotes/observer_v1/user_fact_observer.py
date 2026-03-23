@@ -13,15 +13,13 @@ from prokaryotes.llm_v1 import (
 )
 from prokaryotes.models_v1 import (
     FactDoc,
+    PersonContext,
     PromptContext,
     TextEmbeddingPrompt,
     TextEmbeddingRequest,
 )
 from prokaryotes.observer_v1.base import Observer
-from prokaryotes.search_v1 import (
-    PersonContext,
-    SearchClient,
-)
+from prokaryotes.search_v1 import SearchClient
 from prokaryotes.utils_v1.context_utils import developer_message_parts
 from prokaryotes.utils_v1.text_utils import get_text_embeddings
 
