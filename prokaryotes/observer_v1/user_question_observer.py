@@ -9,13 +9,11 @@ from prokaryotes.llm_v1 import (
     LLMClient,
 )
 from prokaryotes.models_v1 import (
+    PersonContext,
     PromptContext,
 )
 from prokaryotes.observer_v1.base import Observer
-from prokaryotes.search_v1 import (
-    PersonContext,
-    SearchClient,
-)
+from prokaryotes.search_v1 import SearchClient
 
 logger = logging.getLogger(__name__)
 
