@@ -28,14 +28,9 @@ class ContextFilteringObserver(Observer):
                 
                 f" Messages are indexed from 0 (oldest) to {self.messages_len - 1} (most recent)."
                 
-                " Be aggressively minimal. It is okay to return an `index_positions` array with only a single index"
-                " position or even an empty one. If removing a message does not create ambiguity about the meaning or"
-                " intent of the most recent message, you must exclude it from the `index_positions` array."
-                
-                " Do *not* include greetings, banter, or setup messages unless they materially change the meaning of"
-                " the most recent message. Prioritize previous messages that provide information that is directly"
-                " referenced, implied, or required to interpret the most recent message (e.g. a code snippet, file"
-                " path, a preference that the most recent message depends on)."
+                " It is okay to return an `index_positions` array with only a single index position or even an empty"
+                " one. If removing a message does not create ambiguity about the meaning or intent of the most recent"
+                " message, exclude it from the `index_positions` array."
 
             ),
         ]

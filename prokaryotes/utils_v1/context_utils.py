@@ -37,5 +37,5 @@ def developer_message_parts(prompt_context: PromptContext, user_context: PersonC
         "| Recorded at | Fact |\n"
         "|---|---|"
     )
-    message_parts.append("| - | The assistant is a Python app |")
+    message_parts.append("| - | You are a Python-based assistant app, running in a container |")
     return message_parts
