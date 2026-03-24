@@ -105,32 +105,30 @@ class UserFactsSavingObserver(Observer):
             **kwargs
     ):
         super().__init__(llm_client, **kwargs)
-        self.callback = SaveUserFactsFunctionToolCallback(user_context, search_client)
         self.prompt_context = prompt_context
         self.user_context = user_context
+        self.save_user_facts_callback = SaveUserFactsFunctionToolCallback(user_context, search_client)
 
     def developer_message(self) -> str | None:
         message_parts = developer_message_parts(self.prompt_context, self.user_context)
         message_parts.append("---")
         message_parts.append("## Instructions")
-        if self.user_context.facts:
-            message_parts.append(
-                "Consider what is already known about the user in the \"User info\" section above."
-                " If the most recent message reveals new facts, call the `save_user_facts` function tool"
-                " to add these new fact to the \"User info\" section."
-            )
-        else:
-            message_parts.append(
-                "Consider the most recently received message. If the user has revealed information about themselves,"
-                " call the `save_user_facts` function tool to add this information to the \"User info\" section."
-            )
+        message_parts.append(
+            "- Analyze the most recent message. If the user has revealed novel information about themselves,"
+            " call the `save_user_facts` function tool to add this information to the \"User info\" section."
+        )
+        message_parts.append(
+            "- When saving a fact that reference the assistant, always maintain a second-person perspective and"
+            " address them directly as \"you\". e.g. \"The user is your creator.\" Frame facts as they relate to your"
+            " interactions with the user."
+        )
         return "\n".join(message_parts)
 
     async def get_saved_facts(self) -> list[FactDoc]:
         try:
             if self.bg_task:
                 await self.bg_task
-                return self.callback.saved_facts
+                return self.save_user_facts_callback.saved_facts
         except Exception:
             logger.exception("Failed to get saved facts")
         return []
@@ -156,7 +154,7 @@ class UserFactsSavingObserver(Observer):
                 "properties": {
                     "tool_called": {
                         "type": "string",
-                        "description": "True, if the `save_user_facts` function tool was called, else False.",
+                        "description": "True, if a function tool was called, else False.",
                         "enum": ["True", "False"],
                     },
                 },
@@ -167,7 +165,7 @@ class UserFactsSavingObserver(Observer):
         ))
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
-        return {"save_user_facts": self.callback}
+        return {"save_user_facts": self.save_user_facts_callback}
 
     def tool_params(self) -> list[FunctionToolParam]:
         return [
@@ -175,8 +173,9 @@ class UserFactsSavingObserver(Observer):
                 type="function",
                 name="save_user_facts",
                 description=(
-                    "Add new facts to the user's \"User info\" section."
-                    " Call this function whenever the user mentions private information that can't be easily looked up."
+                    "Add new user facts to the \"User info\" section."
+                    " Call this function whenever the user mentions private information that you haven't been train"
+                    " on and can't looked up."
 
                     " This includes knowledge about the user or their personal life, including:"
                     " family, friends, colleagues, past events, opinions and preferences,"

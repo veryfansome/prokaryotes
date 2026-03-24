@@ -84,7 +84,7 @@ class ProkaryoteV1(WebBase):
                 )
 
         message_parts.append("---")
-        message_parts.append("## Assistant instructions")
+        message_parts.append("## Instructions")
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
         if hidden_message_count > 0:
             message_parts.append(
@@ -239,6 +239,7 @@ class ProkaryoteV1(WebBase):
         )
         logger.info(f"Search text: {search_text}")
 
+        # TODO: Recall tool call outputs that are linked to previous messages in the context_window
         (
             recalled_tool_calls,
             recalled_user_context,
