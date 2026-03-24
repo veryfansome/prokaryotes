@@ -106,6 +106,7 @@ class FactSearcher(ABC):
             match: str = None,
             match_emb: list[float] = None,
             min_score: float = None,
+            not_about: str | list[str] | None = None,
     ) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
         shared_filters = []
@@ -123,9 +124,16 @@ class FactSearcher(ABC):
                 "minimum_should_match": 1,
             }
         })
+        shared_must_not = [{"term": {"labels": "deactivated"}}]
+        if not_about:
+            if isinstance(not_about, str):
+                shared_must_not.append({"term": {"about": not_about}})
+            else:
+                shared_must_not.append({"terms": {"about": not_about}})
+
         main_query = {
             "filter": shared_filters,
-            "must_not": [{"term": {"labels": "deactivated"}}]
+            "must_not": shared_must_not,
         }
         if match:
             main_query["should"] = [{"match": {"text": match}}]
@@ -170,7 +178,7 @@ class FactSearcher(ABC):
                 "filter": {
                     "bool": {
                         "must": shared_filters,
-                        "must_not": [{"term": {"labels": "deactivated"}}]
+                        "must_not": shared_must_not,
                     }
                 }
             }

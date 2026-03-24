@@ -31,7 +31,7 @@ from prokaryotes.models_v1 import (
 )
 from prokaryotes.observer_v1.context_observer import ContextFilteringObserver
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
-from prokaryotes.observer_v1.user_fact_observer import UserFactsSavingObserver
+from prokaryotes.observer_v1.fact_observer import FactSavingObserver
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.tools_v1.builtins import web_search_tool_param
 from prokaryotes.tools_v1.get_chat_history import ChatHistoryCallback
@@ -102,12 +102,12 @@ class ProkaryoteV1(WebBase):
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
             error: str,
+            fact_observer: FactSavingObserver,
             generated_response: str,
             prompt_uuid: str,
             recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
             topic_observer: TopicClassifyingObserver,
-            user_fact_observer: UserFactsSavingObserver,
     ):
         prompt_messages = [
             # Drop developer message, FunctionCallOutput, and ResponseFunctionToolCall
@@ -164,7 +164,7 @@ class ProkaryoteV1(WebBase):
                 self.graph_client.create_topic_to_response_edge(response, topics)
             ))
 
-        saved_facts = await user_fact_observer.get_saved_facts()
+        saved_facts = await fact_observer.get_saved_facts()
         if prompt and saved_facts:
             tasks.append(asyncio.create_task(
                 self.graph_client.create_fact_to_prompt_edge(prompt, saved_facts)
@@ -243,6 +243,7 @@ class ProkaryoteV1(WebBase):
         (
             recalled_tool_calls,
             recalled_user_context,
+            recalled_facts,
         ) = await asyncio.gather(
             self.search_client.search_tool_call_by_anchor(
                 search_text, search_emb,
@@ -254,17 +255,23 @@ class ProkaryoteV1(WebBase):
                 match_emb=search_emb,
                 min_facts_score=1.5,
             ),
+            self.search_client.search_facts(
+                match=search_text,
+                match_emb=search_emb,
+                min_score=1.5,
+                not_about=f"user:{session['user_id']}",
+            ),
         )
 
         prompt_context = PromptContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
 
-        user_fact_observer = UserFactsSavingObserver(
+        fact_observer = FactSavingObserver(
             prompt_context,
             recalled_user_context,
             self.llm_client,
             self.search_client,
         )
-        user_fact_observer.observe_in_background(context_window)
+        fact_observer.observe_in_background(context_window)
 
         context_window.insert(0, ChatMessage(
             role="developer",
@@ -287,6 +294,7 @@ class ProkaryoteV1(WebBase):
             self.stream_and_finalize(
                 context_window=context_window,
                 conversation_uuid=payload.conversation_uuid,
+                fact_observer=fact_observer,
                 recalled_tool_calls=recalled_tool_calls,
                 recalled_user_context=recalled_user_context,
                 response_generator=self.llm_client.stream_response(
@@ -297,7 +305,6 @@ class ProkaryoteV1(WebBase):
                     tool_params=tools_params,
                 ),
                 topic_observer=topic_observer,
-                user_fact_observer=user_fact_observer,
             ),
             media_type="text/event-stream",
         )
@@ -306,11 +313,11 @@ class ProkaryoteV1(WebBase):
             self,
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
+            fact_observer: FactSavingObserver,
             recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
             response_generator: AsyncGenerator[str, Any],
             topic_observer: TopicClassifyingObserver,
-            user_fact_observer: UserFactsSavingObserver,
     ) -> AsyncGenerator[str, Any]:
         prompt_uuid = str(uuid.uuid4())
         yield json.dumps({"prompt_uuid": prompt_uuid}) + "\n"
@@ -334,10 +341,10 @@ class ProkaryoteV1(WebBase):
                 context_window=context_window,
                 conversation_uuid=conversation_uuid,
                 error=error,
+                fact_observer=fact_observer,
                 generated_response=generated_response,
                 prompt_uuid=prompt_uuid,
                 recalled_tool_calls=recalled_tool_calls,
                 recalled_user_context=recalled_user_context,
                 topic_observer=topic_observer,
-                user_fact_observer=user_fact_observer,
             ))

@@ -95,7 +95,7 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
             logging.exception(f"Failed to save user {self.user_context.user_id} facts")
         return None  # No continuation
 
-class UserFactsSavingObserver(Observer):
+class FactSavingObserver(Observer):
     def __init__(
             self,
             prompt_context: PromptContext,
