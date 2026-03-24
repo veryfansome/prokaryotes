@@ -34,7 +34,7 @@ class SearchClient(
             min_facts_score: float = None,
     ) -> PersonContext:
         facts = await self.search_facts(
-            f"user:{user_id}",
+            about=f"user:{user_id}",
             match=match,
             match_emb=match_emb,
             min_score=min_facts_score,
