@@ -60,11 +60,23 @@ class FactSearcher(ABC):
 
     async def knn_dedupe_facts(
             self,
-            about: str,
             match_emb: list[float],
+            about: str | None = None,
             score_threshold: float = 0.4,
     ):
         now = datetime.now(tz=timezone.utc)
+        must = []
+        if about:
+            must.append({"term": {"about": about}})
+        must.append({
+            "bool": {
+                "should": [
+                    {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
+                    {"range": {"invalid_after": {"gt": now.isoformat()}}},
+                ],
+                "minimum_should_match": 1,
+            }
+        })
         response = await self.es.search(
             index="facts",
             knn={
@@ -74,18 +86,7 @@ class FactSearcher(ABC):
                 "num_candidates": 100,
                 "filter": {
                     "bool": {
-                        "must": [
-                            {"term": {"about": about}},
-                            {
-                                "bool": {
-                                    "should": [
-                                        {"bool": {"must_not": {"exists": {"field": "invalid_after"}}}},
-                                        {"range": {"invalid_after": {"gt": now.isoformat()}}},
-                                    ],
-                                    "minimum_should_match": 1,
-                                }
-                            }
-                        ],
+                        "must": must,
                         "must_not": [{"term": {"labels": "deactivated"}}]
                     }
                 }

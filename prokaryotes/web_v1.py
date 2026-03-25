@@ -24,6 +24,7 @@ from prokaryotes.llm_v1 import (
 )
 from prokaryotes.models_v1 import (
     ChatMessage,
+    FactDoc,
     PersonContext,
     PromptPayload,
     PromptContext,
@@ -66,10 +67,11 @@ class ProkaryoteV1(WebBase):
             cls,
             hidden_message_count: int,
             prompt_context: PromptContext,
-            recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
+            recalled_facts: list[FactDoc],
+            recalled_tool_calls: list[ToolCallDoc],
     ):
-        message_parts = developer_message_parts(prompt_context, recalled_user_context)
+        message_parts = developer_message_parts(prompt_context, recalled_user_context, recalled_facts)
 
         if recalled_tool_calls:
             # TODO: Maybe there should be some heuristic here about what to prioritize
@@ -241,14 +243,10 @@ class ProkaryoteV1(WebBase):
 
         # TODO: Recall tool call outputs that are linked to previous messages in the context_window
         (
-            recalled_tool_calls,
             recalled_user_context,
             recalled_facts,
+            recalled_tool_calls,
         ) = await asyncio.gather(
-            self.search_client.search_tool_call_by_anchor(
-                search_text, search_emb,
-                top_k=3,
-            ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
                 match=search_text,
@@ -261,6 +259,10 @@ class ProkaryoteV1(WebBase):
                 min_score=1.5,
                 not_about=f"user:{session['user_id']}",
             ),
+            self.search_client.search_tool_call_by_anchor(
+                search_text, search_emb,
+                top_k=3,
+            ),
         )
 
         prompt_context = PromptContext.new(latitude=latitude, longitude=longitude, time_zone=time_zone)
@@ -268,6 +270,7 @@ class ProkaryoteV1(WebBase):
         fact_observer = FactSavingObserver(
             prompt_context,
             recalled_user_context,
+            recalled_facts,
             self.llm_client,
             self.search_client,
         )
@@ -278,8 +281,9 @@ class ProkaryoteV1(WebBase):
             content=self.developer_message(
                 payload_messages_len - len(context_window),
                 prompt_context,
-                recalled_tool_calls,
                 recalled_user_context,
+                recalled_facts,
+                recalled_tool_calls,
             ),
         ))
 

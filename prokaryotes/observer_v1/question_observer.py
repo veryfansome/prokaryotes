@@ -18,7 +18,7 @@ from prokaryotes.search_v1 import SearchClient
 logger = logging.getLogger(__name__)
 
 # TODO: Flesh out this stub
-class UserQuestionsSavingObserver(Observer):
+class QuestionSavingObserver(Observer):
     def __init__(
             self,
             prompt_context: PromptContext,
