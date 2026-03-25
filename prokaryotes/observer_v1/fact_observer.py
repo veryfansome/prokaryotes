@@ -25,11 +25,12 @@ from prokaryotes.utils_v1.text_utils import get_text_embeddings
 
 logger = logging.getLogger(__name__)
 
-class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
-    def __init__(self, user_context: PersonContext, search_client: SearchClient):
+class FactSavingFunctionCallback(FunctionToolCallback):
+    def __init__(self, about: str | None, recalled_facts: list[FactDoc], search_client: SearchClient):
+        self.about = about
+        self.recalled_facts = recalled_facts
         self.saved_facts = []
         self.search_client = search_client
-        self.user_context = user_context
 
     async def call(self, arguments: str, call_id: str) -> None:
         try:
@@ -42,7 +43,7 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                         normalized_candidates.append(candidate)
                 len_before_dedupe = len(normalized_candidates)
                 # Exact-duplicate filtering
-                existing_fact_texts = {fact.text.casefold() for fact in self.user_context.facts}
+                existing_fact_texts = {fact.text.casefold() for fact in self.recalled_facts}
                 candidates_after_exact_dedupe = [
                     candidate for candidate in normalized_candidates
                     if candidate.casefold() not in existing_fact_texts
@@ -62,8 +63,8 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                     for idx, fact in enumerate(candidates_after_exact_dedupe):
                         search_tasks.append(asyncio.create_task(
                             self.search_client.knn_dedupe_facts(
-                                about=f"user:{self.user_context.user_id}",
                                 match_emb=embs_resp.embs[idx],
+                                about=self.about,
                                 score_threshold=0.95
                             )
                         ))
@@ -86,13 +87,13 @@ class SaveUserFactsFunctionToolCallback(FunctionToolCallback):
                         f"Filtered out {len_after_exact_dedupe - len_after_knn_dedupe} candidate facts after knn dedupe"
                     )
                     self.saved_facts = await self.search_client.index_facts(
-                        [f"user:{self.user_context.user_id}"],
+                        [self.about] if self.about else [],
                         candidates_to_index, candidate_embs,
                     )
             else:
-                logging.warning(f"Missing or empty facts in {arguments} (user {self.user_context.user_id})")
+                logging.warning(f"Missing or empty facts in {arguments}")
         except Exception:
-            logging.exception(f"Failed to save user {self.user_context.user_id} facts")
+            logging.exception("Failed to save facts")
         return None  # No continuation
 
 class FactSavingObserver(Observer):
@@ -100,6 +101,7 @@ class FactSavingObserver(Observer):
             self,
             prompt_context: PromptContext,
             user_context: PersonContext,
+            general_facts: list[FactDoc],
             llm_client: LLMClient,
             search_client: SearchClient,
             **kwargs
@@ -107,10 +109,16 @@ class FactSavingObserver(Observer):
         super().__init__(llm_client, **kwargs)
         self.prompt_context = prompt_context
         self.user_context = user_context
-        self.save_user_facts_callback = SaveUserFactsFunctionToolCallback(user_context, search_client)
+        self.general_facts = general_facts
+        self.save_user_facts_callback = FactSavingFunctionCallback(
+            f"user:{self.user_context.user_id}", user_context.facts, search_client
+        )
+        self.save_general_facts_callback = FactSavingFunctionCallback(
+            None, general_facts, search_client
+        )
 
     def developer_message(self) -> str | None:
-        message_parts = developer_message_parts(self.prompt_context, self.user_context)
+        message_parts = developer_message_parts(self.prompt_context, self.user_context, self. general_facts)
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append(
@@ -136,11 +144,11 @@ class FactSavingObserver(Observer):
     def reasoning_effort(self) -> str:
         # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
         fact_cnt = len(self.user_context.facts)
-        if fact_cnt <= 10:
+        if fact_cnt <= 15:
             return "none"
-        elif fact_cnt <= 20:
-            return "low"
         elif fact_cnt <= 30:
+            return "low"
+        elif fact_cnt <= 60:
             return "medium"
         else:
             return "high"
@@ -165,7 +173,10 @@ class FactSavingObserver(Observer):
         ))
 
     def tool_callbacks(self) -> dict[str, FunctionToolCallback]:
-        return {"save_user_facts": self.save_user_facts_callback}
+        return {
+            "save_general_facts": self.save_general_facts_callback,
+            "save_user_facts": self.save_user_facts_callback,
+        }
 
     def tool_params(self) -> list[FunctionToolParam]:
         return [
