@@ -8,7 +8,7 @@ web_search_tool_param = WebSearchToolParam(
         allowed_domains=[
             "developers.openai.com",
             "docs.pydantic.dev",
-            "elastic.co"
+            "elastic.co",
             "en.wikipedia.org",
             "fastapi.tiangolo.com",
             "imapclient.readthedocs.io",
