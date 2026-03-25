@@ -150,12 +150,13 @@ class ProkaryoteV1(WebBase):
                 func_call_outputs[obj["call_id"]] = obj["output"]
         for call_id, output in func_call_outputs.items():
             call_resp = func_call_resp[call_id]
-            tool_callback = self.tool_callbacks[call_resp.name]
-            if isinstance(tool_callback, FunctionCallOutputIndexer):
-                tool_call = await tool_callback.index(prompt_messages, call_resp.arguments, output)
-                tasks.append(asyncio.create_task(
-                    self.graph_client.create_tool_call_to_prompt_edge(prompt, tool_call)
-                ))
+            if call_resp.name in self.tool_callbacks:  # In case of adhoc callbacks like the chat history callback
+                tool_callback = self.tool_callbacks[call_resp.name]
+                if isinstance(tool_callback, FunctionCallOutputIndexer):
+                    tool_call = await tool_callback.index(prompt_messages.copy(), call_resp.arguments, output)
+                    tasks.append(asyncio.create_task(
+                        self.graph_client.create_tool_call_to_prompt_edge(prompt, tool_call)
+                    ))
 
         if prompt and topics:
             tasks.append(asyncio.create_task(
