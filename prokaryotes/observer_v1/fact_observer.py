@@ -108,25 +108,32 @@ class FactSavingObserver(Observer):
     ):
         super().__init__(llm_client, **kwargs)
         self.prompt_context = prompt_context
-        self.user_context = user_context
         self.general_facts = general_facts
-        self.save_user_facts_callback = FactSavingFunctionCallback(
-            f"user:{self.user_context.user_id}", user_context.facts, search_client
-        )
+        self.user_context = user_context
         self.save_general_facts_callback = FactSavingFunctionCallback(
             None, general_facts, search_client
         )
+        self.save_user_facts_callback = FactSavingFunctionCallback(
+            f"user:{self.user_context.user_id}", user_context.facts, search_client
+        )
 
     def developer_message(self) -> str | None:
-        message_parts = developer_message_parts(self.prompt_context, self.user_context, self. general_facts)
+        message_parts = developer_message_parts(self.prompt_context, self.user_context, self.general_facts)
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append(
-            "- Analyze the most recent message. If the user has revealed novel information about themselves,"
-            " call the `save_user_facts` function tool to add this information to the \"User info\" section."
+            "- Analyze the messages and use a tool whenever applicable."
         )
         message_parts.append(
-            "- When saving a fact that reference the assistant, always maintain a second-person perspective and"
+            "- If the user has revealed novel information about themselves, call the `save_user_facts` function"
+            " tool to add this information to the \"User info\" section."
+        )
+        message_parts.append(
+            "- If the interaction has revealed novel information about you the assistant, or the world, call the"
+            " `save_general_facts` function tool to add this information to the \"General info\" section."
+        )
+        message_parts.append(
+            "- When saving a fact that reference you the assistant, always maintain a second-person perspective and"
             " address them directly as \"you\". e.g. \"The user is your creator.\" Frame facts as they relate to your"
             " interactions with the user."
         )
@@ -136,7 +143,10 @@ class FactSavingObserver(Observer):
         try:
             if self.bg_task:
                 await self.bg_task
-                return self.save_user_facts_callback.saved_facts
+                return [
+                    *self.save_general_facts_callback.saved_facts,
+                    *self.save_user_facts_callback.saved_facts,
+                ]
         except Exception:
             logger.exception("Failed to get saved facts")
         return []
@@ -182,10 +192,38 @@ class FactSavingObserver(Observer):
         return [
             FunctionToolParam(
                 type="function",
+                name="save_general_facts",
+                description=(
+                    "Add new facts to the \"General info\" section."
+                    " Call this function whenever you encounter new information about you or the world, especially"
+                    " if is unexpected, contradictory, or outside the scope of information you've been trained on."
+
+                    " This includes observations about you the assistant, your code or environment, the outcomes of"
+                    " your plans and choices, or the consequences of your words or actions."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "facts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "A flat list of atomic facts, stating the information you want to save in the"
+                                " simplest language possible."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
+                    "required": ["facts"],
+                },
+                strict=True,
+            ),
+            FunctionToolParam(
+                type="function",
                 name="save_user_facts",
                 description=(
-                    "Add new user facts to the \"User info\" section."
-                    " Call this function whenever the user mentions private information that you haven't been train"
+                    "Add new facts to the \"User info\" section."
+                    " Call this function whenever the user mentions private information that you haven't been trained"
                     " on and can't looked up."
 
                     " This includes knowledge about the user or their personal life, including:"
@@ -208,5 +246,5 @@ class FactSavingObserver(Observer):
                     "required": ["facts"],
                 },
                 strict=True,
-            )
+            ),
         ]
