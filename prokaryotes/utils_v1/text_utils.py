@@ -1,7 +1,6 @@
 import mistune
 import os
 from bs4 import BeautifulSoup
-from starlette.concurrency import run_in_threadpool
 
 from prokaryotes.models_v1 import (
     TextEmbeddingPrompt,
@@ -43,9 +42,3 @@ def normalize_text_for_search(text: str) -> str:
     for code_tag in soup.select('pre code'):
         code_tag.decompose()
     return soup.get_text().strip()
-
-
-async def normalize_text_for_search_and_embed(text: str) -> tuple[str, list[float]]:
-    normalized_text = await run_in_threadpool(normalize_text_for_search, text)
-    emb = await get_query_embedding(normalized_text)
-    return normalized_text, emb

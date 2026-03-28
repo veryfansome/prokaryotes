@@ -122,20 +122,23 @@ class FactSavingObserver(Observer):
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append(
-            "- Analyze the messages and use a tool whenever applicable."
+            "- Analyze the the most recent user message and choose an appropriate tool, whenever applicable, to save"
+            " new information you encounter."
         )
         message_parts.append(
-            "- If the user has revealed novel information about themselves, call the `save_user_facts` function"
-            " tool to add this information to the \"User info\" section."
+            "- When referencing the assistant, always maintain a second-person perspective and address them directly"
+            " as \"you\". e.g. \"The user is your creator.\" Frame facts as they relate to your interactions with"
+            " the user."
         )
         message_parts.append(
-            "- If the interaction has revealed novel information about you the assistant, or the world, call the"
-            " `save_general_facts` function tool to add this information to the \"General info\" section."
+            "- Save new facts only. Do not duplicate or paraphrase facts already in the \"General Info\" and"
+            " \"User Info\" sections."
         )
         message_parts.append(
-            "- When saving a fact that reference you the assistant, always maintain a second-person perspective and"
-            " address them directly as \"you\". e.g. \"The user is your creator.\" Frame facts as they relate to your"
-            " interactions with the user."
+            "- Aim for less than 8 words but you can use more if important context would be lost otherwise."
+        )
+        message_parts.append(
+            "- Don't use more than 20 words."
         )
         return "\n".join(message_parts)
 
@@ -143,10 +146,10 @@ class FactSavingObserver(Observer):
         try:
             if self.bg_task:
                 await self.bg_task
-                return [
-                    *self.save_general_facts_callback.saved_facts,
-                    *self.save_user_facts_callback.saved_facts,
-                ]
+            return [
+                *self.save_general_facts_callback.saved_facts,
+                *self.save_user_facts_callback.saved_facts,
+            ]
         except Exception:
             logger.exception("Failed to get saved facts")
         return []
@@ -195,11 +198,14 @@ class FactSavingObserver(Observer):
                 name="save_general_facts",
                 description=(
                     "Add new facts to the \"General info\" section."
-                    " Call this function whenever you encounter new information about you or the world, especially"
-                    " if is unexpected, contradictory, or outside the scope of information you've been trained on."
+                    " Use this tool whenever you encounter new information that you haven't been trained"
+                    " on, and which doesn't fall under the scope of the `save_user_facts` tool."
 
-                    " This includes observations about you the assistant, your code or environment, the outcomes of"
-                    " your plans and choices, or the consequences of your words or actions."
+                    " This includes information about you the assistant, your code or runtime environment, or the"
+                    " greater world you inhabit."
+
+                    " Use this tool to document the things and situations you encounter, as well as your actions"
+                    " and their consequences."
                 ),
                 parameters={
                     "type": "object",
@@ -223,12 +229,12 @@ class FactSavingObserver(Observer):
                 name="save_user_facts",
                 description=(
                     "Add new facts to the \"User info\" section."
-                    " Call this function whenever the user mentions private information that you haven't been trained"
-                    " on and can't looked up."
+                    " Call this tool whenever the user mentions private information."
 
-                    " This includes knowledge about the user or their personal life, including:"
-                    " family, friends, colleagues, past events, opinions and preferences,"
-                    " hobbies, goals, projects, and more."
+                    " This includes information about them or their personal life, including:"
+                    " their family, friends, colleagues or other acquaintances, their past events and expereinces,"
+                    " their opinions and preferences, their interests and hobbies, their goals, projects and"
+                    " resolutions, and anything else that would facilitate richer, more personalized interactions."
                 ),
                 parameters={
                     "type": "object",

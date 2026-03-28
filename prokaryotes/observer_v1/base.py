@@ -19,18 +19,20 @@ class Observer:
         self.bg_task: asyncio.Task | None = None
         self.llm_client = llm_client
         self.model = model
+        self.observed_messages: list[ChatMessage] = []
         self.response_text = ""
 
     def developer_message(self) -> str | None:
         pass
 
     async def observe(self, messages: list[ChatMessage]):
+        self.observed_messages = messages
+
         context_window = []
         developer_message = self.developer_message()
         if developer_message:
             logger.debug(f"{self.__class__.__name__} developer message:\n{developer_message}")
             context_window.append(ChatMessage(role="developer", content=developer_message))
-        # TODO: Truncate observed window (last 5 messages?)
         context_window.extend(messages)
 
         async for chunk in self.llm_client.stream_response(

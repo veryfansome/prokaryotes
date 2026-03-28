@@ -30,17 +30,16 @@ from prokaryotes.models_v1 import (
     PromptContext,
     ToolCallDoc,
 )
-from prokaryotes.observer_v1.context_observer import ContextFilteringObserver
+from prokaryotes.observer_v1.summarizing_observer import MessageSummarizingObserver
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
 from prokaryotes.observer_v1.fact_observer import FactSavingObserver
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.tools_v1.builtins import web_search_tool_param
-from prokaryotes.tools_v1.get_chat_history import ChatHistoryCallback
 from prokaryotes.tools_v1.read_file import ReadFileCallback
 from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
 from prokaryotes.tools_v1.search_email import SearchEmailCallback
 from prokaryotes.utils_v1.context_utils import developer_message_parts
-from prokaryotes.utils_v1.text_utils import normalize_text_for_search_and_embed
+from prokaryotes.utils_v1.text_utils import get_query_embedding
 from prokaryotes.web_base_v1 import WebBase
 
 logger = logging.getLogger(__name__)
@@ -53,6 +52,7 @@ class ProkaryoteV1(WebBase):
         self.llm_client = get_llm_client()
         self.search_client = SearchClient()
 
+        # TODO: Tool for intentional recall
         tools: list[FunctionToolCallback] = [
             ReadFileCallback(self.llm_client, self.search_client),
             ScanDirectoryCallback(self.llm_client, self.search_client),
@@ -65,7 +65,6 @@ class ProkaryoteV1(WebBase):
     @classmethod
     def developer_message(
             cls,
-            hidden_message_count: int,
             prompt_context: PromptContext,
             recalled_user_context: PersonContext,
             recalled_facts: list[FactDoc],
@@ -88,12 +87,6 @@ class ProkaryoteV1(WebBase):
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
-        if hidden_message_count > 0:
-            message_parts.append(
-                f"- {hidden_message_count} {'messages have' if hidden_message_count > 1 else 'message has'} been"
-                " filtered out of the context window. If some required context seems missing, use the"
-                " `get_chat_history` function tool."
-            )
 
         message = "\n".join(message_parts)
         logger.info(f"Foreground developer message:\n{message}")
@@ -215,32 +208,22 @@ class ProkaryoteV1(WebBase):
         session = request.session
         if not session:
             raise HTTPException(status_code=400, detail="Session expired")
-
-        payload_messages_len = len(payload.messages)
-
-        if payload_messages_len == 0:
+        if len(payload.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
         preprocessing_tasks = []
 
-        context_observer: ContextFilteringObserver | None = None
-        if payload_messages_len > 4:  # After third user message
-            context_observer = ContextFilteringObserver(payload.messages, self.llm_client)
-            context_observer.observe_in_background(payload.messages)
-            preprocessing_tasks.append(context_observer.bg_task)
+        summary_observer = MessageSummarizingObserver(self.llm_client)
+        preprocessing_tasks.append(asyncio.create_task(summary_observer.observe(payload.messages.copy())))
 
         if preprocessing_tasks:
             await asyncio.gather(*preprocessing_tasks)
 
-        context_window = (await context_observer.get_filtered_context()) if context_observer else payload.messages
-
         topic_observer = TopicClassifyingObserver(self.llm_client)
-        topic_observer.observe_in_background(context_window)
+        topic_observer.observe_in_background(payload.messages.copy())
 
-        search_text, search_emb = await normalize_text_for_search_and_embed(
-            " ".join(m.content for m in context_window if m.role == "user")
-        )
-        logger.info(f"Search text: {search_text}")
+        search_text = await summary_observer.get_summary()
+        search_emb = await get_query_embedding(search_text)
 
         # TODO: Recall tool call outputs that are linked to previous messages in the context_window
         (
@@ -275,25 +258,18 @@ class ProkaryoteV1(WebBase):
             self.llm_client,
             self.search_client,
         )
-        fact_observer.observe_in_background(context_window)
+        fact_observer.observe_in_background(payload.messages.copy())
 
+        context_window = payload.messages.copy()
         context_window.insert(0, ChatMessage(
             role="developer",
             content=self.developer_message(
-                payload_messages_len - len(context_window),
                 prompt_context,
                 recalled_user_context,
                 recalled_facts,
                 recalled_tool_calls,
             ),
         ))
-
-        tools_callbacks = self.tool_callbacks.copy()
-        tools_params = self.tool_params.copy()
-        if context_observer:
-            chat_history_tool = ChatHistoryCallback(payload.messages)
-            tools_callbacks[chat_history_tool.tool_param["name"]] = chat_history_tool
-            tools_params.append(chat_history_tool.tool_param)
 
         return StreamingResponse(
             self.stream_and_finalize(
@@ -306,8 +282,8 @@ class ProkaryoteV1(WebBase):
                     context_window, model,
                     reasoning_effort=reasoning_effort,
                     stream_ndjson=True,
-                    tool_callbacks=tools_callbacks,
-                    tool_params=tools_params,
+                    tool_callbacks=self.tool_callbacks,
+                    tool_params=self.tool_params,
                 ),
                 topic_observer=topic_observer,
             ),

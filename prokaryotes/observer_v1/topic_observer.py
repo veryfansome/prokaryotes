@@ -29,8 +29,13 @@ class TopicClassifyingObserver(Observer):
         try:
             if self.bg_task:
                 await self.bg_task
+            if self.response_text:
                 data = json.loads(self.response_text)
-                return data["topic_words"]
+                topic_words = data["topic_words"]
+                assert isinstance(topic_words, list) and all(isinstance(word, str) for word in topic_words), (
+                    f"Invalid `topic_words`: expected list[str], got {self.response_text}"
+                )
+                return topic_words
         except Exception:
             logger.exception(f"Failed to get topic words from '{self.response_text}'")
         return []
