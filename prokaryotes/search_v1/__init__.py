@@ -4,14 +4,12 @@ from elasticsearch import AsyncElasticsearch
 from prokaryotes.models_v1 import PersonContext
 from prokaryotes.search_v1.facts import FactSearcher
 from prokaryotes.search_v1.prompts import PromptSearcher
-from prokaryotes.search_v1.questions import QuestionSearcher
 from prokaryotes.search_v1.responses import ResponseSearcher
 from prokaryotes.search_v1.tool_calls import ToolCallSearcher
 
 class SearchClient(
     FactSearcher,
     PromptSearcher,
-    QuestionSearcher,
     ResponseSearcher,
     ToolCallSearcher,
 ):
@@ -39,7 +37,7 @@ class SearchClient(
             match_emb=match_emb,
             min_score=min_facts_score,
         )
-        return PersonContext(facts=facts, name=full_name, questions=[], user_id=user_id)
+        return PersonContext(facts=facts, name=full_name, user_id=user_id)
 
     def init_client(self):
         self._es = get_elastic_search()
