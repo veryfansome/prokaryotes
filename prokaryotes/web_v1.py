@@ -222,6 +222,7 @@ class ProkaryoteV1(WebBase):
         topic_observer = TopicClassifyingObserver(self.llm_client)
         topic_observer.observe_in_background(payload.messages.copy())
 
+        # TODO: Index search_text as a FactDoc
         search_text = await summary_observer.get_summary()
         search_emb = await get_query_embedding(search_text)
 

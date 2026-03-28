@@ -36,7 +36,6 @@ class FactDoc(BaseModel):
 class PersonContext(BaseModel):
     facts: list[FactDoc] = Field(default_factory=list)
     name: str | None = None
-    questions: list[QuestionDoc] = Field(default_factory=list)
     user_id: int | None = None
 
 class PromptPayload(BaseModel):
@@ -74,16 +73,6 @@ class PromptDoc(BaseModel):
     importance: int = 1
     labels: list[str] = Field(default_factory=list)
     messages: list[ChatMessage]
-
-class QuestionDoc(BaseModel):
-    about: list[str]
-    created_at: datetime
-    doc_id: str | None = Field(default=None, exclude=True)
-    importance: int = 1
-    invalid_after: datetime | None = None
-    labels: list[str] = Field(default_factory=list)
-    text: str
-    to: list[str]  # Maybe for_?
 
 class ResponseDoc(BaseModel):
     about: list[str]
