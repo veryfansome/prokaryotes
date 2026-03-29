@@ -13,6 +13,7 @@ from prokaryotes.models_v1 import (
 
 logger = logging.getLogger(__name__)
 
+
 class EmbeddingV1:
     def __init__(self, emb_model_name: str):
         self.emb_model: SentenceTransformer | None = None

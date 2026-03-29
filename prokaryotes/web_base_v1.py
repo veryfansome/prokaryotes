@@ -35,6 +35,7 @@ from prokaryotes.utils_v1.logging_utils import log_async_task_exception
 
 logger = logging.getLogger(__name__)
 
+
 class WebBase:
     def __init__(self, static_dir: str):
         self.app: FastAPI | None = None
@@ -230,6 +231,7 @@ class WebBase:
                             return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
         return RedirectResponse(f"/register?{error}", status_code=status.HTTP_303_SEE_OTHER)
 
+
 async def get_postgres_pool():
     host = os.getenv("POSTGRES_HOST")
     port = os.getenv("POSTGRES_PORT", "5432")
@@ -246,6 +248,7 @@ async def get_postgres_pool():
         )
     raise RuntimeError("Unable to initialize postgres pool")
 
+
 def get_redis_client() -> Redis:
     host = os.getenv("REDIS_HOST")
     port = os.getenv("REDIS_PORT", "6379")
@@ -257,11 +260,13 @@ def get_redis_client() -> Redis:
         )
     raise RuntimeError("Unable to initialize Redis client")
 
+
 def hash_password(plain_text_password: str) -> str:
     return bcrypt.hashpw(
         plain_text_password.encode('utf-8'),
         bcrypt.gensalt()
     ).decode('utf-8')
+
 
 def verify_password(plain_text_password: str, stored_hash: str) -> bool:
     return bcrypt.checkpw(

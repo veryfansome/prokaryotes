@@ -4,6 +4,7 @@ from prokaryotes.models_v1 import (
     PromptContext,
 )
 
+
 def developer_message_parts(
         prompt_context: PromptContext,
         general_facts: list[FactDoc],

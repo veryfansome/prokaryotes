@@ -2,6 +2,7 @@ import pytest
 
 import prokaryotes.imap_v1 as imap_v1
 
+
 @pytest.mark.parametrize("input_tuple, expected_dict", [
     # Standard case: multiple pairs
     (

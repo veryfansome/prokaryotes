@@ -5,6 +5,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
+
 def log_async_task_exception(task: asyncio.Task):
     try:
         task.result()
@@ -13,10 +14,12 @@ def log_async_task_exception(task: asyncio.Task):
     except Exception:
         logger.exception("Exception in task")
 
+
 def log_future_exception(future: concurrent.futures.Future):
     exception = future.exception()
     if exception:
         logger.exception("Exception in thread", exc_info=exception)
+
 
 def setup_logging(
         httpcore_level: str = None,

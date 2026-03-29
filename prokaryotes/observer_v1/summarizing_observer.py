@@ -12,6 +12,7 @@ from prokaryotes.utils_v1.text_utils import normalize_text_for_search
 
 logger = logging.getLogger(__name__)
 
+
 class MessageSummarizingObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)

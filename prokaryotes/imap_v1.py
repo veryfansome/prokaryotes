@@ -24,10 +24,12 @@ logger = logging.getLogger(__name__)
 
 CONNECTION_ERRORS = (ConnectionError, imaplib.IMAP4.abort, imaplib.IMAP4.error, ssl.SSLError)
 
+
 class ControlSignalType(Enum):
     EXISTS = 1
     FETCH = 2
     SHUTDOWN = 3
+
 
 @dataclass(frozen=True)
 class ControlSignal:
@@ -46,11 +48,13 @@ class ControlSignal:
     def shutdown(cls):
         return cls(data=None, signal_type=ControlSignalType.SHUTDOWN)
 
+
 @dataclass(frozen=True)
 class Folder:
     flags: list[str]
     delimiter: str
     name: str
+
 
 @dataclass(frozen=True)
 class MessagePartRef:
@@ -62,6 +66,7 @@ class MessagePartRef:
     filename: str | None
     size: int | None
     charset: str | None
+
 
 @dataclass(frozen=True)
 class Message:
@@ -77,6 +82,7 @@ class Message:
     in_reply_to: str | None = None
     references: list[str] = None
 
+
 class IMAPClientFactory:
     def __init__(self, imap_host: str, imap_username: str, imap_password: str):
         self.imap_host = imap_host
@@ -89,6 +95,7 @@ class IMAPClientFactory:
         imap_client.use_uid = True
         imap_client.login(self.imap_username, self.imap_password)
         return imap_client
+
 
 class IngestController:
     def __init__(
@@ -152,7 +159,7 @@ class IngestController:
                                 self.safe_put_nowait(ControlSignal.fetch(r[2]))
                         # Restart IDLE periodically
                         if time.monotonic() - time_started > idle_restart_seconds:
-                            logger.info(f"Refreshing idle connection")
+                            logger.info("Refreshing idle connection")
                             _, trailing = client.idle_done()
                             if trailing:
                                 logger.info(f"Trailing responses after idle_done: {trailing}")
@@ -190,11 +197,14 @@ class IngestController:
         except queue.Full:
             logger.warning(f"Queue full, dropped {control_signal}")
 
+
 def bytes2str(b: bytes) -> str:
     return b.decode("utf-8", "replace")
 
+
 def choose_largest_part(parts: list[MessagePartRef]) -> MessagePartRef:
     return max(parts, key=lambda m: m.size if m.size is not None else 0)
+
 
 def classify_parts(folder: str, uid: int, body_structure) -> (
         tuple[list[MessagePartRef], list[MessagePartRef], list[MessagePartRef], list[MessagePartRef]]
@@ -232,6 +242,7 @@ def classify_parts(folder: str, uid: int, body_structure) -> (
             attachment_parts.append(ref)
     return html_parts, plain_parts, calendar_parts, attachment_parts
 
+
 def decode_transfer_encoding(data: bytes, encoding: str | None) -> bytes:
     if not encoding:
         return data
@@ -242,6 +253,7 @@ def decode_transfer_encoding(data: bytes, encoding: str | None) -> bytes:
             return quopri.decodestring(data)
     # 7bit/8bit/binary typically require no decoding
     return data
+
 
 def fetch_messages(client: IMAPClient, criteria: list[str] = None, folder: str = "INBOX") -> list[Message] | None:
     try:
@@ -295,6 +307,7 @@ def fetch_messages(client: IMAPClient, criteria: list[str] = None, folder: str =
     except Exception:
         logger.exception(f"Could not fetch {criteria} messages from {folder}")
 
+
 def fetch_part_ref(client: IMAPClient, part: MessagePartRef) -> bytes | None:
     try:
         client.select_folder(part.folder)
@@ -304,9 +317,11 @@ def fetch_part_ref(client: IMAPClient, part: MessagePartRef) -> bytes | None:
     except Exception:
         logger.exception(f"Failed to fetch part ref {part}")
 
+
 def idle(client: IMAPClient, folder):
     client.select_folder(folder)
     client.idle()
+
 
 def iter_leaf_parts(body_structure, prefix: str = ""):
     if body_structure and isinstance(body_structure, tuple) and isinstance(body_structure[0], list):
@@ -318,6 +333,7 @@ def iter_leaf_parts(body_structure, prefix: str = ""):
         # leaf
         yield prefix or "TEXT", body_structure
 
+
 def list_folders(client: IMAPClient) -> list[Folder] | None:
     try:
         return [Folder(
@@ -326,7 +342,8 @@ def list_folders(client: IMAPClient) -> list[Folder] | None:
             name=folder_data[2],
         ) for folder_data in client.list_folders()]
     except Exception:
-        logger.exception(f"Failed to list folders")
+        logger.exception("Failed to list folders")
+
 
 def parse_disposition(disposition) -> tuple[str | None, dict[str, str]]:
     # Disposition is usually None or (b'ATTACHMENT', (b'FILENAME', b'x.pdf')) or (b'INLINE', (...))
@@ -338,9 +355,11 @@ def parse_disposition(disposition) -> tuple[str | None, dict[str, str]]:
         return (disposition_name.lower() if disposition_name else None), disposition_params
     return bytes2str(disposition), {}
 
+
 def parse_header(blob: str) -> dict[str, str]:
     headers = HeaderParser().parsestr(blob)
     return {k.lower(): v for k, v in headers.items()}
+
 
 def parse_params(params: tuple) -> dict[str, str]:
     # Params looks like (b'CHARSET', b'UTF-8', b'NAME', b'file.txt') or None
@@ -353,11 +372,13 @@ def parse_params(params: tuple) -> dict[str, str]:
         param_struct[k] = v
     return param_struct
 
+
 def parse_references(blob: str) -> list[str]:
     if not blob:
         return []
     references_parts = [r.strip() for r in blob.split()]
     return [r for r in references_parts if r]
+
 
 if __name__ == "__main__":
     from dotenv import load_dotenv

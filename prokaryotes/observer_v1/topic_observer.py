@@ -10,6 +10,7 @@ from prokaryotes.observer_v1.base import Observer
 
 logger = logging.getLogger(__name__)
 
+
 class TopicClassifyingObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 setup_logging()
 
+
 async def sync_mappings(replicas: int = 0):
     schemas = {
         "facts": fact_mappings,
@@ -119,5 +120,6 @@ async def sync_mappings(replicas: int = 0):
             })
             logger.info(f"Created index: {index_name}")
     await es.close()
+
 
 asyncio.run(sync_mappings())

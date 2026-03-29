@@ -5,11 +5,13 @@ from fastapi.testclient import TestClient
 from prokaryotes.models_v1 import TextEmbeddingResponse
 from prokaryotes.emb_v1 import EmbeddingV1
 
+
 @pytest.fixture(scope="session")
 def client():
     v1 = EmbeddingV1("Snowflake/snowflake-arctic-embed-l-v2.0")
     with TestClient(v1.app) as c:
         yield c
+
 
 @pytest.mark.parametrize(", ".join([
     "query",
