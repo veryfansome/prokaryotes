@@ -1,7 +1,8 @@
-import anyio
 import json
 import logging
 from abc import ABC, abstractmethod
+
+import anyio
 from openai.types.responses import (
     FunctionToolParam,
     ResponseFormatTextJSONSchemaConfigParam,
@@ -9,7 +10,7 @@ from openai.types.responses import (
 )
 from starlette.concurrency import run_in_threadpool
 
-from prokaryotes.llm_v1 import LLMClient, FunctionCallOutputIndexer
+from prokaryotes.llm_v1 import FunctionCallOutputIndexer, LLMClient
 from prokaryotes.models_v1 import (
     ChatMessage,
     ToolCallDoc,

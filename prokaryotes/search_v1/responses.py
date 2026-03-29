@@ -3,7 +3,8 @@ from abc import (
     ABC,
     abstractmethod,
 )
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import ResponseDoc
@@ -45,7 +46,7 @@ class ResponseSearcher(ABC):
             response_text: str,
             response_emb: list[float],
     ):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = ResponseDoc(about=about, created_at=now, doc_id=prompt_uuid, labels=labels, text=response_text)
         try:
             await self.es.index(

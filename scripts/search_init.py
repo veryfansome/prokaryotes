@@ -1,5 +1,6 @@
 import asyncio
 import logging
+
 from dotenv import load_dotenv
 
 from prokaryotes.search_v1 import get_elastic_search

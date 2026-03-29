@@ -1,12 +1,16 @@
 import asyncio
-import asyncpg
-import bcrypt
-import httpx
 import logging
 import os
 from abc import abstractmethod
-from asyncpg import Pool
+from collections.abc import Coroutine
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlencode
+
+import asyncpg
+import bcrypt
+import httpx
+from asyncpg import Pool
 from fastapi import (
     FastAPI,
     Form,
@@ -18,7 +22,6 @@ from fastapi.responses import (
     FileResponse,
     RedirectResponse,
 )
-from pathlib import Path
 from redis.asyncio import Redis
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
@@ -27,8 +30,6 @@ from starsessions import (
     load_session,
 )
 from starsessions.stores.redis import RedisStore
-from typing import Coroutine
-from urllib.parse import urlencode
 
 from prokaryotes.utils_v1 import http_utils
 from prokaryotes.utils_v1.logging_utils import log_async_task_exception

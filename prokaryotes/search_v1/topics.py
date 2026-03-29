@@ -4,6 +4,7 @@ from abc import (
     ABC,
     abstractmethod,
 )
+
 from elasticsearch import AsyncElasticsearch, helpers
 
 logger = logging.getLogger(__name__)

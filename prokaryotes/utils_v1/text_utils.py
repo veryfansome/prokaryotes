@@ -1,5 +1,6 @@
-import mistune
 import os
+
+import mistune
 from bs4 import BeautifulSoup
 
 from prokaryotes.models_v1 import (

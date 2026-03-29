@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from prokaryotes.models_v1 import TextEmbeddingResponse
 from prokaryotes.emb_v1 import EmbeddingV1
+from prokaryotes.models_v1 import TextEmbeddingResponse
 
 
 @pytest.fixture(scope="session")
@@ -78,7 +78,12 @@ def test_semantic_similarity(
     qry_embs = TextEmbeddingResponse.model_validate(resp.json()).embs
 
     # Get embeddings for documents
-    payload = {"batch_size": 16, "prompt": "document", "texts": [related_doc, unrelated_doc], "truncate_to": truncate_to}
+    payload = {
+        "batch_size": 16,
+        "prompt": "document",
+        "texts": [related_doc, unrelated_doc],
+        "truncate_to": truncate_to,
+    }
     resp = client.post("/embs", json=payload)
     assert resp.status_code == 200, resp
     doc_embs = TextEmbeddingResponse.model_validate(resp.json()).embs

@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-from datetime import (
-    datetime,
-    timezone,
-)
 from dataclasses import dataclass
+from datetime import (
+    UTC,
+    datetime,
+)
 from enum import Enum
+from zoneinfo import ZoneInfo
+
 from pydantic import (
     BaseModel,
     Field,
 )
-from zoneinfo import ZoneInfo
 
 from prokaryotes.utils_v1.os_utils import (
     get_cwd,
     get_platform,
-    get_python_version,
     get_process_uid,
+    get_python_version,
     uid_to_name,
 )
 
@@ -66,7 +67,7 @@ class PromptContext:
             longitude=longitude,
             platform_short=get_platform(),
             python_version=get_python_version(),
-            received_at=datetime.now(timezone.utc),
+            received_at=datetime.now(UTC),
             time_zone=ZoneInfo("UTC" if not time_zone else time_zone),
             unix_usr=uid_to_name(get_process_uid()),
         )

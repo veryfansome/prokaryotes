@@ -1,5 +1,6 @@
 import asyncio
 import logging
+
 from openai.types.responses import (
     FunctionToolParam,
     ResponseTextConfigParam,
