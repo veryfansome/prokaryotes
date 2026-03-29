@@ -16,7 +16,7 @@ from prokaryotes.models_v1 import (
 )
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.utils_v1.text_utils import (
-    get_document_embedding,
+    get_document_embs,
     normalize_text_for_search,
 )
 
@@ -154,7 +154,7 @@ class PathBasedFunctionCallOutputIndexer(FunctionCallOutputIndexer, ABC):
                 if anchoring_decision == "Yes":
                     await self.search_client.update_tool_call(
                         tool_call=doc,
-                        anchor_emb=(await get_document_embedding(anchor_text)),
+                        anchor_emb=(await get_document_embs([anchor_text]))[0],
                         anchor_text=anchor_text,
                     )
             else:
@@ -167,7 +167,7 @@ class PathBasedFunctionCallOutputIndexer(FunctionCallOutputIndexer, ABC):
                     if anchoring_decision == "Yes":
                         await self.search_client.update_tool_call(
                             tool_call=doc,
-                            anchor_emb=(await get_document_embedding(anchor_text)),
+                            anchor_emb=(await get_document_embs([anchor_text]))[0],
                             anchor_text=anchor_text,
                             output=output,
                         )

@@ -10,23 +10,25 @@ from prokaryotes.models_v1 import (
 from prokaryotes.utils_v1 import http_utils
 
 
-async def get_document_embedding(doc_text: str) -> list[float]:
-    return (await get_text_embeddings(TextEmbeddingRequest(
+async def get_document_embs(doc_texts: list[str], batch_size: int = 1) -> list[list[float]]:
+    return (await get_text_embs(TextEmbeddingRequest(
+        batch_size=batch_size,
         prompt=TextEmbeddingPrompt.DOCUMENT,
-        texts=[doc_text],
+        texts=doc_texts,
         truncate_to=256,
-    ))).embs[0]
+    ))).embs
 
 
-async def get_query_embedding(qry_text: str) -> list[float]:
-    return (await get_text_embeddings(TextEmbeddingRequest(
+async def get_query_embs(qry_texts: list[str], batch_size: int = 1) -> list[list[float]]:
+    return (await get_text_embs(TextEmbeddingRequest(
+        batch_size=batch_size,
         prompt=TextEmbeddingPrompt.QUERY,
-        texts=[qry_text],
+        texts=qry_texts,
         truncate_to=256,
-    ))).embs[0]
+    ))).embs
 
 
-async def get_text_embeddings(req: TextEmbeddingRequest, timeout: float = 10.0) -> TextEmbeddingResponse:
+async def get_text_embs(req: TextEmbeddingRequest, timeout: float = 10.0) -> TextEmbeddingResponse:
     resp = await http_utils.httpx_client.post(
         os.getenv("EMBEDDINGS_URL"),
         json=req.model_dump(mode="json"),

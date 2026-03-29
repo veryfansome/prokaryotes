@@ -70,7 +70,6 @@ class PromptDoc(BaseModel):
     about: list[str]
     created_at: datetime
     doc_id: str | None = Field(default=None, exclude=True)
-    importance: int = 1
     labels: list[str] = Field(default_factory=list)
     messages: list[ChatMessage]
 
@@ -78,8 +77,6 @@ class ResponseDoc(BaseModel):
     about: list[str]
     created_at: datetime
     doc_id: str | None = Field(default=None, exclude=True)
-    error: str | None = Field(default=None)
-    importance: int = 1
     labels: list[str] = Field(default_factory=list)
     text: str
 

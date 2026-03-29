@@ -18,7 +18,6 @@ prompt_mappings = {
     "properties": {
         "about":      {"type": "keyword"},
         "created_at": {"type": "date"},
-        "importance": {"type": "integer"},
         "labels":     {"type": "keyword"},
         "messages": {
             "type": "nested",

@@ -6,8 +6,8 @@ from prokaryotes.models_v1 import (
 
 def developer_message_parts(
         prompt_context: PromptContext,
-        user_context: PersonContext,
         general_facts: list[FactDoc],
+        user_context: PersonContext,
 ) -> list[str]:
     now = prompt_context.received_at.astimezone(tz=prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
     message_parts = [

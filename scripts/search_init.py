@@ -7,6 +7,7 @@ from prokaryotes.search_v1.facts import fact_mappings
 from prokaryotes.search_v1.prompts import prompt_mappings
 from prokaryotes.search_v1.responses import response_mappings
 from prokaryotes.search_v1.tool_calls import tool_call_mappings
+from prokaryotes.search_v1.topics import topic_mappings
 from prokaryotes.utils_v1.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ async def sync_mappings(replicas: int = 0):
         "prompts": prompt_mappings,
         "responses": response_mappings,
         "tool-calls": tool_call_mappings,
+        "topics": topic_mappings,
     }
     es = get_elastic_search()
     for index_name, mappings in schemas.items():

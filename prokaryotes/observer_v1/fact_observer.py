@@ -15,13 +15,11 @@ from prokaryotes.models_v1 import (
     FactDoc,
     PersonContext,
     PromptContext,
-    TextEmbeddingPrompt,
-    TextEmbeddingRequest,
 )
 from prokaryotes.observer_v1.base import Observer
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.utils_v1.context_utils import developer_message_parts
-from prokaryotes.utils_v1.text_utils import get_text_embeddings
+from prokaryotes.utils_v1.text_utils import get_document_embs
 
 logger = logging.getLogger(__name__)
 
@@ -54,27 +52,26 @@ class FactSavingFunctionCallback(FunctionToolCallback):
                 )
                 # Near-duplicate filtering
                 if candidates_after_exact_dedupe:
-                    embs_resp = await get_text_embeddings(
-                        TextEmbeddingRequest(batch_size=16, prompt=TextEmbeddingPrompt.DOCUMENT,
-                                             texts=candidates_after_exact_dedupe,
-                                             truncate_to=256)
+                    candidate_embs = await get_document_embs(
+                        candidates_after_exact_dedupe,
+                        batch_size=max(len(candidates_after_exact_dedupe), 16),
                     )
                     search_tasks = []
                     for idx, fact in enumerate(candidates_after_exact_dedupe):
                         search_tasks.append(asyncio.create_task(
                             self.search_client.knn_dedupe_facts(
-                                match_emb=embs_resp.embs[idx],
+                                match_emb=candidate_embs[idx],
                                 about=self.about,
                                 score_threshold=0.95
                             )
                         ))
                     search_results = await asyncio.gather(*search_tasks)
-                    candidates_to_index = []
-                    candidate_embs = []
+                    texts_to_index = []
+                    embs_to_index = []
                     for idx, results in enumerate(search_results):
                         if not results:
-                            candidates_to_index.append(candidates_after_exact_dedupe[idx])
-                            candidate_embs.append(embs_resp.embs[idx])
+                            texts_to_index.append(candidates_after_exact_dedupe[idx])
+                            embs_to_index.append(candidate_embs[idx])
                         else:
                             # TODO: Pass near-duplicates to an LLM judge
                             # TODO: Alternatively, consolidate near-duplicates into the same fact doc
@@ -82,13 +79,13 @@ class FactSavingFunctionCallback(FunctionToolCallback):
                                 f"Filtering out fact candidate '{candidates_after_exact_dedupe[idx]}'"
                                 f" as a near-duplicate of {[f.text for f in results]}"
                             )
-                    len_after_knn_dedupe = len(candidates_to_index)
+                    len_after_knn_dedupe = len(texts_to_index)
                     logger.info(
                         f"Filtered out {len_after_exact_dedupe - len_after_knn_dedupe} candidate facts after knn dedupe"
                     )
                     self.saved_facts = await self.search_client.index_facts(
                         [self.about] if self.about else [],
-                        candidates_to_index, candidate_embs,
+                        texts_to_index, embs_to_index,
                     )
             else:
                 logging.warning(f"Missing or empty facts in {arguments}")
@@ -99,26 +96,30 @@ class FactSavingFunctionCallback(FunctionToolCallback):
 class FactSavingObserver(Observer):
     def __init__(
             self,
-            prompt_context: PromptContext,
-            user_context: PersonContext,
-            general_facts: list[FactDoc],
             llm_client: LLMClient,
             search_client: SearchClient,
+            prompt_context: PromptContext,
+            recalled_facts: list[FactDoc],
+            recalled_user_context: PersonContext,
             **kwargs
     ):
         super().__init__(llm_client, **kwargs)
         self.prompt_context = prompt_context
-        self.general_facts = general_facts
-        self.user_context = user_context
+        self.recalled_facts = recalled_facts
+        self.recalled_user_context = recalled_user_context
         self.save_general_facts_callback = FactSavingFunctionCallback(
-            None, general_facts, search_client
+            None, recalled_facts, search_client
         )
         self.save_user_facts_callback = FactSavingFunctionCallback(
-            f"user:{self.user_context.user_id}", user_context.facts, search_client
+            f"user:{self.recalled_user_context.user_id}", recalled_user_context.facts, search_client
         )
 
     def developer_message(self) -> str | None:
-        message_parts = developer_message_parts(self.prompt_context, self.user_context, self.general_facts)
+        message_parts = developer_message_parts(
+            self.prompt_context,
+            self.recalled_facts,
+            self.recalled_user_context,
+        )
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append(
@@ -156,7 +157,7 @@ class FactSavingObserver(Observer):
 
     def reasoning_effort(self) -> str:
         # Supported values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
-        fact_cnt = len(self.user_context.facts)
+        fact_cnt = len(self.recalled_user_context.facts)
         if fact_cnt <= 15:
             return "none"
         elif fact_cnt <= 30:

@@ -6,12 +6,14 @@ from prokaryotes.search_v1.facts import FactSearcher
 from prokaryotes.search_v1.prompts import PromptSearcher
 from prokaryotes.search_v1.responses import ResponseSearcher
 from prokaryotes.search_v1.tool_calls import ToolCallSearcher
+from prokaryotes.search_v1.topics import TopicSearcher
 
 class SearchClient(
     FactSearcher,
     PromptSearcher,
     ResponseSearcher,
     ToolCallSearcher,
+    TopicSearcher,
 ):
     def __init__(self):
         self._es: AsyncElasticsearch | None = None
@@ -29,7 +31,7 @@ class SearchClient(
             user_id: int,
             match: str = None,
             match_emb: list[float] = None,
-            min_facts_score: float = None,
+            min_facts_score: float = 0.5,
     ) -> PersonContext:
         facts = await self.search_facts(
             about=f"user:{user_id}",

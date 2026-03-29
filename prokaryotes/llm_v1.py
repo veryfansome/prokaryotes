@@ -58,6 +58,7 @@ class LLMClient(Protocol):
             self,
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             model: str,
+            log_events: bool = False,
             reasoning_effort: str = None,
             stream_ndjson: bool = False,
             text: ResponseTextConfigParam = None,
@@ -103,10 +104,13 @@ class OpenAIClient(LLMClient):
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             callback_tasks: list[asyncio.Task[FunctionCallOutput | None]],
             tool_callbacks: dict[str, FunctionToolCallback],
+            log_events: bool = False,
             ndjson: bool = False,
     ) -> str | None:
         if event.type == "response.output_text.delta":
             return (json.dumps({"text_delta": event.delta}) + "\n") if ndjson else event.delta
+        elif event.type == "response.output_text.done":
+            context_window.append(ChatMessage(role="assistant", content=event.text))
         elif event.type == "response.output_item.done" and event.item.type == "function_call":
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
             context_window.append(event.item)
@@ -117,16 +121,18 @@ class OpenAIClient(LLMClient):
                 )
             )
             callback_tasks.append(callback_task)
-        elif event.type.startswith("response.web_search_call"):
+        elif (event.type.startswith("response.web_search_call")
+                or (event.type == "response.output_item.done" and event.item.type == "search")):
             logger.info(event)
-        else:
-            logger.debug(event)
+        elif log_events:
+            logger.info(event)
         return None
 
     async def stream_response(
             self,
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             model: str,
+            log_events: bool = False,
             reasoning_effort: str = None,
             stream_ndjson: bool = False,
             text: ResponseTextConfigParam = None,
@@ -145,6 +151,7 @@ class OpenAIClient(LLMClient):
         ):
             str_to_yield = await self.handle_response_stream_event(
                 event, context_window, callback_tasks, tool_callbacks,
+                log_events=log_events,
                 ndjson=stream_ndjson,
             )
             if str_to_yield:
@@ -166,6 +173,7 @@ class OpenAIClient(LLMClient):
                 ):
                     str_to_yield = await self.handle_response_stream_event(
                         event, context_window, callback_tasks, tool_callbacks,
+                        log_events=log_events,
                         ndjson=stream_ndjson,
                     )
                     if str_to_yield:
