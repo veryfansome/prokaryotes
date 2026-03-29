@@ -39,7 +39,8 @@ jobs:
           if [ -d ~/.cache/huggingface/hub/models--Snowflake--snowflake-arctic-embed-l-v2.0 ]; then
               export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
           fi
-          uv sync --extra test --frozen --no-install-project
+          uv sync --extra dev --extra test --frozen --no-install-project
+          uv run ruff check .
           uv run pytest -vvv --cov --cov-report=xml --cov-report=term
 
       - name: Generate Coverage Badge
