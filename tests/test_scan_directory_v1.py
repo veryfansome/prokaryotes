@@ -1,4 +1,5 @@
 import json
+
 import pytest
 from openai.types.responses.response_input_param import FunctionCallOutput
 

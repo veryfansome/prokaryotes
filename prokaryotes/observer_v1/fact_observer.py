@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+
 from openai.types.responses import (
     FunctionToolParam,
     ResponseFormatTextJSONSchemaConfigParam,
@@ -58,7 +59,7 @@ class FactSavingFunctionCallback(FunctionToolCallback):
                         batch_size=max(len(candidates_after_exact_dedupe), 16),
                     )
                     search_tasks = []
-                    for idx, fact in enumerate(candidates_after_exact_dedupe):
+                    for idx, _fact in enumerate(candidates_after_exact_dedupe):
                         search_tasks.append(asyncio.create_task(
                             self.search_client.knn_dedupe_facts(
                                 match_emb=candidate_embs[idx],
@@ -82,7 +83,8 @@ class FactSavingFunctionCallback(FunctionToolCallback):
                             )
                     len_after_knn_dedupe = len(texts_to_index)
                     logger.info(
-                        f"Filtered out {len_after_exact_dedupe - len_after_knn_dedupe} candidate facts after knn dedupe"
+                        f"Filtered out {len_after_exact_dedupe - len_after_knn_dedupe} candidate facts"
+                        " after knn dedupe"
                     )
                     self.saved_facts = await self.search_client.index_facts(
                         [self.about] if self.about else [],

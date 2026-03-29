@@ -3,7 +3,8 @@ from abc import (
     ABC,
     abstractmethod,
 )
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import ToolCallDoc
@@ -50,7 +51,7 @@ class ToolCallSearcher(ABC):
             anchor_emb: list[float] = None,
             anchor_text: str = None,
     ):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = ToolCallDoc(
             anchors=[], label_cnt=len(labels), labels=labels, output=output, updated_at=now,
         )
@@ -141,7 +142,7 @@ class ToolCallSearcher(ABC):
             anchor_text: str = None,
             output: str = None,
     ):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         script = [
             "ctx._source.updated_at = params.updated_at;",
         ]

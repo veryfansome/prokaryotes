@@ -1,5 +1,4 @@
 import base64
-import certifi
 import imaplib
 import logging
 import os
@@ -16,6 +15,8 @@ from datetime import datetime
 from email.parser import HeaderParser
 from email.utils import parsedate_to_datetime
 from enum import Enum
+
+import certifi
 from imapclient import IMAPClient
 
 from prokaryotes.utils_v1.logging_utils import log_future_exception

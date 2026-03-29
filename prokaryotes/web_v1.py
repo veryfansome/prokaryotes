@@ -2,6 +2,9 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncGenerator
+from typing import Any
+
 from fastapi import (
     HTTPException,
     Query,
@@ -12,10 +15,6 @@ from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_param import FunctionCallOutput
 from starlette.concurrency import run_in_threadpool
 from starsessions import load_session
-from typing import (
-    Any,
-    AsyncGenerator,
-)
 
 from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.llm_v1 import (
@@ -27,8 +26,8 @@ from prokaryotes.models_v1 import (
     ChatMessage,
     FactDoc,
     PersonContext,
-    PromptPayload,
     PromptContext,
+    PromptPayload,
     ToolCallDoc,
 )
 from prokaryotes.observer_v1.fact_observer import FactSavingObserver

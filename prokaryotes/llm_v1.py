@@ -2,24 +2,25 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncGenerator
+from typing import (
+    Any,
+    Protocol,
+    is_typeddict,
+    runtime_checkable,
+)
+
 from openai import AsyncOpenAI
 from openai.types.responses import (
+    FunctionToolParam,
     ResponseFunctionToolCall,
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
 )
-from openai.types.responses import FunctionToolParam
 from openai.types.responses.response_create_params import ToolChoice
 from openai.types.responses.response_input_param import FunctionCallOutput
 from openai.types.shared_params import Reasoning
-from typing import (
-    Any,
-    AsyncGenerator,
-    Protocol,
-    is_typeddict,
-    runtime_checkable,
-)
 
 from prokaryotes.models_v1 import (
     ChatMessage,
@@ -89,7 +90,10 @@ class OpenAIClient(LLMClient):
                 "web_search_call.action.sources",
                 "web_search_call.results",
             ] if any(is_typeddict(param) and param["type"] == "web_search" for param in tool_params) else []),
-            input=[(m if (is_typeddict(m) or not isinstance(m, ChatMessage)) else m.model_dump()) for m in context_window],
+            input=[
+                (m if (is_typeddict(m) or not isinstance(m, ChatMessage)) else m.model_dump())
+                for m in context_window
+            ],
             text=text,
             tools=tool_params if tool_params else None,
             tool_choice=tool_choice,

@@ -1,5 +1,6 @@
 import logging
 import os
+
 from dotenv import load_dotenv
 
 from prokaryotes.imap_v1 import IngestController

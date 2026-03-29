@@ -1,6 +1,7 @@
 import logging
-import numpy as np
 from contextlib import asynccontextmanager
+
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from sentence_transformers import SentenceTransformer
 from starlette.concurrency import run_in_threadpool

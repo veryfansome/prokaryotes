@@ -3,7 +3,8 @@ from abc import (
     ABC,
     abstractmethod,
 )
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import (
@@ -47,7 +48,7 @@ class PromptSearcher(ABC):
             labels: list[str],
             messages: list[ChatMessage],
     ) -> PromptDoc | None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = PromptDoc(
             about=about, created_at=now, doc_id=prompt_uuid, labels=labels, messages=messages
         )

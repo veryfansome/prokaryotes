@@ -28,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "ruff",
+]
 test = [
     "pytest",
     "pytest-asyncio",
@@ -53,6 +56,25 @@ addopts = "--strict-markers --cov=prokaryotes"
 testpaths = [
     "tests",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+indent-width = 4
+
+[tool.ruff.format]
+# Like Black, use double quotes and respect the line length
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+ignore = []
+select = ["E", "F", "I", "UP", "B"]
+unfixable = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["prokaryotes"]
 
 [tool.setuptools.packages.find]
 include = ["prokaryotes*"]

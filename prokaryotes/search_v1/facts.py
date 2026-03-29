@@ -4,7 +4,8 @@ from abc import (
     ABC,
     abstractmethod,
 )
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from elastic_transport import ObjectApiResponse
 from elasticsearch import AsyncElasticsearch
 
@@ -43,7 +44,7 @@ class FactSearcher(ABC):
 
     async def index_facts(self, about: list[str], fact_texts: list[str], fact_embs: list[list[float]]):
         """Index a small list of facts."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         docs = [FactDoc(about=about, created_at=now, text=text) for text in fact_texts]
         index_tasks = [
             self.es.index(index="facts", document=(doc.model_dump() | {"text_emb": fact_embs[idx]}))
@@ -64,7 +65,7 @@ class FactSearcher(ABC):
             about: str | None = None,
             score_threshold: float = 0.4,
     ):
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         must = []
         if about:
             must.append({"term": {"about": about}})
@@ -109,7 +110,7 @@ class FactSearcher(ABC):
             min_score: float = 0.5,
             not_about: str | list[str] | None = None,
     ) -> list[FactDoc]:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         shared_filters = []
         if about:
             if isinstance(about, str):

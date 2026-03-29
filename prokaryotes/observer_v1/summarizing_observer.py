@@ -1,5 +1,6 @@
 import json
 import logging
+
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfigParam,
     ResponseTextConfigParam,
