@@ -34,7 +34,7 @@ response_mappings = {
 class ResponseSearcher(ABC):
     @property
     @abstractmethod
-    def es() -> AsyncElasticsearch:
+    def es(self) -> AsyncElasticsearch:
         pass
 
     async def index_response(

@@ -37,7 +37,7 @@ prompt_mappings = {
 class PromptSearcher(ABC):
     @property
     @abstractmethod
-    def es() -> AsyncElasticsearch:
+    def es(self) -> AsyncElasticsearch:
         pass
 
     async def index_prompt(
