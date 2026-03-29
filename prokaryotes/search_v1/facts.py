@@ -106,7 +106,7 @@ class FactSearcher(ABC):
             knn_top_k: int = 50,
             match: str = None,
             match_emb: list[float] = None,
-            min_score: float = None,
+            min_score: float = 0.5,
             not_about: str | list[str] | None = None,
     ) -> list[FactDoc]:
         now = datetime.now(tz=timezone.utc)
@@ -189,5 +189,6 @@ class FactSearcher(ABC):
             text = h['_source'].get('text')
             displayed_text = text if len(text) <= 50 else (text[:50] + "...")
             logger.debug(f"FactDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Text: {displayed_text}")
+        # TODO: Not efficient or scalable, pass min_score to es.search()
         return [FactDoc(doc_id=h["_id"], **h["_source"])
                 for h in hits if not min_score or (h["_score"] >= min_score)]

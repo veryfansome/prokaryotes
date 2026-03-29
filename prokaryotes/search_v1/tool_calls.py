@@ -73,7 +73,7 @@ class ToolCallSearcher(ABC):
             self,
             match: str,
             match_emb: list[float],
-            min_score: float = 1.5,
+            min_score: float = 0.5,
             knn_num_candidates: int = 100,
             knn_top_k: int = 30,
             top_k: int = 10,
@@ -112,7 +112,9 @@ class ToolCallSearcher(ABC):
         for h in hits:
             labels = h['_source'].get('labels')
             logger.debug(f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Labels: {labels}")
-        return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits if h["_score"] >= min_score]
+        # TODO: Not efficient or scalable, pass min_score to es.search()
+        return [ToolCallDoc(doc_id=h["_id"], **h["_source"])
+                for h in hits if not min_score or h["_score"] >= min_score]
 
     async def search_tool_call_by_labels(self, filter_labels: list[str]) -> list[ToolCallDoc]:
         response = await self.es.search(
