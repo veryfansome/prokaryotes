@@ -23,6 +23,7 @@ from prokaryotes.utils_v1.text_utils import get_document_embs
 
 logger = logging.getLogger(__name__)
 
+
 class FactSavingFunctionCallback(FunctionToolCallback):
     def __init__(self, about: str | None, recalled_facts: list[FactDoc], search_client: SearchClient):
         self.about = about
@@ -92,6 +93,7 @@ class FactSavingFunctionCallback(FunctionToolCallback):
         except Exception:
             logging.exception("Failed to save facts")
         return None  # No continuation
+
 
 class FactSavingObserver(Observer):
     def __init__(

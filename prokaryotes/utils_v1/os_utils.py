@@ -10,6 +10,7 @@ from functools import (
     lru_cache,
 )
 
+
 @lru_cache(maxsize=128)
 def format_st_mtime(mtime: float) -> str:
     dt = datetime.fromtimestamp(mtime)
@@ -19,6 +20,7 @@ def format_st_mtime(mtime: float) -> str:
         return dt.strftime("%b %e  %Y")
     else:
         return dt.strftime("%b %e %H:%M")
+
 
 @lru_cache(maxsize=128)
 def format_st_size(size: int):
@@ -30,21 +32,26 @@ def format_st_size(size: int):
         size /= 1024.0
     return f"{size:.1f}Y"
 
+
 @cache
 def get_cwd() -> str:
     return os.getcwd()
+
 
 @cache
 def get_platform() -> str:
     return platform.platform(terse=True)
 
+
 @cache
 def get_process_uid() -> int:
     return os.getuid()
 
+
 @cache
 def get_python_version() -> str:
     return platform.python_version()
+
 
 @cache
 def gid_to_name(gid: int) -> str:
@@ -53,9 +60,11 @@ def gid_to_name(gid: int) -> str:
     except Exception:
         return str(gid)
 
+
 @cache
 def st_mode_to_symbolic_mode(st_mode: int) -> str:
     return stat.filemode(st_mode)
+
 
 @cache
 def uid_to_name(uid: int) -> str:

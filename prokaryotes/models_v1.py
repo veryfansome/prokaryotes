@@ -20,9 +20,11 @@ from prokaryotes.utils_v1.os_utils import (
     uid_to_name,
 )
 
+
 class ChatMessage(BaseModel):
     role: str
     content: str
+
 
 class FactDoc(BaseModel):
     about: list[str]
@@ -33,14 +35,17 @@ class FactDoc(BaseModel):
     labels: list[str] = Field(default_factory=list)
     text: str
 
+
 class PersonContext(BaseModel):
     facts: list[FactDoc] = Field(default_factory=list)
     name: str | None = None
     user_id: int | None = None
 
+
 class PromptPayload(BaseModel):
     conversation_uuid: str
     messages: list[ChatMessage]
+
 
 @dataclass(frozen=True)
 class PromptContext:
@@ -66,12 +71,14 @@ class PromptContext:
             unix_usr=uid_to_name(get_process_uid()),
         )
 
+
 class PromptDoc(BaseModel):
     about: list[str]
     created_at: datetime
     doc_id: str | None = Field(default=None, exclude=True)
     labels: list[str] = Field(default_factory=list)
     messages: list[ChatMessage]
+
 
 class ResponseDoc(BaseModel):
     about: list[str]
@@ -80,9 +87,11 @@ class ResponseDoc(BaseModel):
     labels: list[str] = Field(default_factory=list)
     text: str
 
+
 class TextEmbeddingPrompt(Enum):
     DOCUMENT = "document"
     QUERY = "query"
+
 
 class TextEmbeddingRequest(BaseModel):
     batch_size: int = 1
@@ -90,11 +99,14 @@ class TextEmbeddingRequest(BaseModel):
     texts: list[str]
     truncate_to: int | None = None
 
+
 class TextEmbeddingResponse(BaseModel):
     embs: list[list[float]]
 
+
 class ToolCallAnchor(BaseModel):
     text: str
+
 
 class ToolCallDoc(BaseModel):
     anchors: list[ToolCallAnchor]

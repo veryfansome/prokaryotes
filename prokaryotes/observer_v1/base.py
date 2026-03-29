@@ -14,6 +14,7 @@ from prokaryotes.utils_v1.logging_utils import log_async_task_exception
 
 logger = logging.getLogger(__name__)
 
+
 class Observer:
     def __init__(self, llm_client: LLMClient, model: str = "gpt-5.1"):
         self.bg_task: asyncio.Task | None = None
