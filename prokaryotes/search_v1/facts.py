@@ -38,7 +38,7 @@ fact_mappings = {
 class FactSearcher(ABC):
     @property
     @abstractmethod
-    def es() -> AsyncElasticsearch:
+    def es(self) -> AsyncElasticsearch:
         pass
 
     async def index_facts(self, about: list[str], fact_texts: list[str], fact_embs: list[list[float]]):

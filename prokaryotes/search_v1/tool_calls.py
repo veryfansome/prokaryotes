@@ -40,7 +40,7 @@ tool_call_mappings = {
 class ToolCallSearcher(ABC):
     @property
     @abstractmethod
-    def es() -> AsyncElasticsearch:
+    def es(self) -> AsyncElasticsearch:
         pass
 
     async def index_tool_call(
