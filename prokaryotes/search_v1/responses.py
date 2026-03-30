@@ -70,16 +70,11 @@ class ResponseSearcher(ABC):
             not_about: str | list[str] | None = None,
     ) -> list[ResponseDoc]:
         shared_filters = []
-        if about_and:
-            for about in about_and:
-                shared_filters.append({"term": {"about": about}})
-        if about_or:
-            shared_filters.append({"terms": {"about": about_or}}) # OR
         if labels_and:
             for labels in labels_and:
                 shared_filters.append({"term": {"labels": labels}})
         if labels_or:
-            shared_filters.append({"terms": {"labels": labels_or}}) # OR
+            shared_filters.append({"terms": {"labels": labels_or}})
 
         shared_must_not = [{"term": {"labels": "deactivated"}}]
         if not_about:
@@ -92,7 +87,13 @@ class ResponseSearcher(ABC):
             "must_not": shared_must_not,
         }
         if match:
-            main_query["should"] = [{"match": {"text": match}}]
+            should = [{"match": {"text": {"query": match, "boost": 1.0}}}]
+            if about_and:
+                for about in about_and:
+                    should.append({"term": {"about": {"value": about, "boost": 2.0}}})
+            if about_or:
+                should.append({"terms": {"about": about_or, "boost": 2.0}})
+            main_query["should"] = should
         search_kwargs = {
             "index": "responses",
             "query": {
