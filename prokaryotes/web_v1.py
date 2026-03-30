@@ -241,6 +241,8 @@ class ProkaryoteV1(WebBase):
         if len(payload.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
+        # TODO: Instead of letting the client control the context window, let's use Redis to cache conversation data.
+
         # Generating summaries for recall before streaming responses slows things down. Sometimes, the juice might not
         # be worth the squeeze. This crude heuristic is used to guess if we should skip summarizing.
         search_text = payload.messages[-1].content

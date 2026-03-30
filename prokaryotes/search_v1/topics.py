@@ -38,7 +38,6 @@ class TopicSearcher(ABC):
         pass
 
     async def index_topics(self, topics: list[str], topic_embs: list[list[float]]):
-        # TODO: Move hashing further upstream and do ID lookup to skip embedding generation
         actions = [
             {
                 "_index": "topics",
@@ -70,7 +69,7 @@ class TopicSearcher(ABC):
         query = {
             "should": [
                 {"match": {"name": {"query": match, "boost": 1.0}}},
-                {"term": {"name.keyword": {"value": match, "boost": 5.0}}}
+                {"term": {"name.keyword": {"value": match, "boost": 2.0}}}
             ]
         }
         search_kwargs = {
