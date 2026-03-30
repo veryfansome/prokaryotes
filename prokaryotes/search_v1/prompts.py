@@ -53,7 +53,11 @@ class PromptSearcher(ABC):
             about=about, created_at=now, doc_id=prompt_uuid, labels=labels, messages=messages
         )
         try:
-            await self.es.index(id=prompt_uuid, index="prompts", document=doc.model_dump())
+            await self.es.index(
+                id=prompt_uuid,
+                index="prompts",
+                document=doc.model_dump(exclude={"messages": {"__all__": "type"}})
+            )
             return doc
         except Exception:
             logger.exception(f"Failed to index {doc}")
