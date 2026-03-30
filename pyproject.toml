@@ -19,7 +19,7 @@ dependencies = [
     "openai",
     "python-dotenv",
     "python-multipart",
-    "redis",
+    "redis[hiredis]",
     "sentence-transformers",
     "starsessions[redis]",
     "torch==2.10.0+cpu; sys_platform == 'linux'",

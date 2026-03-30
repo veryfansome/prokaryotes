@@ -6,8 +6,11 @@ from datetime import (
     datetime,
 )
 from enum import Enum
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
+from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_input_param import FunctionCallOutput
 from pydantic import (
     BaseModel,
     Field,
@@ -23,8 +26,15 @@ from prokaryotes.utils_v1.os_utils import (
 
 
 class ChatMessage(BaseModel):
-    role: str
     content: str
+    role: str
+    type: Literal["message"] = "message"
+
+
+ContextWindowItem = Annotated[
+    ChatMessage | FunctionCallOutput | ResponseFunctionToolCall,
+    Field(discriminator="type")
+]
 
 
 class FactDoc(BaseModel):

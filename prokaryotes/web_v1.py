@@ -13,6 +13,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_param import FunctionCallOutput
+from pydantic import TypeAdapter
 from starlette.concurrency import run_in_threadpool
 from starsessions import load_session
 
@@ -24,6 +25,7 @@ from prokaryotes.llm_v1 import (
 )
 from prokaryotes.models_v1 import (
     ChatMessage,
+    ContextWindowItem,
     FactDoc,
     PersonContext,
     PromptContext,
@@ -53,6 +55,8 @@ logger = logging.getLogger(__name__)
 class ProkaryoteV1(WebBase):
     def __init__(self, static_dir: str):
         super().__init__(static_dir)
+        self.conversation_adapter = TypeAdapter(list[ContextWindowItem])
+        self.conversation_cache_ex = 60 * 60 * 24 * 7
         self.graph_client = GraphClient()
         self.llm_client = get_llm_client()
         self.search_client = SearchClient()
@@ -111,10 +115,16 @@ class ProkaryoteV1(WebBase):
             recalled_user_context: PersonContext,
             topic_observer: TopicClassifyingObserver,
     ):
+        await self.redis_client.set(
+            f"conversation:{conversation_uuid}", self.conversation_adapter.dump_json(context_window),
+            ex=self.conversation_cache_ex,
+        )
+
         generated_response_idx = len(context_window) - 1
         generated_response = context_window[generated_response_idx].content
         prompt_messages = [
-            # Drop developer message, FunctionCallOutput, and ResponseFunctionToolCall
+            # Drop the developer message, any FunctionCallOutput or ResponseFunctionToolCall, and the generated
+            # response, which will be index separately.
             msg for idx, msg in enumerate(context_window)
             if isinstance(msg, ChatMessage) and msg.role in {"assistant", "user"} and idx != generated_response_idx
         ]
@@ -189,6 +199,22 @@ class ProkaryoteV1(WebBase):
         await asyncio.gather(*tasks)
 
     @classmethod
+    def find_context_divergence(
+        cls,
+        list1: list[ChatMessage],
+        list2: list[ChatMessage],
+    ) -> tuple[int | None, bool, bool]:
+        list1_len = len(list1)
+        list2_len = len(list2)
+        for idx, (item1, item2) in enumerate(zip(list1, list2, strict=False)):
+            if item1 != item2:
+                return idx, True, list1_len > list2_len
+        if list1_len == list2_len:
+            return None, False, False
+        else:
+            return min(list1_len, list2_len), False, list1_len > list2_len
+
+    @classmethod
     async def get_conversation(cls, request: Request):
         await load_session(request)
         session = request.session
@@ -241,8 +267,6 @@ class ProkaryoteV1(WebBase):
         if len(payload.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
 
-        # TODO: Instead of letting the client control the context window, let's use Redis to cache conversation data.
-
         # Generating summaries for recall before streaming responses slows things down. Sometimes, the juice might not
         # be worth the squeeze. This crude heuristic is used to guess if we should skip summarizing.
         search_text = payload.messages[-1].content
@@ -254,7 +278,8 @@ class ProkaryoteV1(WebBase):
             # TODO: Index search_text as a FactDoc if no fact tool calls?
             search_text = await summary_observer.get_summary()
 
-        summary_emb = (await get_query_embs([search_text]))[0]
+        logger.info(f"Search text: {search_text}")
+        search_emb = (await get_query_embs([search_text]))[0]
         # TODO: Recall tool call outputs that are linked to previous messages in the context_window
         (
             recalled_facts,
@@ -263,19 +288,19 @@ class ProkaryoteV1(WebBase):
         ) = await asyncio.gather(
             self.search_client.search_facts(
                 match=search_text,
-                match_emb=summary_emb,
+                match_emb=search_emb,
                 min_score=0.75,
                 not_about=f"user:{session['user_id']}",
             ),
             self.search_client.search_tool_call_by_anchor(
-                search_text, summary_emb,
+                search_text, search_emb,
                 min_score=0.75,
                 top_k=3,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
                 match=search_text,
-                match_emb=summary_emb,
+                match_emb=search_emb,
                 min_facts_score=0.75,
             ),
         )
@@ -304,17 +329,55 @@ class ProkaryoteV1(WebBase):
             web_search_tool_param,
         ]
 
-        # Stream response 
-        context_window = payload.messages.copy()
-        context_window.insert(0, ChatMessage(
+        # Context window
+        developer_message = ChatMessage(
             role="developer",
             content=self.developer_message(
                 prompt_context,
                 recalled_facts,
                 recalled_tool_calls,
                 recalled_user_context,
-            ),
-        ))
+            )
+        )
+        cached_conversation = await self.redis_client.get(f"conversation:{payload.conversation_uuid}")
+        if cached_conversation:
+            logger.info("Using context_window from cache")
+            context_window = self.conversation_adapter.validate_json(cached_conversation)
+            context_window.pop(0)  # Drop old developer message
+
+            context_window_messages = []
+            context_window_message_indexes = []
+            for idx, item in enumerate(context_window):
+                if isinstance(item, ChatMessage):  # Exclude any FunctionCallOutput or ResponseFunctionToolCall
+                    context_window_messages.append(item)
+                    context_window_message_indexes.append(idx)
+            divergence_idx, is_mismatch, cached_context_is_longer = self.find_context_divergence(
+                context_window_messages,
+                payload.messages[:-1],
+            )
+            if divergence_idx is None:
+                logger.info("Cached state matches payload")
+                context_window.append(payload.messages[-1])
+            elif cached_context_is_longer:
+                divergence_idx = context_window_message_indexes[divergence_idx]
+                if is_mismatch:
+                    # TODO: Fix this fork - it's not triggering
+                    logger.info("Cached state does not match payload, earlier message changed")
+                    context_window = context_window[:divergence_idx]
+                    context_window.append(payload.messages[-1])
+                else:
+                    logger.info("Cached state does not match payload, retrying earlier message")
+                    context_window = context_window[:divergence_idx+1]
+            else:
+                logger.info("Cached state does not match payload, patching missing context from payload")
+                context_window = context_window[:context_window_message_indexes[-1] + 1]  # Truncate to last good
+                context_window.extend(payload.messages[divergence_idx:])
+        else:
+            logger.info("Using context_window from request payload")
+            context_window = payload.messages.copy()
+        context_window.insert(0, developer_message)
+
+        # Stream response 
         return StreamingResponse(
             self.stream_and_finalize(
                 context_window=context_window,
