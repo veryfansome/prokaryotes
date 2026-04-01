@@ -128,16 +128,20 @@ class FactSavingObserver(Observer):
         message_parts.append("## Instructions")
         message_parts.append(
             "- Analyze the the most recent user message and choose an appropriate tool, whenever applicable, to save"
-            " new information you encounter."
+            " new facts you encounter."
+        )
+        message_parts.append(
+            "- Record discrete data points (the \"what\", \"where\", and \"when\"), focusing on individual attributes,"
+            " relationships or events. Do not summarize the content or purpose of the user's message."
+        )
+        message_parts.append(
+            "- Save new facts only. Do not duplicate or paraphrase facts already in the \"General Info\" or"
+            " \"User Info\" sections."
         )
         message_parts.append(
             "- When referencing the assistant, always maintain a second-person perspective and address them directly"
-            " as \"you\". e.g. \"The user is your creator.\" Frame facts as they relate to your interactions with"
-            " the user."
-        )
-        message_parts.append(
-            "- Save new facts only. Do not duplicate or paraphrase facts already in the \"General Info\" and"
-            " \"User Info\" sections."
+            " as \"you\". For example, rather than saying \"The user created the assistant\", say \"The user create"
+            " you.\""
         )
         message_parts.append(
             "- Aim for less than 8 words but you can use more if important context would be lost otherwise."

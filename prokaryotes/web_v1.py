@@ -37,10 +37,8 @@ from prokaryotes.observer_v1.summarizing_observer import MessageSummarizingObser
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.tools_v1.builtins import web_search_tool_param
-from prokaryotes.tools_v1.read_file import ReadFileCallback
 from prokaryotes.tools_v1.recall_responses import RecallResponsesCallback
-from prokaryotes.tools_v1.scan_directory import ScanDirectoryCallback
-from prokaryotes.tools_v1.search_email import SearchEmailCallback
+from prokaryotes.tools_v1.shell_command import ShellCommandCallback
 from prokaryotes.utils_v1.context_utils import developer_message_parts
 from prokaryotes.utils_v1.text_utils import (
     get_document_embs,
@@ -61,11 +59,8 @@ class ProkaryoteV1(WebBase):
         self.llm_client = get_llm_client()
         self.search_client = SearchClient()
 
-        # TODO: Tool for intentional recall
         tools: list[FunctionToolCallback] = [
-            ReadFileCallback(self.llm_client, self.search_client),
-            ScanDirectoryCallback(self.llm_client, self.search_client),
-            SearchEmailCallback(self.search_client),
+            ShellCommandCallback(self.search_client),
         ]
         self.tool_callbacks = {t.tool_param["name"]: t for t in tools}
         self.tool_params = [t.tool_param for t in tools]
@@ -89,10 +84,11 @@ class ProkaryoteV1(WebBase):
             message_parts.append("---")
             message_parts.append("## Recalled tool outputs")
             for tool_call_doc in recalled_tool_calls:
-                updated_at = tool_call_doc.updated_at.astimezone(prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
+                created_at = tool_call_doc.created_at.astimezone(prompt_context.time_zone).strftime('%Y-%m-%d %H:%M')
                 message_parts.append(
-                    f"\n### {', '.join(tool_call_doc.labels)}\n"
-                    f"Updated at: {updated_at}\n"
+                    f"\n### {tool_call_doc.tool_name}\n"
+                    f"Timestamp: {created_at}\n"
+                    f"Arguments: {tool_call_doc.tool_arguments}\n"
                     f"<pre><code>{tool_call_doc.output}</code></pre>"
                 )
 
@@ -113,6 +109,7 @@ class ProkaryoteV1(WebBase):
             recalled_facts: list[FactDoc],
             recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
+            summary_observer: MessageSummarizingObserver,
             topic_observer: TopicClassifyingObserver,
     ):
         await self.redis_client.set(
@@ -136,11 +133,16 @@ class ProkaryoteV1(WebBase):
         (
             generated_response_emb,
             (
+                summary,
+                summary_embs,
+            ),
+            (
                 topics,
                 topic_embs,
             ),
         ) = await asyncio.gather(
-            self.get_response_embs(generated_response),
+            self.get_response_emb(generated_response),
+            self.get_summary_emb(summary_observer),
             self.get_topic_embs(topic_observer),
         )
         prompt_doc, response_doc, _ = await asyncio.gather(
@@ -173,13 +175,20 @@ class ProkaryoteV1(WebBase):
                 func_call_outputs[obj["call_id"]] = obj["output"]
         for call_id, output in func_call_outputs.items():
             call_resp = func_call_resp[call_id]
-            if call_resp.name in self.tool_callbacks:  # In case of adhoc callbacks like the chat history callback
+            if call_resp.name in self.tool_callbacks:
                 tool_callback = self.tool_callbacks[call_resp.name]
                 if isinstance(tool_callback, FunctionCallOutputIndexer):
-                    tool_call = await tool_callback.index(prompt_messages.copy(), call_resp.arguments, output)
-                    tasks.append(asyncio.create_task(
-                        self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
-                    ))
+                    tool_call = await tool_callback.index(
+                        arguments=call_resp.arguments,
+                        labels=common_labels,
+                        output=output,
+                        prompt_summary=summary,
+                        prompt_summary_emb=summary_embs
+                    )
+                    if tool_call:
+                        tasks.append(asyncio.create_task(
+                            self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
+                        ))
 
         if prompt_doc and topics:
             tasks.append(asyncio.create_task(
@@ -223,9 +232,14 @@ class ProkaryoteV1(WebBase):
         return {"conversation_uuid": uuid.uuid4()}
 
     @classmethod
-    async def get_response_embs(cls, generated_response: str) -> list[float]:
+    async def get_response_emb(cls, generated_response: str) -> list[float]:
         generated_response_normalized = await run_in_threadpool(normalize_text_for_search, generated_response)
         return (await get_document_embs([generated_response_normalized]))[0]
+
+    @classmethod
+    async def get_summary_emb(cls, summary_observer: MessageSummarizingObserver,) -> tuple[str, list[float]]:
+        summary_text = await summary_observer.get_summary()
+        return summary_text, (await get_document_embs([summary_text]))[0]
 
     @classmethod
     async def get_topic_embs(cls, topic_observer: TopicClassifyingObserver) -> tuple[list[str], list[list[float]]]:
@@ -282,17 +296,18 @@ class ProkaryoteV1(WebBase):
             logger.info("Starting new context_window from request payload")
             context_window = payload.messages.copy()
 
+        # Pre-recall observers 
+
+        summary_observer = MessageSummarizingObserver(self.llm_client)
+        summary_observer.observe_in_background(payload.messages.copy())
+        topic_observer = TopicClassifyingObserver(self.llm_client)
+        topic_observer.observe_in_background(payload.messages.copy())
+
         # Recall
 
-        # Generating summaries for recall before streaming responses slows things down. Sometimes, the juice might not
-        # be worth the squeeze. This crude heuristic is used to guess if we should skip summarizing.
-        search_text = payload.messages[-1].content
+        search_text = await run_in_threadpool(normalize_text_for_search, payload.messages[-1].content)
+        # If search_text is long, use the generated summary
         if len(search_text.split()) > 10:
-
-            summary_observer = MessageSummarizingObserver(self.llm_client)
-            await summary_observer.observe(payload.messages.copy())
-
-            # TODO: Index search_text as a FactDoc if no fact tool calls?
             search_text = await summary_observer.get_summary()
 
         logger.info(f"Search text: {search_text}")
@@ -308,10 +323,10 @@ class ProkaryoteV1(WebBase):
                 min_score=0.75,
                 not_about=f"user:{session['user_id']}",
             ),
-            self.search_client.search_tool_call_by_anchor(
-                search_text, search_emb,
+            self.search_client.search_tool_call(
+                match=search_text,
+                match_emb=search_emb,
                 min_score=0.75,
-                top_k=3,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
@@ -321,7 +336,7 @@ class ProkaryoteV1(WebBase):
             ),
         )
 
-        # Observers 
+        # Post-recall observers 
 
         fact_observer = FactSavingObserver(
             self.llm_client,
@@ -331,8 +346,6 @@ class ProkaryoteV1(WebBase):
             recalled_user_context,
         )
         fact_observer.observe_in_background(payload.messages.copy())
-        topic_observer = TopicClassifyingObserver(self.llm_client)
-        topic_observer.observe_in_background(payload.messages.copy())
 
         # Tools 
 
@@ -376,6 +389,7 @@ class ProkaryoteV1(WebBase):
                     tool_callbacks=tool_callbacks,
                     tool_params=tool_params,
                 ),
+                summary_observer=summary_observer,
                 topic_observer=topic_observer,
             ),
             media_type="text/event-stream",
@@ -390,6 +404,7 @@ class ProkaryoteV1(WebBase):
             recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
             response_generator: AsyncGenerator[str, Any],
+            summary_observer: MessageSummarizingObserver,
             topic_observer: TopicClassifyingObserver,
     ) -> AsyncGenerator[str, Any]:
         prompt_uuid = str(uuid.uuid4())
@@ -409,6 +424,7 @@ class ProkaryoteV1(WebBase):
             recalled_facts=recalled_facts,
             recalled_tool_calls=recalled_tool_calls,
             recalled_user_context=recalled_user_context,
+            summary_observer=summary_observer,
             topic_observer=topic_observer,
         ))
 

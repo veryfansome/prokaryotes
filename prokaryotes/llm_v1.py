@@ -34,9 +34,11 @@ logger = logging.getLogger(__name__)
 class FunctionCallOutputIndexer(Protocol):
     async def index(
             self,
-            prompt_messages: list[ChatMessage],
             arguments: str,
+            labels: list[str],
             output: str,
+            prompt_summary: str,
+            prompt_summary_emb: list[float],
     ) -> ToolCallDoc | None:
         pass
 

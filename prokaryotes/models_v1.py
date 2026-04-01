@@ -115,17 +115,11 @@ class TextEmbeddingResponse(BaseModel):
     embs: list[list[float]]
 
 
-class ToolCallAnchor(BaseModel):
-    text: str
-
-
 class ToolCallDoc(BaseModel):
-    anchors: list[ToolCallAnchor]
+    created_at: datetime
     doc_id: str | None = Field(default=None, exclude=True)
-    label_cnt: int
     labels: list[str] = Field(default_factory=list)
     output: str
-    updated_at: datetime
-
-    def add_anchor(self, anchor_text: str):
-        self.anchors.append(ToolCallAnchor(text=anchor_text))
+    prompt_summary: str
+    tool_arguments: str
+    tool_name: str
