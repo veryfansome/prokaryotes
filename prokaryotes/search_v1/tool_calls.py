@@ -14,26 +14,22 @@ logger = logging.getLogger(__name__)
 tool_call_mappings = {
     "dynamic": "strict",
     "properties": {
-        "label_cnt": {"type": "integer"},
-        "labels":    {"type": "keyword"},
-        "output":    {"type": "object", "enabled": False},
-        "anchors": {
-            "type": "nested",
-            "properties": {
-                "text": {
-                    "type":            "text",
-                    "analyzer":        "standard",
-                    "search_analyzer": "custom_query_analyzer",
-                },
-                "text_emb": {
-                    "type":       "dense_vector",
-                    "dims":       256,
-                    "index":      True,
-                    "similarity": "cosine",
-                },
-            },
+        "created_at": {"type": "date"},
+        "labels":     {"type": "keyword"},
+        "output":     {"type": "text"},
+        "prompt_summary": {
+            "type":            "text",
+            "analyzer":        "standard",
+            "search_analyzer": "custom_query_analyzer",
         },
-        "updated_at": {"type": "date"},
+        "prompt_summary_emb": {
+            "type":       "dense_vector",
+            "dims":       256,
+            "index":      True,
+            "similarity": "cosine",
+        },
+        "tool_arguments": {"type": "text"},
+        "tool_name":      {"type": "keyword"},
     }
 }
 
@@ -48,130 +44,96 @@ class ToolCallSearcher(ABC):
             self,
             labels: list[str],
             output: str,
-            anchor_emb: list[float] = None,
-            anchor_text: str = None,
+            prompt_summary: str,
+            prompt_summary_emb: list[float],
+            tool_name: str,
+            tool_arguments: str,
     ):
         now = datetime.now(UTC)
         doc = ToolCallDoc(
-            anchors=[], label_cnt=len(labels), labels=labels, output=output, updated_at=now,
+            created_at=now,
+            labels=labels,
+            output=output,
+            prompt_summary=prompt_summary,
+            tool_arguments=tool_arguments,
+            tool_name=tool_name,
         )
-        anchor = {}
-        if anchor_text:
-            anchor["text"] = anchor_text
-            if anchor_emb:
-                anchor["text_emb"] = anchor_emb
         try:
             result = await self.es.index(
                 index="tool-calls",
-                document=(doc.model_dump() | {"anchors": [anchor]} if anchor_text else {})
+                document=(doc.model_dump() | {"prompt_summary_emb": prompt_summary_emb})
             )
             doc.doc_id = result["_id"]
             return doc
         except Exception:
             logger.exception(f"Failed to index {doc}")
 
-    async def search_tool_call_by_anchor(
+    async def search_tool_call(
             self,
-            match: str,
-            match_emb: list[float],
-            min_score: float = 0.5,
             knn_num_candidates: int = 100,
-            knn_top_k: int = 30,
-            top_k: int = 10,
+            knn_top_k: int = 50,
+            labels_and: list[str] | None = None,
+            labels_or: list[str] | None = None,
+            match: str = None,
+            match_emb: list[float] = None,
+            min_score: float = 0.5,
+            not_labels_and: list[str] | None = None,
+            not_labels_or: list[str] | None = None,
+            size: int = 3,
     ) -> list[ToolCallDoc]:
-        response = await self.es.search(
-            index="tool-calls",
-            knn={
-                "field": "anchors.text_emb",
+        shared_filters = []
+        if labels_and:
+            for labels in labels_and:
+                shared_filters.append({"term": {"labels": labels}})
+        if labels_or:
+            shared_filters.append({"terms": {"labels": labels_or}})
+
+        shared_must_not = [{"term": {"labels": "deactivated"}}]
+        if not_labels_and:
+            for labels in not_labels_and:
+                shared_must_not.append({"term": {"labels": labels}})
+        if not_labels_or:
+            shared_must_not.append({"terms": {"labels": not_labels_or}})
+
+        main_query = {
+            "filter": shared_filters,
+            "must_not": shared_must_not,
+        }
+        if match:
+            main_query["should"] = [
+                {"match": {"output": {"query": match, "boost": 1.0}}},
+                {"match": {"prompt_summary": {"query": match, "boost": 2.0}}},
+            ]
+        search_kwargs = {
+            "index": "tool-calls",
+            "query": {
+                "bool": main_query,
+            },
+            "size": size,
+        }
+        if match_emb:
+            search_kwargs["knn"] = {
+                "field": "prompt_summary_emb",
                 "query_vector": match_emb,
                 "boost": 1.0,
-                "k": knn_top_k,
                 "num_candidates": knn_num_candidates,
-            },
-            query={
-                "bool": {
-                    "should": [
-                        {
-                            "nested": {
-                                "path": "anchors",
-                                "query": {
-                                    "match": {
-                                        "anchors.text": {
-                                            "query": match,
-                                            "boost": 1.0
-                                        }
-                                    }
-                                },
-                            }
-                        }
-                    ]
+                "k": knn_top_k,
+                "filter": {
+                    "bool": {
+                        "filter": shared_filters,
+                        "must_not": shared_must_not,
+                    }
                 }
-            },
-            size=top_k,
-        )
+            }
+        response = await self.es.search( **search_kwargs)
         hits = response["hits"]["hits"]
         for h in hits:
-            labels = h['_source'].get('labels')
-            logger.debug(f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f} | Labels: {labels}")
+            tool_arguments = h['_source'].get('tool_arguments')
+            tool_name = h['_source'].get('tool_name')
+            logger.debug(
+                f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f}"
+                f" | Tool: {tool_name} | Args: {tool_arguments}"
+            )
         # TODO: Not efficient or scalable, pass min_score to es.search()
         return [ToolCallDoc(doc_id=h["_id"], **h["_source"])
                 for h in hits if not min_score or h["_score"] >= min_score]
-
-    async def search_tool_call_by_labels(self, filter_labels: list[str]) -> list[ToolCallDoc]:
-        response = await self.es.search(
-            index="tool-calls",
-            query={
-                "bool": {
-                    "filter": [
-                        *[{"term": {"labels": label}} for label in filter_labels],
-                        {"term": {"label_cnt": len(filter_labels)}}  # Exact match
-                    ]
-                }
-            }
-        )
-        hits = response["hits"]["hits"]
-        for h in hits:
-            labels = h['_source'].get('labels')
-            logger.debug(f"ToolCallDoc ID: {h['_id']} | Labels: {labels}")
-        return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
-
-    async def update_tool_call(
-            self,
-            tool_call: ToolCallDoc,
-            anchor_emb: list[float] = None,
-            anchor_text: str = None,
-            output: str = None,
-    ):
-        now = datetime.now(UTC)
-        script = [
-            "ctx._source.updated_at = params.updated_at;",
-        ]
-        tool_call.updated_at = now
-
-        anchor = {}
-        if anchor_text:
-            script.append("ctx._source.anchors.add(params.anchor);")
-            anchor["text"] = anchor_text
-            if anchor_emb:
-                anchor["text_emb"] = anchor_emb
-            tool_call.add_anchor(anchor_text)
-        if output:
-            script.append("ctx._source.output = params.output;")
-            tool_call.output = output
-        try:
-            await self.es.update(
-                index="tool-calls",
-                id=tool_call.doc_id,
-                body={
-                    "script": {
-                        "source": "\n".join(script),
-                        "params": (
-                            {"updated_at": now.isoformat()}
-                            | ({"anchor": anchor} if anchor_text else {})
-                            | ({"output": output} if output else {})
-                        )
-                    }
-                }
-            )
-        except Exception:
-            logger.exception(f"Failed to update tool-calls document: id={tool_call.doc_id}")
