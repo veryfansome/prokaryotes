@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 class FunctionCallOutputIndexer(Protocol):
     async def index(
             self,
+            call_id: str,
             arguments: str,
             labels: list[str],
             output: str,

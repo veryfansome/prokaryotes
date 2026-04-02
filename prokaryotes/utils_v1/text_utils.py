@@ -1,3 +1,4 @@
+import hashlib
 import os
 
 import mistune
@@ -45,3 +46,7 @@ def normalize_text_for_search(text: str) -> str:
     for code_tag in soup.select('pre code'):
         code_tag.decompose()
     return soup.get_text().strip()
+
+
+def text_to_md5(text: str) -> str:
+    return hashlib.md5(text.lower().strip().encode("utf-8")).hexdigest()

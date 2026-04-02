@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import ToolCallDoc
+from prokaryotes.utils_v1.text_utils import text_to_md5
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,9 @@ tool_call_mappings = {
             "index":      True,
             "similarity": "cosine",
         },
-        "tool_arguments": {"type": "text"},
-        "tool_name":      {"type": "keyword"},
+        "tool_arguments":      {"type": "text"},
+        "tool_arguments_hash": {"type": "keyword"},
+        "tool_name":           {"type": "keyword"},
     }
 }
 
@@ -42,6 +44,7 @@ class ToolCallSearcher(ABC):
 
     async def index_tool_call(
             self,
+            call_id: str,
             labels: list[str],
             output: str,
             prompt_summary: str,
@@ -51,6 +54,7 @@ class ToolCallSearcher(ABC):
     ):
         now = datetime.now(UTC)
         doc = ToolCallDoc(
+            doc_id=call_id,
             created_at=now,
             labels=labels,
             output=output,
@@ -59,17 +63,21 @@ class ToolCallSearcher(ABC):
             tool_name=tool_name,
         )
         try:
-            result = await self.es.index(
+            await self.es.index(
                 index="tool-calls",
-                document=(doc.model_dump() | {"prompt_summary_emb": prompt_summary_emb})
+                id=call_id,
+                document=(doc.model_dump() | {
+                    "prompt_summary_emb": prompt_summary_emb,
+                    "tool_arguments_hash": text_to_md5(tool_arguments)
+                }),
             )
-            doc.doc_id = result["_id"]
             return doc
         except Exception:
             logger.exception(f"Failed to index {doc}")
 
     async def search_tool_call(
             self,
+            excluded_ids: list[str] = None,
             knn_num_candidates: int = 100,
             knn_top_k: int = 50,
             labels_and: list[str] | None = None,
@@ -89,6 +97,8 @@ class ToolCallSearcher(ABC):
             shared_filters.append({"terms": {"labels": labels_or}})
 
         shared_must_not = [{"term": {"labels": "deactivated"}}]
+        if excluded_ids:
+            shared_must_not.append({"ids": {"values": excluded_ids}})
         if not_labels_and:
             for labels in not_labels_and:
                 shared_must_not.append({"term": {"labels": labels}})
@@ -111,6 +121,8 @@ class ToolCallSearcher(ABC):
             },
             "size": size,
         }
+        if min_score:
+            search_kwargs["min_score"] = min_score
         if match_emb:
             search_kwargs["knn"] = {
                 "field": "prompt_summary_emb",
@@ -127,6 +139,8 @@ class ToolCallSearcher(ABC):
             }
         response = await self.es.search( **search_kwargs)
         hits = response["hits"]["hits"]
+
+        deduped_hits = {}
         for h in hits:
             tool_arguments = h['_source'].get('tool_arguments')
             tool_name = h['_source'].get('tool_name')
@@ -134,6 +148,41 @@ class ToolCallSearcher(ABC):
                 f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f}"
                 f" | Tool: {tool_name} | Args: {tool_arguments}"
             )
-        # TODO: Not efficient or scalable, pass min_score to es.search()
-        return [ToolCallDoc(doc_id=h["_id"], **h["_source"])
-                for h in hits if not min_score or h["_score"] >= min_score]
+            tool_sig = (tool_name, tool_arguments)
+            if tool_sig in deduped_hits:
+                if deduped_hits[tool_sig]["created_at"] < h["_source"].get("created_at"):
+                    deduped_hits[tool_sig] = h["_source"]
+                continue
+            deduped_hits[tool_sig] = h["_source"]
+        results = []
+        for tool_name, tool_arguments in deduped_hits.keys():
+            results.extend(await self.search_tool_call_by_name_and_arguments(tool_name, tool_arguments, size=1))
+        logger.info(f"Search tool call results: {len(results)}")
+        return results
+
+    async def search_tool_call_by_name_and_arguments(
+        self,
+        tool_name: str,
+        tool_arguments: str,
+        size: int = None,
+    ) -> list[ToolCallDoc]:
+        search_kwargs = {
+            "index": "tool-calls",
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"tool_name": tool_name}},
+                        {"term": {"tool_arguments_hash": text_to_md5(tool_arguments)}},
+                    ],
+                    "must_not": [
+                        {"term": {"labels": "deactivated"}},
+                    ],
+                }
+            },
+            "sort": [{"created_at": {"order": "desc"}}],
+        }
+        if size:
+            search_kwargs["size"] = size
+        response = await self.es.search(**search_kwargs)
+        hits = response["hits"]["hits"]
+        return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
