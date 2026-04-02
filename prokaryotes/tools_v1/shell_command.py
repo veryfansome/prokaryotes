@@ -42,6 +42,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
 
     async def index(
             self,
+            call_id: str,
             arguments: str,
             labels: list[str],
             output: str,
@@ -49,6 +50,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             prompt_summary_emb: list[float],
     ) -> ToolCallDoc | None:
         return await self.search_client.index_tool_call(
+            call_id=call_id,
             labels=labels,
             output=output,
             prompt_summary=prompt_summary,

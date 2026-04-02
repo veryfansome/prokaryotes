@@ -179,6 +179,7 @@ class ProkaryoteV1(WebBase):
                 tool_callback = self.tool_callbacks[call_resp.name]
                 if isinstance(tool_callback, FunctionCallOutputIndexer):
                     tool_call = await tool_callback.index(
+                        call_id=call_id,
                         arguments=call_resp.arguments,
                         labels=common_labels,
                         output=output,
@@ -321,9 +322,12 @@ class ProkaryoteV1(WebBase):
                 match=search_text,
                 match_emb=search_emb,
                 min_score=0.75,
-                not_about=f"user:{session['user_id']}",
+                not_about=f"user:{session['user_id']}",  # TODO: Exclude other users as well
             ),
+            # TODO: It might be a good idea to have a LLM review and filter recalled results
             self.search_client.search_tool_call(
+                # Exclude if already in the context window
+                excluded_ids=[obj.call_id for obj in context_window if isinstance(obj, ResponseFunctionToolCall)],
                 match=search_text,
                 match_emb=search_emb,
                 min_score=0.75,

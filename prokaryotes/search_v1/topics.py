@@ -1,4 +1,3 @@
-import hashlib
 import logging
 from abc import (
     ABC,
@@ -6,6 +5,8 @@ from abc import (
 )
 
 from elasticsearch import AsyncElasticsearch, helpers
+
+from prokaryotes.utils_v1.text_utils import text_to_md5
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class TopicSearcher(ABC):
         actions = [
             {
                 "_index": "topics",
-                "_id": generate_topic_id(topic),
+                "_id": text_to_md5(topic),
                 "_op_type": "create",
                 "_source": {"emb": topic_embs[idx], "name": topic}
             }
@@ -93,8 +94,3 @@ class TopicSearcher(ABC):
             logger.debug(f"Score: {h['_score']:.4f} | Topic: {name}")
         # TODO: Not efficient or scalable, pass min_score to es.search()
         return [h["_source"]["name"] for h in hits if not min_score or (h["_score"] >= min_score)]
-
-
-def generate_topic_id(text: str) -> str:
-    """Generate a consistent, URL-safe ID"""
-    return hashlib.md5(text.lower().strip().encode("utf-8")).hexdigest()
