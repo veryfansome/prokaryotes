@@ -77,6 +77,7 @@ class FactSavingFunctionCallback(FunctionToolCallback):
                         else:
                             # TODO: Pass near-duplicates to an LLM judge
                             # TODO: Alternatively, consolidate near-duplicates into the same fact doc
+                            # TODO: Or create a "reinforcement" link in neo4j
                             logger.info(
                                 f"Filtering out fact candidate '{candidates_after_exact_dedupe[idx]}'"
                                 f" as a near-duplicate of {[f.text for f in results]}"

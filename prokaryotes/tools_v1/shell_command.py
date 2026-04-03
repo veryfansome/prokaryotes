@@ -51,6 +51,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
     ) -> ToolCallDoc | None:
         return await self.search_client.index_tool_call(
             call_id=call_id,
+            dedupe_strategy="similar",
             labels=labels,
             output=output,
             prompt_summary=prompt_summary,

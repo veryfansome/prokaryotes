@@ -117,14 +117,24 @@ class ProkaryoteV1(WebBase):
             ex=self.conversation_cache_ex,
         )
 
+        func_call_resp = {}
+        func_call_outputs = {}
         generated_response_idx = len(context_window) - 1
         generated_response = context_window[generated_response_idx].content
-        prompt_messages = [
+        last_user_message_idx = 0
+        prompt_messages = []
+        for idx, obj in enumerate(context_window):
             # Drop the developer message, any FunctionCallOutput or ResponseFunctionToolCall, and the generated
             # response, which will be index separately.
-            msg for idx, msg in enumerate(context_window)
-            if isinstance(msg, ChatMessage) and msg.role in {"assistant", "user"} and idx != generated_response_idx
-        ]
+            if isinstance(obj, ChatMessage) and obj.role in {"assistant", "user"} and idx != generated_response_idx:
+                if obj.role == "user" and idx > last_user_message_idx:
+                    last_user_message_idx = idx
+                prompt_messages.append(obj)
+            elif isinstance(obj, ResponseFunctionToolCall):
+                func_call_resp[obj.call_id] = (idx, obj)
+            elif isinstance(obj, dict) and "call_id" in obj and "output" in obj:
+                func_call_outputs[obj["call_id"]] = obj["output"]
+
         common_labels = [
             f"conversation:{conversation_uuid}",
             f"user:{recalled_user_context.user_id}",
@@ -166,15 +176,8 @@ class ProkaryoteV1(WebBase):
 
         tasks = []
 
-        func_call_resp = {}
-        func_call_outputs = {}
-        for obj in context_window:
-            if isinstance(obj, ResponseFunctionToolCall):
-                func_call_resp[obj.call_id] = obj
-            elif isinstance(obj, dict) and "call_id" in obj and "output" in obj:
-                func_call_outputs[obj["call_id"]] = obj["output"]
         for call_id, output in func_call_outputs.items():
-            call_resp = func_call_resp[call_id]
+            call_resp_idx, call_resp = func_call_resp[call_id]
             if call_resp.name in self.tool_callbacks:
                 tool_callback = self.tool_callbacks[call_resp.name]
                 if isinstance(tool_callback, FunctionCallOutputIndexer):
@@ -187,8 +190,12 @@ class ProkaryoteV1(WebBase):
                         prompt_summary_emb=summary_embs
                     )
                     if tool_call:
+                        if call_resp_idx > last_user_message_idx:
+                            tasks.append(asyncio.create_task(
+                                self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
+                            ))
                         tasks.append(asyncio.create_task(
-                            self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
+                            self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
                         ))
 
         if prompt_doc and topics:
@@ -330,7 +337,7 @@ class ProkaryoteV1(WebBase):
                 excluded_ids=[obj.call_id for obj in context_window if isinstance(obj, ResponseFunctionToolCall)],
                 match=search_text,
                 match_emb=search_emb,
-                min_score=0.75,
+                min_initial_score=0.75,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
