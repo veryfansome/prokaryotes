@@ -1,3 +1,4 @@
+import difflib
 import hashlib
 import os
 
@@ -48,5 +49,20 @@ def normalize_text_for_search(text: str) -> str:
     return soup.get_text().strip()
 
 
+def str_similarity(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(a=a, b=b).ratio()
+
+
+def str_similarity_batch(a: str, b_list: list[str]) -> list[float]:
+    results = []
+    for b in b_list:
+        results.append(str_similarity(a, b))
+    return results
+
+
 def text_to_md5(text: str) -> str:
     return hashlib.md5(text.lower().strip().encode("utf-8")).hexdigest()
+
+
+def text_to_md5_batch(texts: list[str]) -> list[str]:
+    return [text_to_md5(text) for text in texts]

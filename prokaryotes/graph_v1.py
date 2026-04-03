@@ -53,6 +53,8 @@ class GraphClient:
         WITH input_struct, p
         MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
         SET t.labels = input_struct.tool_call_labels
+        SET t.tool_arguments = input_struct.tool_arguments
+        SET t.tool_name = input_struct.tool_name
         WITH p, t
         MERGE (t)-[:CALLED_FOR]->(p)
         """
@@ -61,6 +63,34 @@ class GraphClient:
                 'prompt_id': prompt.doc_id,
                 'tool_call_id': tool_call.doc_id,
                 'tool_call_labels': sorted(tool_call.labels),
+                'tool_arguments': tool_call.tool_arguments,
+                'tool_name': tool_call.tool_name,
+            }])
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
+    async def create_tool_call_to_response_edge(self, response: ResponseDoc, tool_call: ToolCallDoc):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (r:Response {doc_id: input_struct.response_id})
+        WITH input_struct, r
+        MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
+        SET t.labels = input_struct.tool_call_labels
+        SET t.tool_arguments = input_struct.tool_arguments
+        SET t.tool_name = input_struct.tool_name
+        WITH r, t
+        MERGE (t)-[:CONTEXT_FOR]->(r)
+        """
+        async def _edge(tx):
+            await tx.run(cypher, input_structs=[{
+                'response_id': response.doc_id,
+                'tool_call_id': tool_call.doc_id,
+                'tool_call_labels': sorted(tool_call.labels),
+                'tool_arguments': tool_call.tool_arguments,
+                'tool_name': tool_call.tool_name,
             }])
         try:
             async with self.driver.session() as session:
