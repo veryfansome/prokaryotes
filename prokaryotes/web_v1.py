@@ -197,9 +197,10 @@ class ProkaryoteV1(WebBase):
                             ))
                     else:
                         tool_call = await self.search_client.get_tool_call(call_id)
-                    tasks.append(asyncio.create_task(
-                        self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
-                    ))
+                    if tool_call:
+                        tasks.append(asyncio.create_task(
+                            self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
+                        ))
 
         if prompt_doc and topics:
             tasks.append(asyncio.create_task(

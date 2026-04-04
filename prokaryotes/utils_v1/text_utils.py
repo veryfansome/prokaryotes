@@ -60,6 +60,10 @@ def str_similarity_batch(a: str, b_list: list[str]) -> list[float]:
     return results
 
 
+def strip_punctuation(token: str) -> str:
+    return token.strip(",.;:()[]{}'\"")
+
+
 def text_to_md5(text: str) -> str:
     return hashlib.md5(text.lower().strip().encode("utf-8")).hexdigest()
 

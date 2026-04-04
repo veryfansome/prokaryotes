@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
     def __init__(self, search_client: SearchClient):
+        self.max_output_lines = 200
         self.search_client = search_client
 
     @property
@@ -28,7 +29,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
         return FunctionToolParam(
             type="function",
             name="run_shell_command",
-            description="Run an arbitrary shell command.",
+            description=f"Run an arbitrary shell command. Truncates output after {self.max_output_lines} lines.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -45,7 +46,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
 
     @classmethod
     async def extract_keywords(cls, command: str) -> list[str]:
-        keywords = []
+        keywords = set()
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         for token in lexer:
@@ -60,8 +61,8 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                     and ("/" in candidate or "." in candidate)):
                 candidate_norm = os.path.expanduser(os.path.expandvars(candidate))
                 if await aiofiles.os.path.exists(candidate_norm):
-                    keywords.append(candidate)
-        return keywords
+                    keywords.add(candidate)
+        return list(keywords)
 
     async def index(
             self,
@@ -101,11 +102,19 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
+            stdout_lines = stdout.decode(errors="replace").split("\n")
+            stdout_lines_len = len(stdout_lines)
+            if stdout_lines_len > 200:
+                stdout_lines = (
+                    stdout_lines[:self.max_output_lines]
+                    + [f"--- Truncated after {self.max_output_lines} lines ---"]
+                )
             output = "\n".join([
+                f"Exit code: {process.returncode}",
                 "# STDOUT",
-                stdout.decode(),
+                *stdout_lines,
                 "# STDERR",
-                stderr.decode(),
+                stderr.decode(errors="replace"),
             ])
         except Exception:
             error = traceback.format_exc()
@@ -113,7 +122,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             if output:
                 output += "\n\n"
             output += f"An error occurred:\n{error}"
-        logger.info(f"\n{output}")
+        logger.info(f"{call_id}:\n{output}")
         return FunctionCallOutput(
             type="function_call_output",
             call_id=call_id,

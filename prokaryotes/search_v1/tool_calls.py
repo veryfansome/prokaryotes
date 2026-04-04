@@ -10,7 +10,7 @@ from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import ToolCallDoc
 from prokaryotes.search_v1.topics import TopicSearcher
-from prokaryotes.utils_v1.text_utils import text_to_md5
+from prokaryotes.utils_v1.text_utils import strip_punctuation, text_to_md5
 
 logger = logging.getLogger(__name__)
 
@@ -136,13 +136,13 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 min_score=0.75,
             )
         if match:
+            match_tokens = {strip_punctuation(tok) for tok in match.split()}
             main_query["should"] = [
                 {"match": {"output": {"query": match, "boost": 1.0}}},
                 {"match": {"prompt_summary": {"query": match, "boost": 1.0}}},
-                {"match": {"search_keywords": {"query": match, "boost": 4.0}}},
-                {"match": {"tool_arguments": {"query": match, "boost": 1.0}}},
-                {"match_phrase": {"search_keywords": {"query": match, "boost": 4.0}}},
-                {"match_phrase": {"tool_arguments": {"query": match, "boost": 1.0}}},
+                #{"match": {"tool_arguments": {"query": match, "boost": 1.0}}},
+                #{"match_phrase": {"tool_arguments": {"query": match, "boost": 1.0}}},
+                {"terms": {"search_keywords": list(match_tokens), "boost": 5.0}},
                 {"terms": {"topics": similar_topics, "boost": 1.0}},
             ]
         search_kwargs = {
