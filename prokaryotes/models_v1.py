@@ -120,6 +120,6 @@ class ToolCallDoc(BaseModel):
     doc_id: str | None = Field(default=None, exclude=True)
     labels: list[str] = Field(default_factory=list)
     output: str
-    prompt_summary: str
+    search_keywords: list[str]
     tool_arguments: str
     tool_name: str
