@@ -40,6 +40,7 @@ class FunctionCallOutputIndexer(Protocol):
             output: str,
             prompt_summary: str,
             prompt_summary_emb: list[float],
+            topics: list[str],
     ) -> ToolCallDoc | None:
         pass
 

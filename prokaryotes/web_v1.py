@@ -181,22 +181,25 @@ class ProkaryoteV1(WebBase):
             if call_resp.name in self.tool_callbacks:
                 tool_callback = self.tool_callbacks[call_resp.name]
                 if isinstance(tool_callback, FunctionCallOutputIndexer):
-                    tool_call = await tool_callback.index(
-                        call_id=call_id,
-                        arguments=call_resp.arguments,
-                        labels=common_labels,
-                        output=output,
-                        prompt_summary=summary,
-                        prompt_summary_emb=summary_embs
-                    )
-                    if tool_call:
-                        if call_resp_idx > last_user_message_idx:
+                    if call_resp_idx > last_user_message_idx:
+                        tool_call = await tool_callback.index(
+                            call_id=call_id,
+                            arguments=call_resp.arguments,
+                            labels=common_labels,
+                            output=output,
+                            prompt_summary=summary,
+                            prompt_summary_emb=summary_embs,
+                            topics=topics,
+                        )
+                        if tool_call:
                             tasks.append(asyncio.create_task(
                                 self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
                             ))
-                        tasks.append(asyncio.create_task(
-                            self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
-                        ))
+                    else:
+                        tool_call = await self.search_client.get_tool_call(call_id)
+                    tasks.append(asyncio.create_task(
+                        self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
+                    ))
 
         if prompt_doc and topics:
             tasks.append(asyncio.create_task(
@@ -313,37 +316,44 @@ class ProkaryoteV1(WebBase):
 
         # Recall
 
-        search_text = await run_in_threadpool(normalize_text_for_search, payload.messages[-1].content)
-        # If search_text is long, use the generated summary
-        if len(search_text.split()) > 10:
-            search_text = await summary_observer.get_summary()
-
-        logger.info(f"Search text: {search_text}")
-        search_emb = (await get_query_embs([search_text]))[0]
+        context_recall_text = await run_in_threadpool(normalize_text_for_search, payload.messages[-1].content)
+        tool_recall_text = context_recall_text
+        # If context_recall_text is long, use the generated summary
+        if len(context_recall_text.split()) > 10:
+            context_recall_text = await summary_observer.get_summary()
+        if context_recall_text == tool_recall_text:
+            context_recall_emb = tool_recall_emb = (await get_query_embs([context_recall_text]))[0]
+        else:
+            context_recall_emb, tool_recall_emb = await get_query_embs([context_recall_text, tool_recall_text])
+        logger.info(
+            f"Recall text:\n"
+            f"- Context: {context_recall_text}\n"
+            f"- Tool-call: {tool_recall_text}"
+        )
         (
             recalled_facts,
             recalled_tool_calls,
             recalled_user_context,
         ) = await asyncio.gather(
             self.search_client.search_facts(
-                match=search_text,
-                match_emb=search_emb,
-                min_score=0.75,
+                match=context_recall_text,
+                match_emb=context_recall_emb,
+                min_score=1.0,
                 not_about=f"user:{session['user_id']}",  # TODO: Exclude other users as well
             ),
             # TODO: It might be a good idea to have a LLM review and filter recalled results
             self.search_client.search_tool_call(
                 # Exclude if already in the context window
                 excluded_ids=[obj.call_id for obj in context_window if isinstance(obj, ResponseFunctionToolCall)],
-                match=search_text,
-                match_emb=search_emb,
-                min_initial_score=0.75,
+                match=tool_recall_text,
+                match_emb=tool_recall_emb,
+                min_initial_score=1.0,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
-                match=search_text,
-                match_emb=search_emb,
-                min_facts_score=0.75,
+                match=context_recall_text,
+                match_emb=context_recall_emb,
+                min_facts_score=1.0,
             ),
         )
 

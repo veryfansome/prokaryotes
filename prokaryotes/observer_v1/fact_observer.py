@@ -125,6 +125,9 @@ class FactSavingObserver(Observer):
             self.recalled_facts,
             self.recalled_user_context,
         )
+        # TODO: Facts should focus on generally true things that aren't specific to a task or single conversation.
+        #       e.g. "The user prefers shell tool search keywords focused on file-path-like patterns to track when
+        #       specific files are queried." is specific to a single conversation and not a general fact
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append(
