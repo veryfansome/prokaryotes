@@ -103,6 +103,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
             limit: int = 3,
             match: str = None,
             match_emb: list[float] = None,
+            min_final_score: float | None = None,
             min_initial_score: float = 0.5,
             min_output_similarity_score: float = 0.9,
             not_labels_and: list[str] | None = None,
@@ -119,6 +120,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
 
         shared_must_not = [{"term": {"labels": "deactivated"}}]
         if excluded_ids:
+            # TODO: Excluded docs should be deduped against
             shared_must_not.append({"ids": {"values": excluded_ids}})
         if not_labels_and:
             for labels in not_labels_and:
@@ -304,6 +306,11 @@ class ToolCallSearcher(TopicSearcher, ABC):
             ),
             reverse=True,
         )
+        if min_final_score is not None:
+            sorted_hits = [
+                hit for hit in sorted_hits
+                if hit.get("_rerank_score", 0.0) >= min_final_score
+            ]
         results = [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in sorted_hits[:limit]]
         logger.debug(f"Search tool call final hit count: {len(results)}")
         return results

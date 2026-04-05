@@ -349,6 +349,7 @@ class ProkaryoteV1(WebBase):
                 match=tool_recall_text,
                 match_emb=tool_recall_emb,
                 min_initial_score=1.0,
+                min_final_score=0.75,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],
