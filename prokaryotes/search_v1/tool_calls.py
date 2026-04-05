@@ -107,6 +107,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
             min_output_similarity_score: float = 0.9,
             not_labels_and: list[str] | None = None,
             not_labels_or: list[str] | None = None,
+            search_keywords_boost: float = 5.0
     ) -> list[ToolCallDoc]:
         del min_output_similarity_score  # Currently unused: result dedupe by output similarity is disabled.
         shared_filters = []
@@ -144,15 +145,32 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 if token
             ]
             should_clauses = [
-                {"match": {"output": {"query": match, "boost": 1.0}}},
-                {"match": {"prompt_summary": {"query": match, "boost": 1.0}}},
-                #{"match": {"tool_arguments": {"query": match, "boost": 1.0}}},
-                #{"match_phrase": {"tool_arguments": {"query": match, "boost": 1.0}}},
+                {
+                    "match": {
+                        "prompt_summary": {
+                            "query": match,
+                            "boost": 1.0,
+                            "_name": "prompt_summary_match",
+                        }
+                    }
+                },
             ]
             if match_tokens:
-                should_clauses.append({"terms": {"search_keywords": match_tokens, "boost": 5.0}})
+                should_clauses.append({
+                    "terms": {
+                        "search_keywords": match_tokens,
+                        "boost": search_keywords_boost,
+                        "_name": "search_keywords_terms",
+                    }
+                })
             if similar_topics:
-                should_clauses.append({"terms": {"topics": similar_topics, "boost": 1.0}})
+                should_clauses.append({
+                    "terms": {
+                        "topics": similar_topics,
+                        "boost": 1.0,
+                        "_name": "topics_terms",
+                    }
+                })
             main_query["should"] = should_clauses
 
         lexical_search_kwargs = {
@@ -209,15 +227,28 @@ class ToolCallSearcher(TopicSearcher, ABC):
         knn_scores = {h["_id"]: h.get("_score", 0.0) for h in knn_hits}
 
         lexical_max = max(lexical_scores.values(), default=0.0)
-        semantic_max = max(knn_scores.values(), default=0.0)
+        # So weak lexical matches without search_keyword hits don’t auto-normalize to 1.0
+        lexical_denominator = max(lexical_max, search_keywords_boost)
         lexical_scores_norm = {
-            doc_id: (score / lexical_max) if lexical_max else 0.0
+            doc_id: (score / lexical_denominator) if lexical_denominator else 0.0
             for doc_id, score in lexical_scores.items()
         }
-        semantic_scores_norm = {
-            doc_id: (score / semantic_max) if semantic_max else 0.0
+        semantic_scores_abs = {
+            doc_id: max(0.0, min(1.0, score))
             for doc_id, score in knn_scores.items()
         }
+        lexical_keyword_hit_ids = set()
+        for h in lexical_hits:
+            matched_queries = h.get("matched_queries", [])
+            if isinstance(matched_queries, dict):
+                query_names = set(matched_queries.keys())
+            elif isinstance(matched_queries, list):
+                query_names = set(matched_queries)
+            else:
+                query_names = set()
+            if "search_keywords_terms" in query_names:
+                lexical_keyword_hit_ids.add(h["_id"])
+        non_keyword_lexical_cap = min(0.9, (search_keywords_boost - 1e-3) / lexical_denominator)
 
         # Penalty-only use of semantics: dissimilar candidates are pushed down.
         dissimilarity_floor = 0.6
@@ -228,7 +259,10 @@ class ToolCallSearcher(TopicSearcher, ABC):
             tool_arguments = h["_source"].get("tool_arguments")
             tool_name = h["_source"].get("tool_name")
             lexical_norm = lexical_scores_norm.get(h["_id"], 0.0)
-            semantic_norm = semantic_scores_norm.get(h["_id"], 0.0)
+            keyword_hit = h["_id"] in lexical_keyword_hit_ids
+            if lexical_scores_norm and not keyword_hit:
+                lexical_norm = min(lexical_norm, non_keyword_lexical_cap)
+            semantic_norm = semantic_scores_abs.get(h["_id"], 0.0)
             if lexical_scores_norm:
                 dissimilarity_penalty = dissimilarity_penalty_weight * max(0.0, dissimilarity_floor - semantic_norm)
                 final_score = lexical_norm - dissimilarity_penalty
@@ -243,6 +277,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 f" | semantic: {semantic_norm:.4f}"
                 f" | penalty: {dissimilarity_penalty:.4f}"
                 f" | final: {final_score:.4f}"
+                f" | keyword_hit: {keyword_hit}"
                 f" | Tool: {tool_name} | Args: {tool_arguments}"
             )
             tool_sig = (tool_name, tool_arguments)
