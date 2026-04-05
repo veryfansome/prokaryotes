@@ -4,13 +4,16 @@ from abc import (
     abstractmethod,
 )
 from datetime import UTC, datetime
-from typing import Literal
 
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import ToolCallDoc
 from prokaryotes.search_v1.topics import TopicSearcher
-from prokaryotes.utils_v1.text_utils import strip_punctuation, text_to_md5
+from prokaryotes.utils_v1.text_utils import (
+    str_similarity_batch,
+    strip_punctuation,
+    text_to_md5,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +21,9 @@ tool_call_mappings = {
     "dynamic": "strict",
     "properties": {
         "created_at":      {"type": "date"},
-        "dedupe_strategy": {"type": "keyword"},
         "labels":          {"type": "keyword"},
         "output":          {"type": "text"},
+        "output_hash":     {"type": "keyword"},
         "prompt_summary": {
             "type":            "text",
             "analyzer":        "standard",
@@ -57,7 +60,6 @@ class ToolCallSearcher(TopicSearcher, ABC):
     async def index_tool_call(
             self,
             call_id: str,
-            dedupe_strategy: Literal["exact", "similar"],
             labels: list[str],
             output: str,
             prompt_summary: str,
@@ -82,7 +84,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 index="tool-calls",
                 id=call_id,
                 document=(doc.model_dump() | {
-                    "dedupe_strategy": dedupe_strategy,
+                    "output_hash": text_to_md5(output),
                     "prompt_summary": prompt_summary,
                     "prompt_summary_emb": prompt_summary_emb,
                     "tool_arguments_hash": text_to_md5(tool_arguments),
@@ -110,7 +112,6 @@ class ToolCallSearcher(TopicSearcher, ABC):
             not_labels_or: list[str] | None = None,
             search_keywords_boost: float = 5.0
     ) -> list[ToolCallDoc]:
-        del min_output_similarity_score  # Currently unused: result dedupe by output similarity is disabled.
         shared_filters = []
         if labels_and:
             for labels in labels_and:
@@ -141,11 +142,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
             )
         match_tokens = []
         if match:
-            match_tokens = [
-                token
-                for token in (strip_punctuation(tok) for tok in match.split())
-                if token
-            ]
+            match_tokens = [token for token in (strip_punctuation(tok) for tok in match.split()) if token]
             should_clauses = [
                 {
                     "match": {
@@ -306,12 +303,69 @@ class ToolCallSearcher(TopicSearcher, ABC):
             ),
             reverse=True,
         )
+
+        # Refresh the most recent output for each argument-signature within the same scope.
+        shortlist_size = max(limit * 4, 12)
+        shortlist_hits = sorted_hits[:shortlist_size]
+        refreshed_candidates: list[tuple[ToolCallDoc, float]] = []
+        seen_arg_hashes: set[tuple[str, str]] = set()
+        for h in shortlist_hits:
+            tool_name = h["_source"].get("tool_name")
+            tool_arguments_hash = h["_source"].get("tool_arguments_hash")
+            arg_key = (tool_name, tool_arguments_hash)
+            if arg_key in seen_arg_hashes:
+                continue
+            seen_arg_hashes.add(arg_key)
+
+            rerank_score = h.get("_rerank_score", 0.0)
+            latest_calls = await self.search_tool_call_by_arguments_hash(
+                tool_name=tool_name,
+                tool_arguments_hash=tool_arguments_hash,
+                excluded_ids=excluded_ids,
+                labels_and=labels_and,
+                labels_or=labels_or,
+                not_labels_and=not_labels_and,
+                not_labels_or=not_labels_or,
+                size=1,
+            )
+            if latest_calls:
+                refreshed_candidates.append((latest_calls[0], rerank_score))
+            else:
+                refreshed_candidates.append((ToolCallDoc(doc_id=h["_id"], **h["_source"]), rerank_score))
+        logger.debug(f"Search tool call refreshed candidate count: {len(refreshed_candidates)}")
+
+        # Output dedupe prefers recency: keep the newest representative among near-identical outputs.
+        refreshed_candidates.sort(key=lambda item: item[0].created_at, reverse=True)
+        output_deduped: list[tuple[ToolCallDoc, float]] = []
+        output_hashes: set[str] = set()
+        for doc, rerank_score in refreshed_candidates:
+            output_hash = doc.output_hash or text_to_md5(doc.output)
+            if output_hash in output_hashes:
+                continue
+            if output_deduped:
+                output_similarities = str_similarity_batch(
+                    doc.output,
+                    [existing_doc.output for existing_doc, _ in output_deduped],
+                )
+                if any(score >= min_output_similarity_score for score in output_similarities):
+                    continue
+            output_hashes.add(output_hash)
+            output_deduped.append((doc, rerank_score))
+        logger.debug(f"Search tool call post-output-dedupe count: {len(output_deduped)}")
+
+        output_deduped.sort(
+            key=lambda item: (
+                item[1],
+                item[0].created_at,
+            ),
+            reverse=True,
+        )
         if min_final_score is not None:
-            sorted_hits = [
-                hit for hit in sorted_hits
-                if hit.get("_rerank_score", 0.0) >= min_final_score
+            output_deduped = [
+                item for item in output_deduped
+                if item[1] >= min_final_score
             ]
-        results = [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in sorted_hits[:limit]]
+        results = [doc for doc, _ in output_deduped[:limit]]
         logger.debug(f"Search tool call final hit count: {len(results)}")
         return results
 
@@ -319,19 +373,40 @@ class ToolCallSearcher(TopicSearcher, ABC):
         self,
         tool_name: str,
         tool_arguments_hash: str,
+        excluded_ids: list[str] | None = None,
+        labels_and: list[str] | None = None,
+        labels_or: list[str] | None = None,
+        not_labels_and: list[str] | None = None,
+        not_labels_or: list[str] | None = None,
         size: int = None,
     ) -> list[ToolCallDoc]:
+        shared_filters = [
+            {"term": {"tool_name": tool_name}},
+            {"term": {"tool_arguments_hash": tool_arguments_hash}},
+        ]
+        if labels_and:
+            for label in labels_and:
+                shared_filters.append({"term": {"labels": label}})
+        if labels_or:
+            shared_filters.append({"terms": {"labels": labels_or}})
+
+        shared_must_not = [
+            {"term": {"labels": "deactivated"}},
+        ]
+        if excluded_ids:
+            shared_must_not.append({"ids": {"values": excluded_ids}})
+        if not_labels_and:
+            for label in not_labels_and:
+                shared_must_not.append({"term": {"labels": label}})
+        if not_labels_or:
+            shared_must_not.append({"terms": {"labels": not_labels_or}})
+
         search_kwargs = {
             "index": "tool-calls",
             "query": {
                 "bool": {
-                    "filter": [
-                        {"term": {"tool_name": tool_name}},
-                        {"term": {"tool_arguments_hash": tool_arguments_hash}},
-                    ],
-                    "must_not": [
-                        {"term": {"labels": "deactivated"}},
-                    ],
+                    "filter": shared_filters,
+                    "must_not": shared_must_not,
                 }
             },
             "sort": [{"created_at": {"order": "desc"}}],
@@ -339,40 +414,5 @@ class ToolCallSearcher(TopicSearcher, ABC):
         if size:
             search_kwargs["size"] = size
         response = await self.es.search(**search_kwargs)
-        hits = response["hits"]["hits"]
-        return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits]
-
-    async def search_tool_call_by_arguments_similarity(
-        self,
-        tool_name: str,
-        tool_arguments: str,
-        excluded_arguments_hashes: list[str],
-        min_score: float = 0.5,
-        size: int = 5,
-    ) -> list[ToolCallDoc]:
-        query = {
-            "bool": {
-                "filter": [
-                    {"term": {"tool_name": tool_name}},
-                ],
-                "must_not": [
-                    {"term": {"labels": "deactivated"}},
-                    *[
-                        {"term": {"tool_arguments_hash": arguments_hash}}
-                        for arguments_hash in excluded_arguments_hashes
-                    ],
-                ],
-                "must": [
-                    # Near-exact argument match
-                    {"match_phrase": {"tool_arguments": {"query": tool_arguments}}},
-                ],
-            }
-        }
-        response = await self.es.search(
-            index="tool-calls",
-            query=query,
-            min_score=min_score,
-            size=size,
-        )
         hits = response["hits"]["hits"]
         return [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in hits]

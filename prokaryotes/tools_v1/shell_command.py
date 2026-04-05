@@ -29,7 +29,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
         return FunctionToolParam(
             type="function",
             name="run_shell_command",
-            description=f"Run an arbitrary shell command. Truncates output after {self.max_output_lines} lines.",
+            description="Run an arbitrary shell command.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -79,7 +79,6 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             command = json.loads(arguments)["command"]
             return await self.search_client.index_tool_call(
                 call_id=call_id,
-                dedupe_strategy="similar",
                 labels=labels,
                 output=output,
                 prompt_summary=prompt_summary,
