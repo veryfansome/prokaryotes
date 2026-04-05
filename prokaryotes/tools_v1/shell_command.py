@@ -37,6 +37,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                         "type": "string",
                         "description": "A command string to pass to asyncio.create_subprocess_shell()",
                     },
+                    # TODO: reason / intent / why
                 },
                 "additionalProperties": False,
                 "required": ["command"],

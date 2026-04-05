@@ -108,6 +108,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
             not_labels_and: list[str] | None = None,
             not_labels_or: list[str] | None = None,
     ) -> list[ToolCallDoc]:
+        del min_output_similarity_score  # Currently unused: result dedupe by output similarity is disabled.
         shared_filters = []
         if labels_and:
             for labels in labels_and:
@@ -135,27 +136,51 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 match, match_emb,
                 min_score=0.75,
             )
+        match_tokens = []
         if match:
-            match_tokens = {strip_punctuation(tok) for tok in match.split()}
-            main_query["should"] = [
+            match_tokens = [
+                token
+                for token in (strip_punctuation(tok) for tok in match.split())
+                if token
+            ]
+            should_clauses = [
                 {"match": {"output": {"query": match, "boost": 1.0}}},
                 {"match": {"prompt_summary": {"query": match, "boost": 1.0}}},
                 #{"match": {"tool_arguments": {"query": match, "boost": 1.0}}},
                 #{"match_phrase": {"tool_arguments": {"query": match, "boost": 1.0}}},
-                {"terms": {"search_keywords": list(match_tokens), "boost": 5.0}},
-                {"terms": {"topics": similar_topics, "boost": 1.0}},
             ]
-        search_kwargs = {
+            if match_tokens:
+                should_clauses.append({"terms": {"search_keywords": match_tokens, "boost": 5.0}})
+            if similar_topics:
+                should_clauses.append({"terms": {"topics": similar_topics, "boost": 1.0}})
+            main_query["should"] = should_clauses
+
+        lexical_search_kwargs = {
             "index": "tool-calls",
             "query": {
                 "bool": main_query,
             },
             "size": candidates,
         }
-        if min_initial_score:
-            search_kwargs["min_score"] = min_initial_score
+        if min_initial_score is not None:
+            lexical_search_kwargs["min_score"] = min_initial_score
+
+        lexical_response = await self.es.search(**lexical_search_kwargs)
+        lexical_hits = lexical_response["hits"]["hits"]
+        logger.debug(f"Search tool call lexical hit count: {len(lexical_hits)}")
+
+        knn_hits = []
         if match_emb:
-            search_kwargs["knn"] = {
+            knn_search_kwargs = {
+                "index": "tool-calls",
+                "size": candidates,
+                "query": {
+                    "bool": {
+                        "filter": shared_filters,
+                        "must_not": shared_must_not,
+                    }
+                },
+                "knn": {
                 "field": "prompt_summary_emb",
                 "query_vector": match_emb,
                 "boost": 1.0,
@@ -168,66 +193,84 @@ class ToolCallSearcher(TopicSearcher, ABC):
                     }
                 }
             }
-        response = await self.es.search( **search_kwargs)
-        hits = response["hits"]["hits"]
-        logger.debug(f"Search tool call initial hit count: {len(hits)}")
+            }
+            knn_response = await self.es.search(**knn_search_kwargs)
+            knn_hits = knn_response["hits"]["hits"]
+            logger.debug(f"Search tool call knn hit count: {len(knn_hits)}")
+
+        hits_by_id = {h["_id"]: h for h in lexical_hits}
+        for h in knn_hits:
+            if h["_id"] not in hits_by_id:
+                hits_by_id[h["_id"]] = h
+        hits = list(hits_by_id.values())
+        logger.debug(f"Search tool call merged hit count: {len(hits)}")
+
+        lexical_scores = {h["_id"]: h.get("_score", 0.0) for h in lexical_hits}
+        knn_scores = {h["_id"]: h.get("_score", 0.0) for h in knn_hits}
+
+        lexical_max = max(lexical_scores.values(), default=0.0)
+        semantic_max = max(knn_scores.values(), default=0.0)
+        lexical_scores_norm = {
+            doc_id: (score / lexical_max) if lexical_max else 0.0
+            for doc_id, score in lexical_scores.items()
+        }
+        semantic_scores_norm = {
+            doc_id: (score / semantic_max) if semantic_max else 0.0
+            for doc_id, score in knn_scores.items()
+        }
+
+        # Penalty-only use of semantics: dissimilar candidates are pushed down.
+        dissimilarity_floor = 0.6
+        dissimilarity_penalty_weight = 0.5
 
         deduped_hits = {}
         for h in hits:
             tool_arguments = h["_source"].get("tool_arguments")
             tool_name = h["_source"].get("tool_name")
+            lexical_norm = lexical_scores_norm.get(h["_id"], 0.0)
+            semantic_norm = semantic_scores_norm.get(h["_id"], 0.0)
+            if lexical_scores_norm:
+                dissimilarity_penalty = dissimilarity_penalty_weight * max(0.0, dissimilarity_floor - semantic_norm)
+                final_score = lexical_norm - dissimilarity_penalty
+            else:
+                # Fallback: if lexical retrieval found nothing, preserve semantic ordering.
+                final_score = semantic_norm
+                dissimilarity_penalty = 0.0
+            h["_rerank_score"] = final_score
             logger.debug(
                 f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f}"
+                f" | lexical: {lexical_norm:.4f}"
+                f" | semantic: {semantic_norm:.4f}"
+                f" | penalty: {dissimilarity_penalty:.4f}"
+                f" | final: {final_score:.4f}"
                 f" | Tool: {tool_name} | Args: {tool_arguments}"
             )
             tool_sig = (tool_name, tool_arguments)
             if tool_sig in deduped_hits:
-                if deduped_hits[tool_sig]["_source"]["created_at"] < h["_source"].get("created_at"):
+                existing = deduped_hits[tool_sig]
+                existing_score = existing.get("_rerank_score", 0.0)
+                if (
+                        h["_rerank_score"] > existing_score
+                        or (
+                                h["_rerank_score"] == existing_score
+                                and existing["_source"]["created_at"] < h["_source"].get("created_at")
+                        )
+                ):
                     deduped_hits[tool_sig] = h
                 continue
             deduped_hits[tool_sig] = h
         logger.debug(f"Search tool call post-dedupe hit count: {len(deduped_hits)}")
 
-        # TODO: deduped_hits needs to be first deduped on similarity
-        # TODO: We should also do similarity dedupe against what's already in the context window
-
-        results = []
-        #arguments_hashes = await run_in_threadpool(
-        #    text_to_md5_batch,
-        #    [tool_arguments for (_, tool_arguments) in deduped_hits.keys()]
-        #)
-        #for idx, ((tool_name, tool_arguments), h) in enumerate(deduped_hits.items()):
-        #    if h["_source"]["dedupe_strategy"] == "exact":
-        #        results.extend(await self.search_tool_call_by_arguments_hash(
-        #            tool_name, arguments_hashes[idx], size=1
-        #        ))
-        #    else:
-        #        h_doc = ToolCallDoc(doc_id=h["_id"], **h["_source"])
-        #        similar_calls = await self.search_tool_call_by_arguments_similarity(
-        #            tool_name, tool_arguments, arguments_hashes
-        #        )
-        #        if similar_calls:
-        #            output_scores = await run_in_threadpool(
-        #                str_similarity_batch,
-        #                h_doc.output,
-        #                [call.output for call in similar_calls]
-        #            )
-        #            if all(score < min_output_similarity_score for score in output_scores):
-        #                results.append(h_doc)
-        #            else:
-        #                sorted_calls = sorted(
-        #                    [(h_doc.created_at, h_doc, 1.0)] + [
-        #                        (call.created_at, call, score)
-        #                        for call, score in zip(similar_calls, output_scores, strict=True)
-        #                        if score >= min_output_similarity_score
-        #                    ],
-        #                    key=(lambda x: x[0]),  # Sort by call.created_at
-        #                    reverse=True
-        #                )
-        #                results.append(sorted_calls[0][1])
-        #        else:
-        #            results.append(h_doc)
-        #logger.debug(f"Search tool call final hit count: {len(results)}")
+        sorted_hits = sorted(
+            deduped_hits.values(),
+            key=lambda hit: (
+                hit.get("_rerank_score", 0.0),
+                hit["_source"].get("created_at"),
+            ),
+            reverse=True,
+        )
+        results = [ToolCallDoc(doc_id=h["_id"], **h["_source"]) for h in sorted_hits[:limit]]
+        logger.debug(f"Search tool call final hit count: {len(results)}")
         return results
 
     async def search_tool_call_by_arguments_hash(
