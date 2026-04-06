@@ -124,4 +124,5 @@ class ToolCallDoc(BaseModel):
     reason: str
     search_keywords: list[str]
     tool_arguments: str
+    tool_arguments_hash: str
     tool_name: str

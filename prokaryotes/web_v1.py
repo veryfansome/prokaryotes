@@ -95,6 +95,13 @@ class ProkaryoteV1(WebBase):
         message_parts.append("---")
         message_parts.append("## Instructions")
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
+        message_parts.append(
+            "- When using the `run_shell_command` tool, avoid chaining multiple commands with '&&' or ';', instead"
+            "prefer a single, focused `command`, with a distinct `reason` per tool call."
+        )
+        message_parts.append(
+            "- When reading files, default to previewing the first 200 lines, e.g. `sed -n '1,200p' <path>`."
+        )
 
         message = "\n".join(message_parts)
         logger.info(f"Foreground developer message:\n{message}")
