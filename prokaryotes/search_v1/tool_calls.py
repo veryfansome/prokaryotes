@@ -129,7 +129,8 @@ class ToolCallSearcher(TopicSearcher, ABC):
             not_labels_or: list[str] | None = None,
             prompt_match_boost: float = 0.6,
             reason_match_boost: float = 0.8,
-            search_keywords_boost: float = 5.0
+            search_keywords_boost: float = 5.0,
+            similar_topics_boost: float = 0.4,
     ) -> list[ToolCallDoc]:
         shared_filters = []
         if labels_and:
@@ -194,7 +195,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 should_clauses.append({
                     "terms": {
                         "topics": similar_topics,
-                        "boost": 1.0,
+                        "boost": similar_topics_boost,
                         "_name": "topics_terms",
                     }
                 })
