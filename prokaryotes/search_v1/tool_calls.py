@@ -83,16 +83,16 @@ class ToolCallSearcher(TopicSearcher, ABC):
             topics: list[str],
     ):
         now = datetime.now(UTC)
-        output_hash = text_to_md5(output)
         doc = ToolCallDoc(
             doc_id=call_id,
             created_at=now,
             labels=labels,
             output=output,
-            output_hash=output_hash,
+            output_hash=text_to_md5(output),
             reason=reason,
             search_keywords=search_keywords,
             tool_arguments=tool_arguments,
+            tool_arguments_hash=text_to_md5(tool_arguments),
             tool_name=tool_name,
         )
         try:
@@ -100,11 +100,9 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 index="tool-calls",
                 id=call_id,
                 document=(doc.model_dump() | {
-                    "output_hash": output_hash,
                     "prompt_summary": prompt_summary,
                     "prompt_summary_emb": prompt_summary_emb,
                     "reason_emb": reason_emb,
-                    "tool_arguments_hash": text_to_md5(tool_arguments),
                     "topics": topics,
                 }),
             )
@@ -132,6 +130,32 @@ class ToolCallSearcher(TopicSearcher, ABC):
             search_keywords_boost: float = 5.0,
             similar_topics_boost: float = 0.4,
     ) -> list[ToolCallDoc]:
+        # Fetch excluded docs for dedupe
+        excluded_ids_set = set(excluded_ids or [])
+        excluded_arg_hashes: set[tuple[str, str]] = set()
+        excluded_output_hashes: set[str] = set()
+        excluded_outputs: list[str] = []
+        if excluded_ids_set:
+            try:
+                mget_response = await self.es.mget(
+                    index="tool-calls",
+                    ids=list(excluded_ids_set),
+                )
+                for doc in mget_response.get("docs", []):
+                    if not doc.get("found"):
+                        continue
+                    source = doc.get("_source", {})
+                    tool_name = source.get("tool_name")
+                    tool_arguments_hash = source["tool_arguments_hash"]
+                    if tool_name and tool_arguments_hash:
+                        excluded_arg_hashes.add((tool_name, tool_arguments_hash))
+                    output = source.get("output", "")
+                    excluded_output_hashes.add(source["output_hash"])
+                    if output:
+                        excluded_outputs.append(output)
+            except Exception:
+                logger.exception("Failed to hydrate excluded tool-call anchors")
+
         shared_filters = []
         if labels_and:
             for labels in labels_and:
@@ -141,7 +165,6 @@ class ToolCallSearcher(TopicSearcher, ABC):
 
         shared_must_not = [{"term": {"labels": "deactivated"}}]
         if excluded_ids:
-            # TODO: Excluded docs should be deduped against
             shared_must_not.append({"ids": {"values": excluded_ids}})
         if not_labels_and:
             for labels in not_labels_and:
@@ -386,7 +409,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
         seen_arg_hashes: set[tuple[str, str]] = set()
         for h in shortlist_hits:
             tool_name = h["_source"].get("tool_name")
-            tool_arguments_hash = h["_source"].get("tool_arguments_hash")
+            tool_arguments_hash = h["_source"]["tool_arguments_hash"]
             arg_key = (tool_name, tool_arguments_hash)
             if arg_key in seen_arg_hashes:
                 continue
@@ -396,7 +419,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
             latest_calls = await self.search_tool_call_by_arguments_hash(
                 tool_name=tool_name,
                 tool_arguments_hash=tool_arguments_hash,
-                excluded_ids=excluded_ids,
+                excluded_ids=None,
                 labels_and=labels_and,
                 labels_or=labels_or,
                 not_labels_and=not_labels_and,
@@ -404,17 +427,42 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 size=1,
             )
             if latest_calls:
-                refreshed_candidates.append((latest_calls[0], rerank_score))
+                latest_call = latest_calls[0]
+                if latest_call.doc_id in excluded_ids_set:
+                    logger.debug(
+                        f"Skipping signature ({tool_name}, {tool_arguments_hash}) because "
+                        f"latest call is already in context: {latest_call.doc_id}"
+                    )
+                    continue
+                refreshed_candidates.append((latest_call, rerank_score))
             else:
                 refreshed_candidates.append((ToolCallDoc(doc_id=h["_id"], **h["_source"]), rerank_score))
         logger.debug(f"Search tool call refreshed candidate count: {len(refreshed_candidates)}")
+
+        # Excluded in-context tool calls become dedupe anchors so we don't recall stale duplicates.
+        if excluded_arg_hashes or excluded_output_hashes or excluded_outputs:
+            filtered_candidates: list[tuple[ToolCallDoc, float]] = []
+            for doc, rerank_score in refreshed_candidates:
+                arg_key = (doc.tool_name, doc.tool_arguments_hash)
+                if arg_key in excluded_arg_hashes:
+                    continue
+                output_hash = doc.output_hash
+                if output_hash in excluded_output_hashes:
+                    continue
+                if excluded_outputs:
+                    output_similarities = str_similarity_batch(doc.output, excluded_outputs)
+                    if any(score >= min_output_similarity_score for score in output_similarities):
+                        continue
+                filtered_candidates.append((doc, rerank_score))
+            refreshed_candidates = filtered_candidates
+        logger.debug(f"Search tool call post-excluded-anchor-dedupe count: {len(refreshed_candidates)}")
 
         # Output dedupe prefers recency: keep the newest representative among near-identical outputs.
         refreshed_candidates.sort(key=lambda item: item[0].created_at, reverse=True)
         output_deduped: list[tuple[ToolCallDoc, float]] = []
         output_hashes: set[str] = set()
         for doc, rerank_score in refreshed_candidates:
-            output_hash = doc.output_hash or text_to_md5(doc.output)
+            output_hash = doc.output_hash
             if output_hash in output_hashes:
                 continue
             if output_deduped:
