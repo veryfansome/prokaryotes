@@ -197,9 +197,10 @@ class ProkaryoteV1(WebBase):
                             ))
                     else:
                         tool_call = await self.search_client.get_tool_call(call_id)
-                    tasks.append(asyncio.create_task(
-                        self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
-                    ))
+                    if tool_call:
+                        tasks.append(asyncio.create_task(
+                            self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
+                        ))
 
         if prompt_doc and topics:
             tasks.append(asyncio.create_task(
@@ -348,6 +349,7 @@ class ProkaryoteV1(WebBase):
                 match=tool_recall_text,
                 match_emb=tool_recall_emb,
                 min_initial_score=1.0,
+                min_final_score=0.75,
             ),
             self.search_client.get_user_context(
                 session["full_name"], session["user_id"],

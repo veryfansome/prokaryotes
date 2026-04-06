@@ -15,12 +15,14 @@ from prokaryotes.llm_v1 import (
 )
 from prokaryotes.models_v1 import ToolCallDoc
 from prokaryotes.search_v1 import SearchClient
+from prokaryotes.utils_v1.text_utils import get_document_embs
 
 logger = logging.getLogger(__name__)
 
 
 class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
     def __init__(self, search_client: SearchClient):
+        self.max_output_lines = 200
         self.search_client = search_client
 
     @property
@@ -34,18 +36,22 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "A command string to pass to asyncio.create_subprocess_shell()",
+                        "description": "A command string to pass to asyncio.create_subprocess_shell().",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "A concise description of what the command does.",
                     },
                 },
                 "additionalProperties": False,
-                "required": ["command"],
+                "required": ["command", "reason"],
             },
             strict=True,
         )
 
     @classmethod
     async def extract_keywords(cls, command: str) -> list[str]:
-        keywords = []
+        keywords = set()
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         for token in lexer:
@@ -60,8 +66,8 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                     and ("/" in candidate or "." in candidate)):
                 candidate_norm = os.path.expanduser(os.path.expandvars(candidate))
                 if await aiofiles.os.path.exists(candidate_norm):
-                    keywords.append(candidate)
-        return keywords
+                    keywords.add(candidate)
+        return list(keywords)
 
     async def index(
             self,
@@ -74,16 +80,20 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             topics: list[str],
     ) -> ToolCallDoc | None:
         try:
-            command = json.loads(arguments)["command"]
+            arguments_dict = json.loads(arguments)
+            command = arguments_dict["command"]
+            reason = arguments_dict["reason"]
+            reason_emb = (await get_document_embs([reason]))[0]
             return await self.search_client.index_tool_call(
                 call_id=call_id,
-                dedupe_strategy="similar",
                 labels=labels,
                 output=output,
                 prompt_summary=prompt_summary,
                 prompt_summary_emb=prompt_summary_emb,
+                reason=reason,
+                reason_emb=reason_emb,
                 search_keywords=(await self.extract_keywords(command)),
-                tool_arguments=arguments,
+                tool_arguments=command,
                 tool_name=self.tool_param["name"],
                 topics=topics,
             )
@@ -101,11 +111,19 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
+            stdout_lines = stdout.decode(errors="replace").split("\n")
+            stdout_lines_len = len(stdout_lines)
+            if stdout_lines_len > self.max_output_lines:
+                stdout_lines = (
+                    stdout_lines[:self.max_output_lines]
+                    + [f"--- Truncated after {self.max_output_lines} lines ---"]
+                )
             output = "\n".join([
+                f"Exit code: {process.returncode}",
                 "# STDOUT",
-                stdout.decode(),
+                *stdout_lines,
                 "# STDERR",
-                stderr.decode(),
+                stderr.decode(errors="replace"),
             ])
         except Exception:
             error = traceback.format_exc()
@@ -113,7 +131,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             if output:
                 output += "\n\n"
             output += f"An error occurred:\n{error}"
-        logger.info(f"\n{output}")
+        logger.info(f"{call_id}:\n{output}")
         return FunctionCallOutput(
             type="function_call_output",
             call_id=call_id,
