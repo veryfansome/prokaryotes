@@ -61,7 +61,7 @@ def str_similarity_batch(a: str, b_list: list[str]) -> list[float]:
 
 
 def strip_punctuation(token: str) -> str:
-    return token.strip(",.;:()[]{}'\"")
+    return token.strip(",.!?;:()[]{}'\"")
 
 
 def text_to_md5(text: str) -> str:

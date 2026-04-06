@@ -35,6 +35,17 @@ tool_call_mappings = {
             "index":      True,
             "similarity": "cosine",
         },
+        "reason": {
+            "type":            "text",
+            "analyzer":        "standard",
+            "search_analyzer": "custom_query_analyzer",
+        },
+        "reason_emb": {
+            "type":       "dense_vector",
+            "dims":       256,
+            "index":      True,
+            "similarity": "cosine",
+        },
         "search_keywords":     {"type": "keyword"},
         "tool_arguments":      {"type": "text"},
         "tool_arguments_hash": {"type": "keyword"},
@@ -64,17 +75,22 @@ class ToolCallSearcher(TopicSearcher, ABC):
             output: str,
             prompt_summary: str,
             prompt_summary_emb: list[float],
+            reason: str,
+            reason_emb: list[float],
             search_keywords: list[str],
             tool_arguments: str,
             tool_name: str,
             topics: list[str],
     ):
         now = datetime.now(UTC)
+        output_hash = text_to_md5(output)
         doc = ToolCallDoc(
             doc_id=call_id,
             created_at=now,
             labels=labels,
             output=output,
+            output_hash=output_hash,
+            reason=reason,
             search_keywords=search_keywords,
             tool_arguments=tool_arguments,
             tool_name=tool_name,
@@ -84,9 +100,10 @@ class ToolCallSearcher(TopicSearcher, ABC):
                 index="tool-calls",
                 id=call_id,
                 document=(doc.model_dump() | {
-                    "output_hash": text_to_md5(output),
+                    "output_hash": output_hash,
                     "prompt_summary": prompt_summary,
                     "prompt_summary_emb": prompt_summary_emb,
+                    "reason_emb": reason_emb,
                     "tool_arguments_hash": text_to_md5(tool_arguments),
                     "topics": topics,
                 }),
@@ -110,6 +127,8 @@ class ToolCallSearcher(TopicSearcher, ABC):
             min_output_similarity_score: float = 0.9,
             not_labels_and: list[str] | None = None,
             not_labels_or: list[str] | None = None,
+            prompt_match_boost: float = 0.6,
+            reason_match_boost: float = 0.8,
             search_keywords_boost: float = 5.0
     ) -> list[ToolCallDoc]:
         shared_filters = []
@@ -148,8 +167,17 @@ class ToolCallSearcher(TopicSearcher, ABC):
                     "match": {
                         "prompt_summary": {
                             "query": match,
-                            "boost": 1.0,
+                            "boost": prompt_match_boost,
                             "_name": "prompt_summary_match",
+                        }
+                    }
+                },
+                {
+                    "match": {
+                        "reason": {
+                            "query": match,
+                            "boost": reason_match_boost,
+                            "_name": "reason_match",
                         }
                     }
                 },
@@ -186,9 +214,10 @@ class ToolCallSearcher(TopicSearcher, ABC):
         lexical_hits = lexical_response["hits"]["hits"]
         logger.debug(f"Search tool call lexical hit count: {len(lexical_hits)}")
 
-        knn_hits = []
+        prompt_knn_hits = []
+        reason_knn_hits = []
         if match_emb:
-            knn_search_kwargs = {
+            prompt_knn_search_kwargs = {
                 "index": "tool-calls",
                 "size": candidates,
                 "query": {
@@ -198,32 +227,63 @@ class ToolCallSearcher(TopicSearcher, ABC):
                     }
                 },
                 "knn": {
-                "field": "prompt_summary_emb",
-                "query_vector": match_emb,
-                "boost": 1.0,
-                "num_candidates": knn_num_candidates,
-                "k": candidates,
-                "filter": {
+                    "field": "prompt_summary_emb",
+                    "query_vector": match_emb,
+                    "boost": 1.0,
+                    "num_candidates": knn_num_candidates,
+                    "k": candidates,
+                    "filter": {
+                        "bool": {
+                            "filter": shared_filters,
+                            "must_not": shared_must_not,
+                        }
+                    }
+                }
+            }
+            prompt_knn_response = await self.es.search(**prompt_knn_search_kwargs)
+            prompt_knn_hits = prompt_knn_response["hits"]["hits"]
+            logger.debug(f"Search tool call prompt_summary knn hit count: {len(prompt_knn_hits)}")
+
+            reason_knn_search_kwargs = {
+                "index": "tool-calls",
+                "size": candidates,
+                "query": {
                     "bool": {
                         "filter": shared_filters,
                         "must_not": shared_must_not,
                     }
+                },
+                "knn": {
+                    "field": "reason_emb",
+                    "query_vector": match_emb,
+                    "boost": 1.0,
+                    "num_candidates": knn_num_candidates,
+                    "k": candidates,
+                    "filter": {
+                        "bool": {
+                            "filter": shared_filters,
+                            "must_not": shared_must_not,
+                        }
+                    }
                 }
             }
-            }
-            knn_response = await self.es.search(**knn_search_kwargs)
-            knn_hits = knn_response["hits"]["hits"]
-            logger.debug(f"Search tool call knn hit count: {len(knn_hits)}")
+            reason_knn_response = await self.es.search(**reason_knn_search_kwargs)
+            reason_knn_hits = reason_knn_response["hits"]["hits"]
+            logger.debug(f"Search tool call reason knn hit count: {len(reason_knn_hits)}")
 
         hits_by_id = {h["_id"]: h for h in lexical_hits}
-        for h in knn_hits:
+        for h in prompt_knn_hits:
+            if h["_id"] not in hits_by_id:
+                hits_by_id[h["_id"]] = h
+        for h in reason_knn_hits:
             if h["_id"] not in hits_by_id:
                 hits_by_id[h["_id"]] = h
         hits = list(hits_by_id.values())
         logger.debug(f"Search tool call merged hit count: {len(hits)}")
 
         lexical_scores = {h["_id"]: h.get("_score", 0.0) for h in lexical_hits}
-        knn_scores = {h["_id"]: h.get("_score", 0.0) for h in knn_hits}
+        prompt_knn_scores = {h["_id"]: h.get("_score", 0.0) for h in prompt_knn_hits}
+        reason_knn_scores = {h["_id"]: h.get("_score", 0.0) for h in reason_knn_hits}
 
         lexical_max = max(lexical_scores.values(), default=0.0)
         # So weak lexical matches without search_keyword hits don’t auto-normalize to 1.0
@@ -232,9 +292,20 @@ class ToolCallSearcher(TopicSearcher, ABC):
             doc_id: (score / lexical_denominator) if lexical_denominator else 0.0
             for doc_id, score in lexical_scores.items()
         }
-        semantic_scores_abs = {
+        prompt_semantic_scores_abs = {
             doc_id: max(0.0, min(1.0, score))
-            for doc_id, score in knn_scores.items()
+            for doc_id, score in prompt_knn_scores.items()
+        }
+        reason_semantic_scores_abs = {
+            doc_id: max(0.0, min(1.0, score))
+            for doc_id, score in reason_knn_scores.items()
+        }
+        semantic_scores_abs = {
+            doc_id: max(
+                prompt_semantic_scores_abs.get(doc_id, 0.0),
+                reason_semantic_scores_abs.get(doc_id, 0.0),
+            )
+            for doc_id in (set(prompt_semantic_scores_abs) | set(reason_semantic_scores_abs))
         }
         lexical_keyword_hit_ids = set()
         for h in lexical_hits:
@@ -261,6 +332,8 @@ class ToolCallSearcher(TopicSearcher, ABC):
             keyword_hit = h["_id"] in lexical_keyword_hit_ids
             if lexical_scores_norm and not keyword_hit:
                 lexical_norm = min(lexical_norm, non_keyword_lexical_cap)
+            prompt_semantic_norm = prompt_semantic_scores_abs.get(h["_id"], 0.0)
+            reason_semantic_norm = reason_semantic_scores_abs.get(h["_id"], 0.0)
             semantic_norm = semantic_scores_abs.get(h["_id"], 0.0)
             if lexical_scores_norm:
                 dissimilarity_penalty = dissimilarity_penalty_weight * max(0.0, dissimilarity_floor - semantic_norm)
@@ -272,12 +345,13 @@ class ToolCallSearcher(TopicSearcher, ABC):
             h["_rerank_score"] = final_score
             logger.debug(
                 f"ToolCallDoc ID: {h['_id']} | Score: {h['_score']:.4f}"
-                f" | lexical: {lexical_norm:.4f}"
-                f" | semantic: {semantic_norm:.4f}"
+                f" | lex: {lexical_norm:.4f}"
+                f" | sem_prompt: {prompt_semantic_norm:.4f}"
+                f" | sem_reason: {reason_semantic_norm:.4f}"
                 f" | penalty: {dissimilarity_penalty:.4f}"
                 f" | final: {final_score:.4f}"
-                f" | keyword_hit: {keyword_hit}"
-                f" | Tool: {tool_name} | Args: {tool_arguments}"
+                f" | keyword: {keyword_hit}"
+                f" | tool: {tool_name} | args: {tool_arguments}"
             )
             tool_sig = (tool_name, tool_arguments)
             if tool_sig in deduped_hits:

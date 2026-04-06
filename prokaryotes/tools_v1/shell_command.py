@@ -15,6 +15,7 @@ from prokaryotes.llm_v1 import (
 )
 from prokaryotes.models_v1 import ToolCallDoc
 from prokaryotes.search_v1 import SearchClient
+from prokaryotes.utils_v1.text_utils import get_document_embs
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,15 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "A command string to pass to asyncio.create_subprocess_shell()",
+                        "description": "A command string to pass to asyncio.create_subprocess_shell().",
                     },
-                    # TODO: reason / intent / why
+                    "reason": {
+                        "type": "string",
+                        "description": "A concise description of what the command does.",
+                    },
                 },
                 "additionalProperties": False,
-                "required": ["command"],
+                "required": ["command", "reason"],
             },
             strict=True,
         )
@@ -76,15 +80,20 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             topics: list[str],
     ) -> ToolCallDoc | None:
         try:
-            command = json.loads(arguments)["command"]
+            arguments_dict = json.loads(arguments)
+            command = arguments_dict["command"]
+            reason = arguments_dict["reason"]
+            reason_emb = (await get_document_embs([reason]))[0]
             return await self.search_client.index_tool_call(
                 call_id=call_id,
                 labels=labels,
                 output=output,
                 prompt_summary=prompt_summary,
                 prompt_summary_emb=prompt_summary_emb,
+                reason=reason,
+                reason_emb=reason_emb,
                 search_keywords=(await self.extract_keywords(command)),
-                tool_arguments=arguments,
+                tool_arguments=command,
                 tool_name=self.tool_param["name"],
                 topics=topics,
             )
