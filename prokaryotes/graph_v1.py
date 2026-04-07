@@ -12,6 +12,7 @@ from prokaryotes.models_v1 import (
     ResponseDoc,
     ToolCallDoc,
 )
+from prokaryotes.utils_v1.text_utils import normalize_text_for_identity
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +105,13 @@ class GraphClient:
         MERGE (t)-[:TOPIC_OF]->(p)
         """
         async def _edge(tx):
+            deduped_topics = self._dedupe_topics(topics)
+            if not deduped_topics:
+                return
             input_structs = [{
                 'prompt_id': prompt.doc_id,
                 'topic': topic,
-            } for topic in topics]
+            } for topic in deduped_topics]
             await tx.run(cypher, input_structs=input_structs)
         try:
             async with self.driver.session() as session:
@@ -125,10 +129,13 @@ class GraphClient:
         MERGE (t)-[:TOPIC_OF]->(r)
         """
         async def _edge(tx):
+            deduped_topics = self._dedupe_topics(topics)
+            if not deduped_topics:
+                return
             input_structs = [{
                 'response_id': response.doc_id,
                 'topic': topic,
-            } for topic in topics]
+            } for topic in deduped_topics]
             await tx.run(cypher, input_structs=input_structs)
         try:
             async with self.driver.session() as session:
@@ -138,6 +145,18 @@ class GraphClient:
 
     def init_client(self):
         self.driver = get_neo4j_driver()
+
+    @staticmethod
+    def _dedupe_topics(topics: list[str]) -> list[str]:
+        normalized_topics = []
+        seen_topics = set()
+        for topic in topics:
+            topic = normalize_text_for_identity(topic)
+            if not topic or topic in seen_topics:
+                continue
+            seen_topics.add(topic)
+            normalized_topics.append(topic)
+        return normalized_topics
 
 
 def get_neo4j_driver() -> AsyncDriver:

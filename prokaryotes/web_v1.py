@@ -44,6 +44,7 @@ from prokaryotes.utils_v1.context_utils import developer_message_parts
 from prokaryotes.utils_v1.text_utils import (
     get_document_embs,
     get_query_embs,
+    normalize_text_for_identity,
     normalize_text_for_search,
 )
 from prokaryotes.web_base_v1 import WebBase
@@ -265,7 +266,17 @@ class ProkaryoteV1(WebBase):
 
     @classmethod
     async def get_topic_embs(cls, topic_observer: TopicClassifyingObserver) -> tuple[list[str], list[list[float]]]:
-        topics = await topic_observer.get_topics()
+        raw_topics = await topic_observer.get_topics()
+        topics = []
+        seen_topics = set()
+        for topic in raw_topics:
+            topic = normalize_text_for_identity(topic)
+            if not topic or topic in seen_topics:
+                continue
+            seen_topics.add(topic)
+            topics.append(topic)
+        if not topics:
+            return [], []
         return topics, await get_document_embs(topics)
 
     def init(self):

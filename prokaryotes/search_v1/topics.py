@@ -6,7 +6,10 @@ from abc import (
 
 from elasticsearch import AsyncElasticsearch, helpers
 
-from prokaryotes.utils_v1.text_utils import text_to_md5
+from prokaryotes.utils_v1.text_utils import (
+    normalize_text_for_identity,
+    text_to_md5,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +42,24 @@ class TopicSearcher(ABC):
         pass
 
     async def index_topics(self, topics: list[str], topic_embs: list[list[float]]):
-        actions = [
-            {
+        seen_topic_ids = set()
+        actions = []
+        for idx, topic in enumerate(topics):
+            topic = normalize_text_for_identity(topic)
+            if not topic:
+                continue
+            topic_id = text_to_md5(topic)
+            if topic_id in seen_topic_ids:
+                continue
+            seen_topic_ids.add(topic_id)
+            actions.append({
                 "_index": "topics",
-                "_id": text_to_md5(topic),
+                "_id": topic_id,
                 "_op_type": "create",
                 "_source": {"emb": topic_embs[idx], "name": topic}
-            }
-            for idx, topic in enumerate(topics)
-        ]
+            })
+        if not actions:
+            return
         success_cnt, errors = await helpers.async_bulk(self.es, actions, raise_on_error=False)
         if success_cnt:
             logger.info(f"Indexed {success_cnt} topic(s)")
@@ -67,6 +79,9 @@ class TopicSearcher(ABC):
             knn_top_k: int = 10,
             min_score: float = 0.5,
     ) -> list[str]:
+        match = normalize_text_for_identity(match)
+        if not match:
+            return []
         query = {
             "should": [
                 {"match": {"name": {"query": match, "boost": 1.0}}},
@@ -79,6 +94,8 @@ class TopicSearcher(ABC):
                 "bool": query,
             },
         }
+        if min_score is not None:
+            search_kwargs["min_score"] = min_score
         if match_emb:
             search_kwargs["knn"] = {
                 "field": "emb",
@@ -92,5 +109,12 @@ class TopicSearcher(ABC):
         for h in hits:
             name = h['_source']['name']
             logger.debug(f"Score: {h['_score']:.4f} | Topic: {name}")
-        # TODO: Not efficient or scalable, pass min_score to es.search()
-        return [h["_source"]["name"] for h in hits if not min_score or (h["_score"] >= min_score)]
+        seen_topics = set()
+        topics = []
+        for h in hits:
+            topic = normalize_text_for_identity(h["_source"]["name"])
+            if not topic or topic in seen_topics:
+                continue
+            seen_topics.add(topic)
+            topics.append(topic)
+        return topics

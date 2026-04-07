@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException
 from openai.types.responses.response_input_param import FunctionCallOutput
@@ -212,3 +214,24 @@ def test_sync_context_window(cached_context_window, payload_messages, context_wi
 def test_sync_context_window_exception(cached_context_window, payload_messages):
     with pytest.raises(HTTPException, match="Payload does not alter conversation state"):
         ProkaryoteV1.sync_context_window(cached_context_window, payload_messages)
+
+
+@pytest.mark.asyncio
+async def test_get_topic_embs_normalizes_and_dedupes(monkeypatch: pytest.MonkeyPatch):
+    class DummyTopicObserver:
+        async def get_topics(self) -> list[str]:
+            return [
+                "Nathan Hale’s Hazardous Tales",
+                "Nathan Hale's Hazardous Tales",
+                "  STEM   comics  ",
+                " ",
+            ]
+
+    emb_mock = AsyncMock(return_value=[[0.1, 0.2], [0.3, 0.4]])
+    monkeypatch.setattr("prokaryotes.web_v1.get_document_embs", emb_mock)
+
+    topics, topic_embs = await ProkaryoteV1.get_topic_embs(DummyTopicObserver())
+
+    assert topics == ["Nathan Hale's Hazardous Tales", "STEM comics"]
+    assert topic_embs == [[0.1, 0.2], [0.3, 0.4]]
+    emb_mock.assert_awaited_once_with(["Nathan Hale's Hazardous Tales", "STEM comics"])
