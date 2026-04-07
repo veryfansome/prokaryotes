@@ -14,15 +14,29 @@ from prokaryotes.models_v1 import (
 from prokaryotes.utils_v1 import http_utils
 
 _IDENTITY_PUNCT_TRANSLATION = str.maketrans({
-    "’": "'",
-    "‘": "'",
-    "‛": "'",
     "ʼ": "'",
-    "′": "'",
-    "-": "-",
-    "–": "-",
+    "‘": "'",
+    "’": "'",
+    "‛": "'",
     "“": '"',
     "”": '"',
+    "′": "'",
+    "-": "-",
+    "‐": "-",
+    "‑": "-",
+    "‒": "-",
+    "–": "-",
+    "—": "-",
+    "−": "-",
+    "\u00A0": " ",  # NO-BREAK SPACE
+    "\u00AD": None,  # SOFT HYPHEN
+    "\u2007": " ",  # FIGURE SPACE
+    "\u200B": None,  # ZERO WIDTH SPACE
+    "\u200C": None,  # ZERO WIDTH NON-JOINER
+    "\u200D": None,  # ZERO WIDTH JOINER
+    "\u202F": " ",  # NARROW NO-BREAK SPACE
+    "\u2060": None,  # WORD JOINER
+    "\uFEFF": None,  # ZERO WIDTH NO-BREAK SPACE (BOM)
 })
 
 
