@@ -232,6 +232,11 @@ class ProkaryoteV1(WebBase):
             tasks.append(asyncio.create_task(
                 self.graph_client.create_fact_to_prompt_edge(prompt_doc, saved_facts)
             ))
+        fact_entity_matches = self.find_named_entities_in_facts(saved_facts, named_entities)
+        for fact, fact_named_entities in fact_entity_matches:
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_named_entity_to_fact_edge([fact], fact_named_entities)
+            ))
 
         await asyncio.gather(*tasks)
 
@@ -250,6 +255,36 @@ class ProkaryoteV1(WebBase):
             return None, False, False
         else:
             return min(list1_len, list2_len), False, list1_len > list2_len
+
+    @classmethod
+    def find_named_entities_in_facts(
+            cls,
+            facts: list[FactDoc],
+            named_entities: list[str],
+    ) -> list[tuple[FactDoc, list[str]]]:
+        if not facts or not named_entities:
+            return []
+
+        normalized_entities = []
+        seen_entities = set()
+        for named_entity in named_entities:
+            normalized_entity = normalize_text_for_identity(named_entity).lower()
+            if not normalized_entity or normalized_entity in seen_entities:
+                continue
+            seen_entities.add(normalized_entity)
+            normalized_entities.append((named_entity, normalized_entity))
+
+        matched_pairs = []
+        for fact in facts:
+            fact_text = normalize_text_for_identity(fact.text).lower()
+            matched_entities = [
+                named_entity
+                for named_entity, normalized_entity in normalized_entities
+                if normalized_entity in fact_text
+            ]
+            if matched_entities:
+                matched_pairs.append((fact, matched_entities))
+        return matched_pairs
 
     @classmethod
     async def get_conversation(cls, request: Request):

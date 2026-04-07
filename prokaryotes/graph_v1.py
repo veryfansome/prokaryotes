@@ -47,6 +47,32 @@ class GraphClient:
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
 
+    async def create_named_entity_to_fact_edge(self, facts: list[FactDoc], named_entities: list[str]):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (f:Fact {doc_id: input_struct.fact_id})
+        SET f.text = input_struct.fact_text
+        WITH input_struct, f
+        MERGE (e:NamedEntity {text: input_struct.named_entity})
+        WITH e, f
+        MERGE (e)-[:ENTITY_OF]->(f)
+        """
+        async def _edge(tx):
+            deduped_named_entities = self.dedupe_identity_texts(named_entities)
+            if not facts or not deduped_named_entities:
+                return
+            input_structs = [{
+                'fact_id': fact.doc_id,
+                'fact_text': fact.text,
+                'named_entity': named_entity,
+            } for fact in facts for named_entity in deduped_named_entities]
+            await tx.run(cypher, input_structs=input_structs)
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
     async def create_named_entity_to_prompt_edge(self, prompt: PromptDoc, named_entities: list[str]):
         cypher = """
         UNWIND $input_structs AS input_struct
@@ -99,25 +125,25 @@ class GraphClient:
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
 
-    #async def create_tool_call_to_response_edge(self, response: ResponseDoc, tool_call: ToolCallDoc):
-    #    cypher = """
-    #    UNWIND $input_structs AS input_struct
-    #    MERGE (r:Response {doc_id: input_struct.response_id})
-    #    WITH input_struct, r
-    #    MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
-    #    WITH r, t
-    #    MERGE (t)-[:CONTEXT_FOR]->(r)
-    #    """
-    #    async def _edge(tx):
-    #        await tx.run(cypher, input_structs=[{
-    #            'response_id': response.doc_id,
-    #            'tool_call_id': tool_call.doc_id,
-    #        }])
-    #    try:
-    #        async with self.driver.session() as session:
-    #            return await session.execute_write(_edge)
-    #    except Exception:
-    #        logger.exception(f"Failed to execute: {cypher}")
+    async def create_tool_call_to_response_edge(self, response: ResponseDoc, tool_call: ToolCallDoc):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (r:Response {doc_id: input_struct.response_id})
+        WITH input_struct, r
+        MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
+        WITH r, t
+        MERGE (t)-[:CONTEXT_FOR]->(r)
+        """
+        async def _edge(tx):
+            await tx.run(cypher, input_structs=[{
+                'response_id': response.doc_id,
+                'tool_call_id': tool_call.doc_id,
+            }])
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
 
     async def create_topic_to_prompt_edge(self, prompt: PromptDoc, topics: list[str]):
         cypher = """
@@ -134,30 +160,6 @@ class GraphClient:
                 return
             input_structs = [{
                 'prompt_id': prompt.doc_id,
-                'topic': topic,
-            } for topic in deduped_topics]
-            await tx.run(cypher, input_structs=input_structs)
-        try:
-            async with self.driver.session() as session:
-                return await session.execute_write(_edge)
-        except Exception:
-            logger.exception(f"Failed to execute: {cypher}")
-
-    async def create_topic_to_response_edge(self, response: ResponseDoc, topics: list[str]):
-        cypher = """
-        UNWIND $input_structs AS input_struct
-        MERGE (r:Response {doc_id: input_struct.response_id})
-        WITH input_struct, r
-        MERGE (t:Topic {text: input_struct.topic})
-        WITH r, t
-        MERGE (t)-[:TOPIC_OF]->(r)
-        """
-        async def _edge(tx):
-            deduped_topics = self.dedupe_identity_texts(topics)
-            if not deduped_topics:
-                return
-            input_structs = [{
-                'response_id': response.doc_id,
                 'topic': topic,
             } for topic in deduped_topics]
             await tx.run(cypher, input_structs=input_structs)
