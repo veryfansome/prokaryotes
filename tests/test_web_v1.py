@@ -257,3 +257,29 @@ async def test_get_named_entities_embs_normalizes_and_dedupes(monkeypatch: pytes
     assert named_entities == ["U.S.", "US", "Nathan Hale's Hazardous Tales"]
     assert named_entity_embs == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
     emb_mock.assert_awaited_once_with(["U.S.", "US", "Nathan Hale's Hazardous Tales"])
+
+
+@pytest.mark.asyncio
+async def test_get_topic_embs_excludes_named_entities_before_embedding(monkeypatch: pytest.MonkeyPatch):
+    class DummyTopicObserver:
+        async def get_topics(self) -> list[str]:
+            return [
+                "Nathan Hale’s Hazardous Tales",
+                "STEM comics",
+                "US history",
+            ]
+
+    emb_mock = AsyncMock(return_value=[[0.2, 0.2], [0.3, 0.3]])
+    monkeypatch.setattr("prokaryotes.web_v1.get_document_embs", emb_mock)
+
+    topics, topic_embs = await ProkaryoteV1.get_topic_embs(
+        DummyTopicObserver(),
+        excluded_topics={
+            "Nathan Hale's Hazardous Tales",
+            "US",
+        },
+    )
+
+    assert topics == ["STEM comics", "US history"]
+    assert topic_embs == [[0.2, 0.2], [0.3, 0.3]]
+    emb_mock.assert_awaited_once_with(["STEM comics", "US history"])

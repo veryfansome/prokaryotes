@@ -19,6 +19,8 @@ _IDENTITY_PUNCT_TRANSLATION = str.maketrans({
     "‛": "'",
     "ʼ": "'",
     "′": "'",
+    "-": "-",
+    "–": "-",
     "“": '"',
     "”": '"',
 })
