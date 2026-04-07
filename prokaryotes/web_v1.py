@@ -97,8 +97,9 @@ class ProkaryoteV1(WebBase):
         message_parts.append("## Instructions")
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
         message_parts.append(
-            "- When using the `run_shell_command` tool, avoid chaining multiple commands with '&&' or ';', instead"
-            "prefer a single, focused `command`, with a distinct `reason` per tool call."
+            "- When using the `run_shell_command` tool, don't chain multiple commands with '&&' or ';' unless"
+            " the intended task can't be accomplished without chaining commands together. Whenver possible, use a"
+            " single, focused `command`, with a distinct `reason` per tool call."
         )
         message_parts.append(
             "- When reading files, default to previewing the first 200 lines, e.g. `sed -n '1,200p' <path>`."

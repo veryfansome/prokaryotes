@@ -20,9 +20,11 @@ class TopicClassifyingObserver(Observer):
         message_parts = [
             "---",
             "## Instructions",
+            "Analyze the most recently received message.",
+            "- Generate a `topic_words` list of words or phrases that best convey the topics of the user's message.",
             (
-                "Analyze the most recently received message."
-                " Pick 1-3 words (or phrases) that best conveys the current topic."
+                "- Use other messages from the conversation for context but focus only on the most recent user"
+                " message for the `topic_words` list."
             ),
         ]
         return "\n".join(message_parts)
@@ -53,7 +55,7 @@ class TopicClassifyingObserver(Observer):
                         "topic_words": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "A flat list of atomic topic words or phrases.",
+                            "description": "A flat list of topic words or phrases.",
                         },
                     },
                     "additionalProperties": False,

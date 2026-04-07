@@ -20,11 +20,14 @@ class NamedEntityObserver(Observer):
         message_parts = [
             "---",
             "## Instructions",
+            "Analyze the most recently received user message.",
+            "- Generate a `named_entities` list that includes all unique objects referenced in the user's message.",
             (
-                "Analyze the most recently received message."
-                " - Generate a `named_entities` list that includes all proper names in the message."
-                " - Expand any acronyms and pronouns into the fully spelled out proper names they refer to."
+                "- Use other messages from the conversation for context but focus only on the most recent user"
+                " message for the `named_entities` list."
             ),
+            "- Expand any name acronyms from the message into the fully spelled out proper nouns they refer to.",
+            "- Replace pronouns with canonical proper names, whenever the object they refer to is clear.",
         ]
         return "\n".join(message_parts)
 
@@ -54,7 +57,7 @@ class NamedEntityObserver(Observer):
                         "named_entities": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "A flat list of proper names.",
+                            "description": "A flat list of named entities.",
                         },
                     },
                     "additionalProperties": False,
