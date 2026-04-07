@@ -4,6 +4,7 @@ from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.models_v1 import PersonContext
 from prokaryotes.search_v1.facts import FactSearcher
+from prokaryotes.search_v1.named_entities import NamedEntitySearcher
 from prokaryotes.search_v1.prompts import PromptSearcher
 from prokaryotes.search_v1.responses import ResponseSearcher
 from prokaryotes.search_v1.tool_calls import ToolCallSearcher
@@ -12,6 +13,7 @@ from prokaryotes.search_v1.topics import TopicSearcher
 
 class SearchClient(
     FactSearcher,
+    NamedEntitySearcher,
     PromptSearcher,
     ResponseSearcher,
     ToolCallSearcher,
