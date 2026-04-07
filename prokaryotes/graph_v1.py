@@ -12,6 +12,7 @@ from prokaryotes.models_v1 import (
     ResponseDoc,
     ToolCallDoc,
 )
+from prokaryotes.utils_v1.text_utils import normalize_text_for_identity
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,30 @@ class GraphClient:
                 'fact_id': fact.doc_id,
                 'fact_text': fact.text,
             } for fact in facts]
+            await tx.run(cypher, input_structs=input_structs)
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
+    async def create_named_entity_to_prompt_edge(self, prompt: PromptDoc, named_entities: list[str]):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (p:Prompt {doc_id: input_struct.prompt_id})
+        WITH input_struct, p
+        MERGE (e:NamedEntity {text: input_struct.named_entity})
+        WITH p, e
+        MERGE (e)-[:ENTITY_OF]->(p)
+        """
+        async def _edge(tx):
+            deduped_named_entities = self.dedupe_identity_texts(named_entities)
+            if not deduped_named_entities:
+                return
+            input_structs = [{
+                'prompt_id': prompt.doc_id,
+                'named_entity': named_entity,
+            } for named_entity in deduped_named_entities]
             await tx.run(cypher, input_structs=input_structs)
         try:
             async with self.driver.session() as session:
@@ -104,10 +129,13 @@ class GraphClient:
         MERGE (t)-[:TOPIC_OF]->(p)
         """
         async def _edge(tx):
+            deduped_topics = self.dedupe_identity_texts(topics)
+            if not deduped_topics:
+                return
             input_structs = [{
                 'prompt_id': prompt.doc_id,
                 'topic': topic,
-            } for topic in topics]
+            } for topic in deduped_topics]
             await tx.run(cypher, input_structs=input_structs)
         try:
             async with self.driver.session() as session:
@@ -125,16 +153,31 @@ class GraphClient:
         MERGE (t)-[:TOPIC_OF]->(r)
         """
         async def _edge(tx):
+            deduped_topics = self.dedupe_identity_texts(topics)
+            if not deduped_topics:
+                return
             input_structs = [{
                 'response_id': response.doc_id,
                 'topic': topic,
-            } for topic in topics]
+            } for topic in deduped_topics]
             await tx.run(cypher, input_structs=input_structs)
         try:
             async with self.driver.session() as session:
                 return await session.execute_write(_edge)
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
+
+    @classmethod
+    def dedupe_identity_texts(cls, values: list[str]) -> list[str]:
+        normalized_values = []
+        seen_values = set()
+        for value in values:
+            value = normalize_text_for_identity(value)
+            if not value or value in seen_values:
+                continue
+            seen_values.add(value)
+            normalized_values.append(value)
+        return normalized_values
 
     def init_client(self):
         self.driver = get_neo4j_driver()

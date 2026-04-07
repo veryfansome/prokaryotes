@@ -121,7 +121,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
             match: str = None,
             match_emb: list[float] = None,
             min_final_score: float | None = None,
-            min_initial_score: float = 0.5,
+            min_lexical_score: float = 0.5,
             min_output_similarity_score: float = 0.9,
             not_labels_and: list[str] | None = None,
             not_labels_or: list[str] | None = None,
@@ -231,8 +231,8 @@ class ToolCallSearcher(TopicSearcher, ABC):
             },
             "size": candidates,
         }
-        if min_initial_score is not None:
-            lexical_search_kwargs["min_score"] = min_initial_score
+        if min_lexical_score is not None:
+            lexical_search_kwargs["min_score"] = min_lexical_score
 
         lexical_response = await self.es.search(**lexical_search_kwargs)
         lexical_hits = lexical_response["hits"]["hits"]

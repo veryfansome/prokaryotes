@@ -13,7 +13,7 @@ from prokaryotes.utils_v1.text_utils import (
 
 logger = logging.getLogger(__name__)
 
-topic_mappings = {
+named_entity_mappings = {
     "dynamic": "strict",
     "properties": {
         "emb": {
@@ -35,43 +35,43 @@ topic_mappings = {
 }
 
 
-class TopicSearcher(ABC):
+class NamedEntitySearcher(ABC):
     @property
     @abstractmethod
     def es(self) -> AsyncElasticsearch:
         pass
 
-    async def index_topics(self, topics: list[str], topic_embs: list[list[float]]):
-        seen_topic_ids = set()
+    async def index_named_entities(self, named_entities: list[str], named_entity_embs: list[list[float]]):
+        seen_named_entity_ids = set()
         actions = []
-        for idx, topic in enumerate(topics):
-            topic = normalize_text_for_identity(topic)
-            if not topic:
+        for idx, named_entity in enumerate(named_entities):
+            named_entity = normalize_text_for_identity(named_entity)
+            if not named_entity:
                 continue
-            topic_id = text_to_md5(topic)
-            if topic_id in seen_topic_ids:
+            named_entity_id = text_to_md5(named_entity)
+            if named_entity_id in seen_named_entity_ids:
                 continue
-            seen_topic_ids.add(topic_id)
+            seen_named_entity_ids.add(named_entity_id)
             actions.append({
-                "_index": "topics",
-                "_id": topic_id,
+                "_index": "named-entities",
+                "_id": named_entity_id,
                 "_op_type": "create",
-                "_source": {"emb": topic_embs[idx], "name": topic}
+                "_source": {"emb": named_entity_embs[idx], "name": named_entity}
             })
         if not actions:
             return
         success_cnt, errors = await helpers.async_bulk(self.es, actions, raise_on_error=False)
         if success_cnt:
-            logger.info(f"Indexed {success_cnt} topic(s)")
+            logger.info(f"Indexed {success_cnt} named entity(s)")
         if errors:
-            skipped_cnt = len([e for e in errors if e.get("create", {}).get("status") == 409])  # type: ignore 
+            skipped_cnt = len([e for e in errors if e.get("create", {}).get("status") == 409])  # type: ignore
             if skipped_cnt:
-                logger.error(f"Skipped indexing {skipped_cnt} topic(s)")
+                logger.error(f"Skipped indexing {skipped_cnt} named entity(s)")
             error_cnt = len(errors) - skipped_cnt
             if error_cnt:
-                logger.error(f"Failed to index {error_cnt} topic(s)")
+                logger.error(f"Failed to index {error_cnt} named entity(s)")
 
-    async def search_topics(
+    async def search_named_entities(
             self,
             match: str,
             match_emb: list[float],
@@ -89,7 +89,7 @@ class TopicSearcher(ABC):
             ]
         }
         search_kwargs = {
-            "index": "topics",
+            "index": "named-entities",
             "query": {
                 "bool": query,
             },
@@ -108,13 +108,13 @@ class TopicSearcher(ABC):
         hits = response["hits"]["hits"]
         for h in hits:
             name = h['_source']['name']
-            logger.debug(f"Score: {h['_score']:.4f} | Topic: {name}")
-        seen_topics = set()
-        topics = []
+            logger.debug(f"Score: {h['_score']:.4f} | Named entity: {name}")
+        seen_named_entities = set()
+        named_entities = []
         for h in hits:
-            topic = normalize_text_for_identity(h["_source"]["name"])
-            if not topic or topic in seen_topics:
+            named_entity = normalize_text_for_identity(h["_source"]["name"])
+            if not named_entity or named_entity in seen_named_entities:
                 continue
-            seen_topics.add(topic)
-            topics.append(topic)
-        return topics
+            seen_named_entities.add(named_entity)
+            named_entities.append(named_entity)
+        return named_entities

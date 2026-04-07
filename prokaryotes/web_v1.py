@@ -33,6 +33,7 @@ from prokaryotes.models_v1 import (
     ToolCallDoc,
 )
 from prokaryotes.observer_v1.fact_observer import FactSavingObserver
+from prokaryotes.observer_v1.named_entity_observer import NamedEntityObserver
 from prokaryotes.observer_v1.summarizing_observer import MessageSummarizingObserver
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
 from prokaryotes.search_v1 import SearchClient
@@ -43,6 +44,7 @@ from prokaryotes.utils_v1.context_utils import developer_message_parts
 from prokaryotes.utils_v1.text_utils import (
     get_document_embs,
     get_query_embs,
+    normalize_text_for_identity,
     normalize_text_for_search,
 )
 from prokaryotes.web_base_v1 import WebBase
@@ -96,8 +98,9 @@ class ProkaryoteV1(WebBase):
         message_parts.append("## Instructions")
         message_parts.append("- Use short messages. One sentences is best, unless the user explicitly requests more.")
         message_parts.append(
-            "- When using the `run_shell_command` tool, avoid chaining multiple commands with '&&' or ';', instead"
-            "prefer a single, focused `command`, with a distinct `reason` per tool call."
+            "- When using the `run_shell_command` tool, don't chain multiple commands with '&&' or ';' unless"
+            " the intended task can't be accomplished without chaining commands together. Whenver possible, use a"
+            " single, focused `command`, with a distinct `reason` per tool call."
         )
         message_parts.append(
             "- When reading files, default to previewing the first 200 lines, e.g. `sed -n '1,200p' <path>`."
@@ -112,6 +115,7 @@ class ProkaryoteV1(WebBase):
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
             fact_observer: FactSavingObserver,
+            named_entity_observer: NamedEntityObserver,
             prompt_uuid: str,
             recalled_facts: list[FactDoc],
             recalled_tool_calls: list[ToolCallDoc],
@@ -150,6 +154,10 @@ class ProkaryoteV1(WebBase):
         (
             generated_response_emb,
             (
+                named_entities,
+                named_entity_embs,
+            ),
+            (
                 summary,
                 summary_embs,
             ),
@@ -158,11 +166,12 @@ class ProkaryoteV1(WebBase):
                 topic_embs,
             ),
         ) = await asyncio.gather(
-            self.get_response_emb(generated_response),
+            self.get_generated_response_emb(generated_response),
+            self.get_named_entities_embs(named_entity_observer),
             self.get_summary_emb(summary_observer),
             self.get_topic_embs(topic_observer),
         )
-        prompt_doc, response_doc, _ = await asyncio.gather(
+        prompt_doc, response_doc, _, _ = await asyncio.gather(
             self.search_client.index_prompt(
                 about=topics,
                 prompt_uuid=prompt_uuid,
@@ -177,6 +186,7 @@ class ProkaryoteV1(WebBase):
                 response_emb=generated_response_emb,
             ),
             self.search_client.index_topics(topics, topic_embs),
+            self.search_client.index_named_entities(named_entities, named_entity_embs),
         )
 
         # TODO: Evaluate recalled tool outs and facts?
@@ -209,6 +219,10 @@ class ProkaryoteV1(WebBase):
                             self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
                         ))
 
+        if prompt_doc and named_entities:
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_named_entity_to_prompt_edge(prompt_doc, named_entities)
+            ))
         if prompt_doc and topics:
             tasks.append(asyncio.create_task(
                 self.graph_client.create_topic_to_prompt_edge(prompt_doc, topics)
@@ -251,7 +265,25 @@ class ProkaryoteV1(WebBase):
         return {"conversation_uuid": uuid.uuid4()}
 
     @classmethod
-    async def get_response_emb(cls, generated_response: str) -> list[float]:
+    async def get_named_entities_embs(
+            cls,
+            named_entity_observer: NamedEntityObserver,
+    ) -> tuple[list[str], list[list[float]]]:
+        raw_named_entities = await named_entity_observer.get_named_entities()
+        named_entities = []
+        seen_named_entities = set()
+        for named_entity in raw_named_entities:
+            named_entity = normalize_text_for_identity(named_entity)
+            if not named_entity or named_entity in seen_named_entities:
+                continue
+            seen_named_entities.add(named_entity)
+            named_entities.append(named_entity)
+        if not named_entities:
+            return [], []
+        return named_entities, await get_document_embs(named_entities)
+
+    @classmethod
+    async def get_generated_response_emb(cls, generated_response: str) -> list[float]:
         generated_response_normalized = await run_in_threadpool(normalize_text_for_search, generated_response)
         return (await get_document_embs([generated_response_normalized]))[0]
 
@@ -262,7 +294,17 @@ class ProkaryoteV1(WebBase):
 
     @classmethod
     async def get_topic_embs(cls, topic_observer: TopicClassifyingObserver) -> tuple[list[str], list[list[float]]]:
-        topics = await topic_observer.get_topics()
+        raw_topics = await topic_observer.get_topics()
+        topics = []
+        seen_topics = set()
+        for topic in raw_topics:
+            topic = normalize_text_for_identity(topic)
+            if not topic or topic in seen_topics:
+                continue
+            seen_topics.add(topic)
+            topics.append(topic)
+        if not topics:
+            return [], []
         return topics, await get_document_embs(topics)
 
     def init(self):
@@ -317,6 +359,8 @@ class ProkaryoteV1(WebBase):
 
         # Pre-recall observers 
 
+        named_entity_observer = NamedEntityObserver(self.llm_client)
+        named_entity_observer.observe_in_background(payload.messages.copy())
         summary_observer = MessageSummarizingObserver(self.llm_client)
         summary_observer.observe_in_background(payload.messages.copy())
         topic_observer = TopicClassifyingObserver(self.llm_client)
@@ -355,7 +399,7 @@ class ProkaryoteV1(WebBase):
                 excluded_ids=[obj.call_id for obj in context_window if isinstance(obj, ResponseFunctionToolCall)],
                 match=tool_recall_text,
                 match_emb=tool_recall_emb,
-                min_initial_score=1.0,
+                min_lexical_score=1.0,
                 min_final_score=0.75,
             ),
             self.search_client.get_user_context(
@@ -408,6 +452,7 @@ class ProkaryoteV1(WebBase):
                 context_window=context_window,
                 conversation_uuid=payload.conversation_uuid,
                 fact_observer=fact_observer,
+                named_entity_observer=named_entity_observer,
                 recalled_facts=recalled_facts,
                 recalled_tool_calls=recalled_tool_calls,
                 recalled_user_context=recalled_user_context,
@@ -430,6 +475,7 @@ class ProkaryoteV1(WebBase):
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
             fact_observer: FactSavingObserver,
+            named_entity_observer: NamedEntityObserver,
             recalled_facts: list[FactDoc],
             recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
@@ -450,6 +496,7 @@ class ProkaryoteV1(WebBase):
             context_window=context_window,
             conversation_uuid=conversation_uuid,
             fact_observer=fact_observer,
+            named_entity_observer=named_entity_observer,
             prompt_uuid=prompt_uuid,
             recalled_facts=recalled_facts,
             recalled_tool_calls=recalled_tool_calls,

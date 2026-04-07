@@ -1,6 +1,7 @@
 import difflib
 import hashlib
 import os
+import unicodedata
 
 import mistune
 from bs4 import BeautifulSoup
@@ -11,6 +12,16 @@ from prokaryotes.models_v1 import (
     TextEmbeddingResponse,
 )
 from prokaryotes.utils_v1 import http_utils
+
+_IDENTITY_PUNCT_TRANSLATION = str.maketrans({
+    "’": "'",
+    "‘": "'",
+    "‛": "'",
+    "ʼ": "'",
+    "′": "'",
+    "“": '"',
+    "”": '"',
+})
 
 
 async def get_document_embs(doc_texts: list[str], batch_size: int = 1) -> list[list[float]]:
@@ -39,6 +50,12 @@ async def get_text_embs(req: TextEmbeddingRequest, timeout: float = 10.0) -> Tex
     )
     resp.raise_for_status()
     return TextEmbeddingResponse.model_validate(resp.json())
+
+
+def normalize_text_for_identity(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    text = text.translate(_IDENTITY_PUNCT_TRANSLATION)
+    return " ".join(text.split()).strip()
 
 
 def normalize_text_for_search(text: str) -> str:

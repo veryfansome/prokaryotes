@@ -1,5 +1,7 @@
 CREATE CONSTRAINT FOR (f:Fact)            REQUIRE f.doc_id  IS UNIQUE;
 
+CREATE CONSTRAINT FOR (n:NamedEntity)     REQUIRE n.text    IS UNIQUE;
+
 CREATE CONSTRAINT FOR (p:Prompt)          REQUIRE p.doc_id  IS UNIQUE;
 
 CREATE CONSTRAINT FOR (r:Response)        REQUIRE r.doc_id  IS UNIQUE;

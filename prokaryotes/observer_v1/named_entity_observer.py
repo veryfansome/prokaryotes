@@ -12,7 +12,7 @@ from prokaryotes.observer_v1.base import Observer
 logger = logging.getLogger(__name__)
 
 
-class TopicClassifyingObserver(Observer):
+class NamedEntityObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)
 
@@ -20,46 +20,48 @@ class TopicClassifyingObserver(Observer):
         message_parts = [
             "---",
             "## Instructions",
-            "Analyze the most recently received message.",
-            "- Generate a `topic_words` list of words or phrases that best convey the topics of the user's message.",
+            "Analyze the most recently received user message.",
+            "- Generate a `named_entities` list that includes all unique objects referenced in the user's message.",
             (
                 "- Use other messages from the conversation for context but focus only on the most recent user"
-                " message for the `topic_words` list."
+                " message for the `named_entities` list."
             ),
+            "- Expand any name acronyms from the message into the fully spelled out proper nouns they refer to.",
+            "- Replace pronouns with canonical proper names, whenever the object they refer to is clear.",
         ]
         return "\n".join(message_parts)
 
-    async def get_topics(self) -> list[str]:
+    async def get_named_entities(self) -> list[str]:
         try:
             if self.bg_task:
                 await self.bg_task
             if self.response_text:
                 data = json.loads(self.response_text)
-                topic_words = data["topic_words"]
-                assert isinstance(topic_words, list) and all(isinstance(word, str) for word in topic_words), (
-                    f"Invalid `topic_words`: expected list[str], got {self.response_text}"
+                named_entities = data["named_entities"]
+                assert isinstance(named_entities, list) and all(isinstance(word, str) for word in named_entities), (
+                    f"Invalid `named_entities`: expected list[str], got {self.response_text}"
                 )
-                return topic_words
+                return named_entities
         except Exception:
-            logger.exception(f"Failed to get topic words from '{self.response_text}'")
+            logger.exception(f"Failed to get named entities from '{self.response_text}'")
         return []
 
     def text_param(self) -> ResponseTextConfigParam:
         return ResponseTextConfigParam(
             format=ResponseFormatTextJSONSchemaConfigParam(
-                name="topic_words",
+                name="named_entities",
                 type="json_schema",
                 schema={
                     "type": "object",
                     "properties": {
-                        "topic_words": {
+                        "named_entities": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "A flat list of topic words or phrases.",
+                            "description": "A flat list of named entities.",
                         },
                     },
                     "additionalProperties": False,
-                    "required": ["topic_words"],
+                    "required": ["named_entities"],
                 },
                 strict=True,
             ),

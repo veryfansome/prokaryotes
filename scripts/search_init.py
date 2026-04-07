@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from prokaryotes.search_v1 import get_elastic_search
 from prokaryotes.search_v1.facts import fact_mappings
+from prokaryotes.search_v1.named_entities import named_entity_mappings
 from prokaryotes.search_v1.prompts import prompt_mappings
 from prokaryotes.search_v1.responses import response_mappings
 from prokaryotes.search_v1.tool_calls import tool_call_mappings
@@ -20,6 +21,7 @@ setup_logging()
 async def sync_mappings(replicas: int = 0):
     schemas = {
         "facts": fact_mappings,
+        "named-entities": named_entity_mappings,
         "prompts": prompt_mappings,
         "responses": response_mappings,
         "tool-calls": tool_call_mappings,

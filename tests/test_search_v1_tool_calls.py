@@ -174,7 +174,7 @@ async def test_search_tool_call_builds_lexical_and_dual_knn_queries(es_mock: Asy
         excluded_ids=["already-in-context"],
         match="Take a look at foo.py.",
         match_emb=[0.1, 0.2],
-        min_initial_score=1.0,
+        min_lexical_score=1.0,
     )
 
     assert results == []
