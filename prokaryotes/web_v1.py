@@ -227,10 +227,6 @@ class ProkaryoteV1(WebBase):
             tasks.append(asyncio.create_task(
                 self.graph_client.create_topic_to_prompt_edge(prompt_doc, topics)
             ))
-        if response_doc and topics:
-            tasks.append(asyncio.create_task(
-                self.graph_client.create_topic_to_response_edge(response_doc, topics)
-            ))
 
         saved_facts = await fact_observer.get_saved_facts()
         if prompt_doc and saved_facts:

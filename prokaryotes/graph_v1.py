@@ -99,25 +99,25 @@ class GraphClient:
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
 
-    async def create_tool_call_to_response_edge(self, response: ResponseDoc, tool_call: ToolCallDoc):
-        cypher = """
-        UNWIND $input_structs AS input_struct
-        MERGE (r:Response {doc_id: input_struct.response_id})
-        WITH input_struct, r
-        MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
-        WITH r, t
-        MERGE (t)-[:CONTEXT_FOR]->(r)
-        """
-        async def _edge(tx):
-            await tx.run(cypher, input_structs=[{
-                'response_id': response.doc_id,
-                'tool_call_id': tool_call.doc_id,
-            }])
-        try:
-            async with self.driver.session() as session:
-                return await session.execute_write(_edge)
-        except Exception:
-            logger.exception(f"Failed to execute: {cypher}")
+    #async def create_tool_call_to_response_edge(self, response: ResponseDoc, tool_call: ToolCallDoc):
+    #    cypher = """
+    #    UNWIND $input_structs AS input_struct
+    #    MERGE (r:Response {doc_id: input_struct.response_id})
+    #    WITH input_struct, r
+    #    MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
+    #    WITH r, t
+    #    MERGE (t)-[:CONTEXT_FOR]->(r)
+    #    """
+    #    async def _edge(tx):
+    #        await tx.run(cypher, input_structs=[{
+    #            'response_id': response.doc_id,
+    #            'tool_call_id': tool_call.doc_id,
+    #        }])
+    #    try:
+    #        async with self.driver.session() as session:
+    #            return await session.execute_write(_edge)
+    #    except Exception:
+    #        logger.exception(f"Failed to execute: {cypher}")
 
     async def create_topic_to_prompt_edge(self, prompt: PromptDoc, topics: list[str]):
         cypher = """
