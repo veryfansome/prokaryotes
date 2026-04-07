@@ -33,6 +33,7 @@ from prokaryotes.models_v1 import (
     ToolCallDoc,
 )
 from prokaryotes.observer_v1.fact_observer import FactSavingObserver
+from prokaryotes.observer_v1.named_entity_observer import NamedEntityObserver
 from prokaryotes.observer_v1.summarizing_observer import MessageSummarizingObserver
 from prokaryotes.observer_v1.topic_observer import TopicClassifyingObserver
 from prokaryotes.search_v1 import SearchClient
@@ -112,6 +113,7 @@ class ProkaryoteV1(WebBase):
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
             fact_observer: FactSavingObserver,
+            named_entity_observer: NamedEntityObserver,
             prompt_uuid: str,
             recalled_facts: list[FactDoc],
             recalled_tool_calls: list[ToolCallDoc],
@@ -317,6 +319,8 @@ class ProkaryoteV1(WebBase):
 
         # Pre-recall observers 
 
+        named_entity_observer = NamedEntityObserver(self.llm_client)
+        named_entity_observer.observe_in_background(payload.messages.copy())
         summary_observer = MessageSummarizingObserver(self.llm_client)
         summary_observer.observe_in_background(payload.messages.copy())
         topic_observer = TopicClassifyingObserver(self.llm_client)
@@ -408,6 +412,7 @@ class ProkaryoteV1(WebBase):
                 context_window=context_window,
                 conversation_uuid=payload.conversation_uuid,
                 fact_observer=fact_observer,
+                named_entity_observer=named_entity_observer,
                 recalled_facts=recalled_facts,
                 recalled_tool_calls=recalled_tool_calls,
                 recalled_user_context=recalled_user_context,
@@ -430,6 +435,7 @@ class ProkaryoteV1(WebBase):
             context_window: list[ChatMessage | FunctionCallOutput | ResponseFunctionToolCall],
             conversation_uuid: str,
             fact_observer: FactSavingObserver,
+            named_entity_observer: NamedEntityObserver,
             recalled_facts: list[FactDoc],
             recalled_tool_calls: list[ToolCallDoc],
             recalled_user_context: PersonContext,
@@ -450,6 +456,7 @@ class ProkaryoteV1(WebBase):
             context_window=context_window,
             conversation_uuid=conversation_uuid,
             fact_observer=fact_observer,
+            named_entity_observer=named_entity_observer,
             prompt_uuid=prompt_uuid,
             recalled_facts=recalled_facts,
             recalled_tool_calls=recalled_tool_calls,
