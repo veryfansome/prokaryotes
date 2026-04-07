@@ -154,6 +154,10 @@ class ProkaryoteV1(WebBase):
         (
             generated_response_emb,
             (
+                named_entities,
+                named_entity_embs,
+            ),
+            (
                 summary,
                 summary_embs,
             ),
@@ -162,11 +166,12 @@ class ProkaryoteV1(WebBase):
                 topic_embs,
             ),
         ) = await asyncio.gather(
-            self.get_response_emb(generated_response),
+            self.get_generated_response_emb(generated_response),
+            self.get_named_entities_embs(named_entity_observer),
             self.get_summary_emb(summary_observer),
             self.get_topic_embs(topic_observer),
         )
-        prompt_doc, response_doc, _ = await asyncio.gather(
+        prompt_doc, response_doc, _, _ = await asyncio.gather(
             self.search_client.index_prompt(
                 about=topics,
                 prompt_uuid=prompt_uuid,
@@ -181,6 +186,7 @@ class ProkaryoteV1(WebBase):
                 response_emb=generated_response_emb,
             ),
             self.search_client.index_topics(topics, topic_embs),
+            self.search_client.index_named_entities(named_entities, named_entity_embs),
         )
 
         # TODO: Evaluate recalled tool outs and facts?
@@ -213,6 +219,10 @@ class ProkaryoteV1(WebBase):
                             self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
                         ))
 
+        if prompt_doc and named_entities:
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_named_entity_to_prompt_edge(prompt_doc, named_entities)
+            ))
         if prompt_doc and topics:
             tasks.append(asyncio.create_task(
                 self.graph_client.create_topic_to_prompt_edge(prompt_doc, topics)
@@ -255,7 +265,25 @@ class ProkaryoteV1(WebBase):
         return {"conversation_uuid": uuid.uuid4()}
 
     @classmethod
-    async def get_response_emb(cls, generated_response: str) -> list[float]:
+    async def get_named_entities_embs(
+            cls,
+            named_entity_observer: NamedEntityObserver,
+    ) -> tuple[list[str], list[list[float]]]:
+        raw_named_entities = await named_entity_observer.get_named_entities()
+        named_entities = []
+        seen_named_entities = set()
+        for named_entity in raw_named_entities:
+            named_entity = normalize_text_for_identity(named_entity)
+            if not named_entity or named_entity in seen_named_entities:
+                continue
+            seen_named_entities.add(named_entity)
+            named_entities.append(named_entity)
+        if not named_entities:
+            return [], []
+        return named_entities, await get_document_embs(named_entities)
+
+    @classmethod
+    async def get_generated_response_emb(cls, generated_response: str) -> list[float]:
         generated_response_normalized = await run_in_threadpool(normalize_text_for_search, generated_response)
         return (await get_document_embs([generated_response_normalized]))[0]
 
