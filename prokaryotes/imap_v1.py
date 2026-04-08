@@ -139,17 +139,55 @@ class IngestController:
             worker_task = self.worker_executor.submit(self.run_worker, idx)
             worker_task.add_done_callback(log_future_exception)
 
-    def run_idle_manager(self, idle_check_timeout: int = 60, idle_restart_seconds: int = 60 * 4):
+    def run_idle_manager(
+            self,
+            idle_check_spin_backoff_seconds: float = 0.25,
+            idle_check_spin_restart_threshold: int = 5,
+            idle_check_spin_threshold_seconds: float = 1.0,
+            idle_check_timeout: int = 60,
+            idle_restart_seconds: int = 60 * 4,
+    ):
         while not self.stop_event.is_set():
             try:
                 self.idle_manager_client = client = self.imap_client_factory.get_client()
                 with client:
                     idle(client, self.folder)
-                    time_started = time.monotonic()
+                    time_idle_started = time.monotonic()
+                    consecutive_spin_count = 0
                     while not self.stop_event.is_set():
+                        time_idle_check_started = time.monotonic()
                         responses = client.idle_check(timeout=idle_check_timeout)
-                        time_elapsed = time.monotonic() - time_started
-                        logger.info(f"Idled for {time_elapsed} seconds: {responses}")
+                        idle_check_time_elapsed = time.monotonic() - time_idle_check_started
+                        idle_time_elapsed = time.monotonic() - time_idle_started
+                        logger.info(f"Idled for {idle_time_elapsed} seconds: {responses}")
+
+                        # Some servers occasionally return [] immediately instead of blocking for timeout.
+                        # Back off to avoid a tight loop and periodically restart IDLE if the pattern repeats.
+                        if not responses and idle_check_time_elapsed < idle_check_spin_threshold_seconds:
+                            consecutive_spin_count += 1
+                            logger.warning(
+                                "idle_check returned empty in %.3fs (timeout=%ss), backing off %.2fs (attempt=%s)",
+                                idle_check_time_elapsed,
+                                idle_check_timeout,
+                                idle_check_spin_backoff_seconds,
+                                consecutive_spin_count,
+                            )
+                            if self.stop_event.wait(idle_check_spin_backoff_seconds):
+                                break
+                            if consecutive_spin_count >= idle_check_spin_restart_threshold:
+                                logger.warning(
+                                    "Refreshing idle connection after %s rapid empty checks",
+                                    consecutive_spin_count,
+                                )
+                                _, trailing = client.idle_done()
+                                if trailing:
+                                    logger.info(f"Trailing responses after idle_done: {trailing}")
+                                client.idle()
+                                time_idle_started = time.monotonic()
+                                consecutive_spin_count = 0
+                            continue
+                        consecutive_spin_count = 0
+
                         # Looks like:
                         # - [(9484, b'EXISTS')]
                         # - [(9467, b'FETCH', (b'UID', 73958, b'FLAGS', (b'\\Seen',)))]
@@ -159,13 +197,13 @@ class IngestController:
                             if r[1] == b'FETCH':
                                 self.safe_put_nowait(ControlSignal.fetch(r[2]))
                         # Restart IDLE periodically
-                        if time.monotonic() - time_started > idle_restart_seconds:
+                        if time.monotonic() - time_idle_started > idle_restart_seconds:
                             logger.info("Refreshing idle connection")
                             _, trailing = client.idle_done()
                             if trailing:
                                 logger.info(f"Trailing responses after idle_done: {trailing}")
                             client.idle()
-                            time_started = time.monotonic()
+                            time_idle_started = time.monotonic()
             except CONNECTION_ERRORS:
                 logger.exception("Connection error, reconnecting")
                 self.idle_manager_client = None
