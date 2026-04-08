@@ -170,7 +170,7 @@ class ProkaryoteV1(WebBase):
             topic_observer,
             excluded_topics=set(named_entities),
         )
-        prompt_doc, response_doc, _, _ = await asyncio.gather(
+        prompt_doc, _, _, _ = await asyncio.gather(
             self.search_client.index_prompt(
                 about=topics,
                 prompt_uuid=prompt_uuid,
@@ -187,6 +187,7 @@ class ProkaryoteV1(WebBase):
             self.search_client.index_topics(topics, topic_embs),
             self.search_client.index_named_entities(named_entities, named_entity_embs),
         )
+        similar_topic_pairs = await self.get_similar_topic_pairs(topics, topic_embs)
 
         # TODO: Evaluate recalled tool outs and facts?
 
@@ -207,16 +208,16 @@ class ProkaryoteV1(WebBase):
                             prompt_summary_emb=summary_embs,
                             topics=topics,
                         )
-                        if tool_call:
+                        if tool_call and prompt_doc:
                             tasks.append(asyncio.create_task(
                                 self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
                             ))
                     else:
                         tool_call = await self.search_client.get_tool_call(call_id)
-                    if tool_call:
-                        tasks.append(asyncio.create_task(
-                            self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
-                        ))
+                        if tool_call and prompt_doc:
+                            tasks.append(asyncio.create_task(
+                                self.graph_client.create_tool_call_context_to_prompt_edge(prompt_doc, tool_call)
+                            ))
 
         if prompt_doc and named_entities:
             tasks.append(asyncio.create_task(
@@ -236,6 +237,10 @@ class ProkaryoteV1(WebBase):
         for fact, fact_named_entities in fact_entity_matches:
             tasks.append(asyncio.create_task(
                 self.graph_client.create_named_entity_to_fact_edge([fact], fact_named_entities)
+            ))
+        if similar_topic_pairs:
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_similar_topic_edges(similar_topic_pairs)
             ))
 
         await asyncio.gather(*tasks)
@@ -316,6 +321,39 @@ class ProkaryoteV1(WebBase):
     async def get_generated_response_emb(cls, generated_response: str) -> list[float]:
         generated_response_normalized = await run_in_threadpool(normalize_text_for_search, generated_response)
         return (await get_document_embs([generated_response_normalized]))[0]
+
+    async def get_similar_topic_pairs(
+            self,
+            topics: list[str],
+            topic_embs: list[list[float]],
+            min_score: float = 0.95,
+    ) -> list[tuple[str, str]]:
+        if not topics:
+            return []
+        search_tasks = []
+        for idx, topic in enumerate(topics):
+            topic_emb = topic_embs[idx] if idx < len(topic_embs) else []
+            search_tasks.append(asyncio.create_task(
+                self.search_client.search_topics(
+                    match=topic,
+                    match_emb=topic_emb,
+                    min_score=min_score,
+                )
+            ))
+        similar_topics_by_topic = await asyncio.gather(*search_tasks)
+        similar_topic_pairs = set()
+        for topic, similar_topics in zip(topics, similar_topics_by_topic, strict=False):
+            normalized_topic = normalize_text_for_identity(topic)
+            normalized_topic_lower = normalized_topic.lower()
+            for similar_topic in similar_topics:
+                normalized_similar_topic = normalize_text_for_identity(similar_topic)
+                if not normalized_similar_topic:
+                    continue
+                normalized_similar_topic_lower = normalized_similar_topic.lower()
+                if normalized_topic_lower == normalized_similar_topic_lower:
+                    continue
+                similar_topic_pairs.add(tuple(sorted((normalized_topic, normalized_similar_topic))))
+        return sorted(similar_topic_pairs)
 
     @classmethod
     async def get_summary_emb(cls, summary_observer: MessageSummarizingObserver,) -> tuple[str, list[float]]:
