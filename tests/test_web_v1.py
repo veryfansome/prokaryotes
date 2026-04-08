@@ -1,10 +1,17 @@
+from datetime import (
+    UTC,
+    datetime,
+)
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 from openai.types.responses.response_input_param import FunctionCallOutput
 
-from prokaryotes.models_v1 import ChatMessage
+from prokaryotes.models_v1 import (
+    ChatMessage,
+    FactDoc,
+)
 from prokaryotes.web_v1 import ProkaryoteV1
 
 
@@ -257,3 +264,58 @@ async def test_get_named_entities_embs_normalizes_and_dedupes(monkeypatch: pytes
     assert named_entities == ["U.S.", "US", "Nathan Hale's Hazardous Tales"]
     assert named_entity_embs == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
     emb_mock.assert_awaited_once_with(["U.S.", "US", "Nathan Hale's Hazardous Tales"])
+
+
+@pytest.mark.asyncio
+async def test_get_topic_embs_excludes_named_entities_before_embedding(monkeypatch: pytest.MonkeyPatch):
+    class DummyTopicObserver:
+        async def get_topics(self) -> list[str]:
+            return [
+                "Nathan Hale’s Hazardous Tales",
+                "STEM comics",
+                "US history",
+            ]
+
+    emb_mock = AsyncMock(return_value=[[0.2, 0.2], [0.3, 0.3]])
+    monkeypatch.setattr("prokaryotes.web_v1.get_document_embs", emb_mock)
+
+    topics, topic_embs = await ProkaryoteV1.get_topic_embs(
+        DummyTopicObserver(),
+        excluded_topics={
+            "Nathan Hale's Hazardous Tales",
+            "US",
+        },
+    )
+
+    assert topics == ["STEM comics", "US history"]
+    assert topic_embs == [[0.2, 0.2], [0.3, 0.3]]
+    emb_mock.assert_awaited_once_with(["STEM comics", "US history"])
+
+
+def test_find_named_entities_in_facts_matches_entities_per_fact():
+    fact_1 = FactDoc(
+        about=["user:1"],
+        created_at=datetime(2026, 4, 7, tzinfo=UTC),
+        text="The user reads Nathan Hale’s Hazardous Tales with their daughter.",
+    )
+    fact_2 = FactDoc(
+        about=["user:1"],
+        created_at=datetime(2026, 4, 7, tzinfo=UTC),
+        text="They also discuss parent-child reading every weekend.",
+    )
+
+    matched = ProkaryoteV1.find_named_entities_in_facts(
+        facts=[
+            fact_1,
+            fact_2,
+        ],
+        named_entities=[
+            "Nathan Hale's Hazardous Tales",
+            "parent–child reading",
+            "The Hobbit",
+        ],
+    )
+
+    assert len(matched) == 2
+    assert matched[0] == (fact_1, ["Nathan Hale's Hazardous Tales"])
+    assert matched[1] == (fact_2, ["parent–child reading"])
