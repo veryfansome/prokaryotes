@@ -170,7 +170,7 @@ class ProkaryoteV1(WebBase):
             topic_observer,
             excluded_topics=set(named_entities),
         )
-        prompt_doc, response_doc, _, _ = await asyncio.gather(
+        prompt_doc, _, _, _ = await asyncio.gather(
             self.search_client.index_prompt(
                 about=topics,
                 prompt_uuid=prompt_uuid,
@@ -208,16 +208,16 @@ class ProkaryoteV1(WebBase):
                             prompt_summary_emb=summary_embs,
                             topics=topics,
                         )
-                        if tool_call:
+                        if tool_call and prompt_doc:
                             tasks.append(asyncio.create_task(
                                 self.graph_client.create_tool_call_to_prompt_edge(prompt_doc, tool_call)
                             ))
                     else:
                         tool_call = await self.search_client.get_tool_call(call_id)
-                    if tool_call:
-                        tasks.append(asyncio.create_task(
-                            self.graph_client.create_tool_call_to_response_edge(response_doc, tool_call)
-                        ))
+                        if tool_call and prompt_doc:
+                            tasks.append(asyncio.create_task(
+                                self.graph_client.create_tool_call_context_to_prompt_edge(prompt_doc, tool_call)
+                            ))
 
         if prompt_doc and named_entities:
             tasks.append(asyncio.create_task(

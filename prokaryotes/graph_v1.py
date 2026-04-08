@@ -9,7 +9,6 @@ from neo4j import (
 from prokaryotes.models_v1 import (
     FactDoc,
     PromptDoc,
-    ResponseDoc,
     ToolCallDoc,
 )
 from prokaryotes.utils_v1.text_utils import normalize_text_for_identity
@@ -132,6 +131,26 @@ class GraphClient:
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
 
+    async def create_tool_call_context_to_prompt_edge(self, prompt: PromptDoc, tool_call: ToolCallDoc):
+        cypher = """
+        UNWIND $input_structs AS input_struct
+        MERGE (p:Prompt {doc_id: input_struct.prompt_id})
+        WITH input_struct, p
+        MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
+        WITH p, t
+        MERGE (t)-[:CONTEXT_FOR]->(p)
+        """
+        async def _edge(tx):
+            await tx.run(cypher, input_structs=[{
+                'prompt_id': prompt.doc_id,
+                'tool_call_id': tool_call.doc_id,
+            }])
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_edge)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
     async def create_tool_call_to_prompt_edge(self, prompt: PromptDoc, tool_call: ToolCallDoc):
         cypher = """
         UNWIND $input_structs AS input_struct
@@ -153,26 +172,6 @@ class GraphClient:
                 'tool_call_labels': sorted(tool_call.labels),
                 'tool_call_search_keywords': tool_call.search_keywords,
                 'tool_name': tool_call.tool_name,
-            }])
-        try:
-            async with self.driver.session() as session:
-                return await session.execute_write(_edge)
-        except Exception:
-            logger.exception(f"Failed to execute: {cypher}")
-
-    async def create_tool_call_to_response_edge(self, response: ResponseDoc, tool_call: ToolCallDoc):
-        cypher = """
-        UNWIND $input_structs AS input_struct
-        MERGE (r:Response {doc_id: input_struct.response_id})
-        WITH input_struct, r
-        MERGE (t:ToolCall {doc_id: input_struct.tool_call_id})
-        WITH r, t
-        MERGE (t)-[:CONTEXT_FOR]->(r)
-        """
-        async def _edge(tx):
-            await tx.run(cypher, input_structs=[{
-                'response_id': response.doc_id,
-                'tool_call_id': tool_call.doc_id,
             }])
         try:
             async with self.driver.session() as session:
