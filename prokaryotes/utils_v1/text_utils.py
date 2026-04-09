@@ -2,8 +2,10 @@ import difflib
 import hashlib
 import os
 import unicodedata
+from functools import lru_cache
 
 import mistune
+from async_lru import alru_cache
 from bs4 import BeautifulSoup
 
 from prokaryotes.models_v1 import (
@@ -40,7 +42,8 @@ _IDENTITY_PUNCT_TRANSLATION = str.maketrans({
 })
 
 
-async def get_document_embs(doc_texts: list[str], batch_size: int = 1) -> list[list[float]]:
+@alru_cache(maxsize=128, ttl=60)
+async def get_document_embs(doc_texts: tuple[str, ...], batch_size: int = 1) -> list[list[float]]:
     return (await get_text_embs(TextEmbeddingRequest(
         batch_size=batch_size,
         prompt=TextEmbeddingPrompt.DOCUMENT,
@@ -49,7 +52,8 @@ async def get_document_embs(doc_texts: list[str], batch_size: int = 1) -> list[l
     ))).embs
 
 
-async def get_query_embs(qry_texts: list[str], batch_size: int = 1) -> list[list[float]]:
+@alru_cache(maxsize=128, ttl=60)
+async def get_query_embs(qry_texts: tuple[str, ...], batch_size: int = 1) -> list[list[float]]:
     return (await get_text_embs(TextEmbeddingRequest(
         batch_size=batch_size,
         prompt=TextEmbeddingPrompt.QUERY,
@@ -68,12 +72,14 @@ async def get_text_embs(req: TextEmbeddingRequest, timeout: float = 10.0) -> Tex
     return TextEmbeddingResponse.model_validate(resp.json())
 
 
+@lru_cache(maxsize=128)
 def normalize_text_for_identity(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.translate(_IDENTITY_PUNCT_TRANSLATION)
     return " ".join(text.split()).strip()
 
 
+@lru_cache(maxsize=128)
 def normalize_text_for_search(text: str) -> str:
     text = mistune.html(text.lower())
     soup = BeautifulSoup(text, "lxml")
@@ -82,6 +88,7 @@ def normalize_text_for_search(text: str) -> str:
     return soup.get_text().strip()
 
 
+@lru_cache(maxsize=128)
 def str_similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=a, b=b).ratio()
 
@@ -93,10 +100,12 @@ def str_similarity_batch(a: str, b_list: list[str]) -> list[float]:
     return results
 
 
+@lru_cache(maxsize=128)
 def strip_punctuation(token: str) -> str:
     return token.strip(",.!?;:()[]{}'\"")
 
 
+@lru_cache(maxsize=128)
 def text_to_md5(text: str) -> str:
     return hashlib.md5(text.lower().strip().encode("utf-8")).hexdigest()
 
