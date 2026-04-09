@@ -24,14 +24,14 @@ class Observer:
         self.observed_messages: list[ChatMessage] = []
         self.response_text = ""
 
-    def developer_message(self) -> str | None:
+    def developer_message(self, messages: list[ChatMessage]) -> str | None:
         pass
 
     async def observe(self, messages: list[ChatMessage]):
         self.observed_messages = messages
 
         context_window = []
-        developer_message = self.developer_message()
+        developer_message = self.developer_message(messages)
         if developer_message:
             logger.debug(f"{self.__class__.__name__} developer message:\n{developer_message}")
             context_window.append(ChatMessage(role="developer", content=developer_message))

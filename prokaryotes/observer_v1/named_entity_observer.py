@@ -7,6 +7,7 @@ from openai.types.responses import (
 )
 
 from prokaryotes.llm_v1 import LLMClient
+from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.observer_v1.base import Observer
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ class NamedEntityObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)
 
-    def developer_message(self) -> str | None:
+    def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
             "---",
             "## Instructions",

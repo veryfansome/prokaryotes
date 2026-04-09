@@ -8,6 +8,7 @@ from openai.types.responses import (
 from starlette.concurrency import run_in_threadpool
 
 from prokaryotes.llm_v1 import LLMClient
+from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.observer_v1.base import Observer
 from prokaryotes.utils_v1.text_utils import normalize_text_for_search
 
@@ -18,7 +19,7 @@ class MessageSummarizingObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)
 
-    def developer_message(self) -> str | None:
+    def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
             "---",
             "## Instructions",

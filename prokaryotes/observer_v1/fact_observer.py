@@ -13,6 +13,7 @@ from prokaryotes.llm_v1 import (
     LLMClient,
 )
 from prokaryotes.models_v1 import (
+    ChatMessage,
     FactDoc,
     PersonContext,
     PromptContext,
@@ -119,7 +120,7 @@ class FactSavingObserver(Observer):
             f"user:{self.recalled_user_context.user_id}", recalled_user_context.facts, search_client
         )
 
-    def developer_message(self) -> str | None:
+    def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = developer_message_parts(
             self.prompt_context,
             self.recalled_facts,
