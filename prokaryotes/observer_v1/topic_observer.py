@@ -7,6 +7,7 @@ from openai.types.responses import (
 )
 
 from prokaryotes.llm_v1 import LLMClient
+from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.observer_v1.base import Observer
 
 logger = logging.getLogger(__name__)
@@ -16,15 +17,19 @@ class TopicClassifyingObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)
 
-    def developer_message(self) -> str | None:
+    def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
             "---",
             "## Instructions",
-            "Analyze the most recently received message.",
+            "You are a topic extraction workflow component. Analyze the most recently received message.",
             "- Generate a `topic_words` list of words or phrases that best convey the topics of the user's message.",
             (
                 "- Use other messages from the conversation for context but focus only on the most recent user"
                 " message for the `topic_words` list."
+            ),
+            (
+                "- Do not include named entities (e.g., specific people, organizations, products, locations,"
+                " events, or works) in `topic_words`."
             ),
         ]
         return "\n".join(message_parts)

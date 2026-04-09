@@ -7,6 +7,7 @@ from openai.types.responses import (
 )
 
 from prokaryotes.llm_v1 import LLMClient
+from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.observer_v1.base import Observer
 
 logger = logging.getLogger(__name__)
@@ -16,11 +17,11 @@ class NamedEntityObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)
 
-    def developer_message(self) -> str | None:
+    def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
             "---",
             "## Instructions",
-            "Analyze the most recently received user message.",
+            "You are a named entity extraction workflow component. Analyze the most recently received user message.",
             "- Generate a `named_entities` list of unique objects explicitly mentioned by name.",
             (
                 "- Use other messages from the conversation for context but focus only on the most recent user"
@@ -32,7 +33,7 @@ class NamedEntityObserver(Observer):
             ),
             (
                 "- Do not include generic terms that describe a role or relationship (e.g. \"boss\", \"father\","
-                " \"the user's friend\", \"the doctor\")."
+                " \"the user's friend\", \"the doctor\") in `named_entities`."
             ),
             "- Expand any name acronyms from the message into the fully spelled out proper nouns they refer to.",
             (
