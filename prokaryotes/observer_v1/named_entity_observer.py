@@ -21,7 +21,7 @@ class NamedEntityObserver(Observer):
         message_parts = [
             "---",
             "## Instructions",
-            "Analyze the most recently received user message.",
+            "You are a named entity extraction workflow component. Analyze the most recently received user message.",
             "- Generate a `named_entities` list of unique objects explicitly mentioned by name.",
             (
                 "- Use other messages from the conversation for context but focus only on the most recent user"
@@ -33,7 +33,7 @@ class NamedEntityObserver(Observer):
             ),
             (
                 "- Do not include generic terms that describe a role or relationship (e.g. \"boss\", \"father\","
-                " \"the user's friend\", \"the doctor\")."
+                " \"the user's friend\", \"the doctor\") in `named_entities`."
             ),
             "- Expand any name acronyms from the message into the fully spelled out proper nouns they refer to.",
             (

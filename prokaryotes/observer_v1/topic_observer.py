@@ -21,11 +21,15 @@ class TopicClassifyingObserver(Observer):
         message_parts = [
             "---",
             "## Instructions",
-            "Analyze the most recently received message.",
+            "You are a topic extraction workflow component. Analyze the most recently received message.",
             "- Generate a `topic_words` list of words or phrases that best convey the topics of the user's message.",
             (
                 "- Use other messages from the conversation for context but focus only on the most recent user"
                 " message for the `topic_words` list."
+            ),
+            (
+                "- Do not include named entities (e.g., specific people, organizations, products, locations,"
+                " events, or works) in `topic_words`."
             ),
         ]
         return "\n".join(message_parts)
