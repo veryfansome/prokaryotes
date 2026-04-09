@@ -52,7 +52,18 @@ class NamedEntityObserver(Observer):
         if last_user_message:
             search_text = await run_in_threadpool(normalize_text_for_search, last_user_message.content)
             search_emb = (await get_query_embs((search_text,)))[0]
-            similar_entities = await self.search_client.search_named_entities(search_text, search_emb)
+            # Message-body queries are broad, so keep lexical weak and bias toward semantic recall.
+            similar_entities = await self.search_client.search_named_entities(
+                search_text,
+                search_emb,
+                exact_match_boost=1.25,
+                knn_num_candidates=200,
+                knn_top_k=20,
+                knn_boost=2.0,
+                lexical_minimum_should_match=2,
+                match_boost=0.35,
+                min_score=0.3,
+            )
             if similar_entities:
                 message_parts.append(f"- For example: {similar_entities}")
         return "\n".join(message_parts)
