@@ -45,10 +45,10 @@ class FactSavingFunctionCallback(FunctionToolCallback):
                 len_before_dedupe = len(normalized_candidates)
                 # Exact-duplicate filtering
                 existing_fact_texts = {fact.text.casefold() for fact in self.recalled_facts}
-                candidates_after_exact_dedupe = [
+                candidates_after_exact_dedupe = tuple(
                     candidate for candidate in normalized_candidates
                     if candidate.casefold() not in existing_fact_texts
-                ]
+                )
                 len_after_exact_dedupe = len(candidates_after_exact_dedupe)
                 logger.info(
                     f"Filtered out {len_before_dedupe - len_after_exact_dedupe} candidate facts after exact dedupe"
@@ -120,7 +120,7 @@ class FactSavingObserver(Observer):
             f"user:{self.recalled_user_context.user_id}", recalled_user_context.facts, search_client
         )
 
-    def developer_message(self, messages: list[ChatMessage]) -> str | None:
+    async def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = developer_message_parts(
             self.prompt_context,
             self.recalled_facts,

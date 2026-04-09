@@ -57,7 +57,7 @@ class RecallResponsesCallback(FunctionToolCallback):
             assert isinstance(queries, list) and all(isinstance(query, str) for query in queries), (
                 f"Invalid `queries`: expected list[str], got {arguments}"
             )
-            query_embs = await get_query_embs(queries)
+            query_embs = await get_query_embs(tuple(queries))
 
             topic_search_tasks = []
             for idx, query in enumerate(queries):

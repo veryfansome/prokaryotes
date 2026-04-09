@@ -166,7 +166,7 @@ async def test_get_named_entities_embs_normalizes_and_dedupes(monkeypatch: pytes
 
     assert named_entities == ["U.S.", "US", "Nathan Hale's Hazardous Tales"]
     assert named_entity_embs == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
-    emb_mock.assert_awaited_once_with(["U.S.", "US", "Nathan Hale's Hazardous Tales"])
+    emb_mock.assert_awaited_once_with(("U.S.", "US", "Nathan Hale's Hazardous Tales"))
 
 
 @pytest.mark.asyncio
@@ -215,7 +215,7 @@ async def test_get_topic_embs_excludes_named_entities_before_embedding(monkeypat
 
     assert topics == ["STEM comics", "US history"]
     assert topic_embs == [[0.2, 0.2], [0.3, 0.3]]
-    emb_mock.assert_awaited_once_with(["STEM comics", "US history"])
+    emb_mock.assert_awaited_once_with(("STEM comics", "US history"))
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_get_topic_embs_normalizes_and_dedupes(monkeypatch: pytest.MonkeyP
 
     assert topics == ["Nathan Hale's Hazardous Tales", "STEM comics"]
     assert topic_embs == [[0.1, 0.2], [0.3, 0.4]]
-    emb_mock.assert_awaited_once_with(["Nathan Hale's Hazardous Tales", "STEM comics"])
+    emb_mock.assert_awaited_once_with(("Nathan Hale's Hazardous Tales", "STEM comics"))
 
 
 @pytest.mark.parametrize("cached_context_window, payload_messages, context_window_to_stream", [

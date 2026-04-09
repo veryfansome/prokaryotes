@@ -5,19 +5,26 @@ from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfigParam,
     ResponseTextConfigParam,
 )
+from starlette.concurrency import run_in_threadpool
 
 from prokaryotes.llm_v1 import LLMClient
 from prokaryotes.models_v1 import ChatMessage
 from prokaryotes.observer_v1.base import Observer
+from prokaryotes.search_v1 import SearchClient
+from prokaryotes.utils_v1.text_utils import (
+    get_query_embs,
+    normalize_text_for_search,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class NamedEntityObserver(Observer):
-    def __init__(self, llm_client: LLMClient, **kwargs):
+    def __init__(self, llm_client: LLMClient, search_client: SearchClient, **kwargs):
         super().__init__(llm_client, **kwargs)
+        self.search_client = search_client
 
-    def developer_message(self, messages: list[ChatMessage]) -> str | None:
+    async def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
             "---",
             "## Instructions",
@@ -41,6 +48,13 @@ class NamedEntityObserver(Observer):
                 " explicitly named elsewhere in the conversation."
             ),
         ]
+        last_user_message = next((msg for msg in reversed(messages) if msg.role == "user"), None)
+        if last_user_message:
+            search_text = await run_in_threadpool(normalize_text_for_search, last_user_message.content)
+            search_emb = (await get_query_embs((search_text,)))[0]
+            similar_entities = await self.search_client.search_named_entities(search_text, search_emb)
+            if similar_entities:
+                message_parts.append(f"- For example: {similar_entities}")
         return "\n".join(message_parts)
 
     async def get_named_entities(self) -> list[str]:

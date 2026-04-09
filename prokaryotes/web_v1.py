@@ -315,12 +315,12 @@ class ProkaryoteV1(WebBase):
             named_entities.append(named_entity)
         if not named_entities:
             return [], []
-        return named_entities, await get_document_embs(named_entities)
+        return named_entities, await get_document_embs(tuple(named_entities))
 
     @classmethod
     async def get_generated_response_emb(cls, generated_response: str) -> list[float]:
         generated_response_normalized = await run_in_threadpool(normalize_text_for_search, generated_response)
-        return (await get_document_embs([generated_response_normalized]))[0]
+        return (await get_document_embs((generated_response_normalized,)))[0]
 
     async def get_similar_topic_pairs(
             self,
@@ -358,7 +358,7 @@ class ProkaryoteV1(WebBase):
     @classmethod
     async def get_summary_emb(cls, summary_observer: MessageSummarizingObserver,) -> tuple[str, list[float]]:
         summary_text = await summary_observer.get_summary()
-        return summary_text, (await get_document_embs([summary_text]))[0]
+        return summary_text, (await get_document_embs((summary_text,)))[0]
 
     @classmethod
     async def get_topic_embs(
@@ -378,7 +378,7 @@ class ProkaryoteV1(WebBase):
             topics.append(topic)
         if not topics:
             return [], []
-        return topics, await get_document_embs(topics)
+        return topics, await get_document_embs(tuple(topics))
 
     def init(self):
         """Synchronous setup steps"""
@@ -432,11 +432,11 @@ class ProkaryoteV1(WebBase):
 
         # Pre-recall observers 
 
-        named_entity_observer = NamedEntityObserver(self.llm_client)
+        named_entity_observer = NamedEntityObserver(self.llm_client, self.search_client)
         named_entity_observer.observe_in_background(payload.messages.copy())
         summary_observer = MessageSummarizingObserver(self.llm_client)
         summary_observer.observe_in_background(payload.messages.copy())
-        topic_observer = TopicClassifyingObserver(self.llm_client)
+        topic_observer = TopicClassifyingObserver(self.llm_client, self.search_client)
         topic_observer.observe_in_background(payload.messages.copy())
 
         # Recall
@@ -447,9 +447,9 @@ class ProkaryoteV1(WebBase):
         if len(context_recall_text.split()) > 10:
             context_recall_text = await summary_observer.get_summary()
         if context_recall_text == tool_recall_text:
-            context_recall_emb = tool_recall_emb = (await get_query_embs([context_recall_text]))[0]
+            context_recall_emb = tool_recall_emb = (await get_query_embs((context_recall_text,)))[0]
         else:
-            context_recall_emb, tool_recall_emb = await get_query_embs([context_recall_text, tool_recall_text])
+            context_recall_emb, tool_recall_emb = await get_query_embs((context_recall_text, tool_recall_text))
         logger.info(
             f"Recall text:\n"
             f"- Context: {context_recall_text}\n"

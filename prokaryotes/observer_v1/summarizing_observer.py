@@ -19,7 +19,7 @@ class MessageSummarizingObserver(Observer):
     def __init__(self, llm_client: LLMClient, **kwargs):
         super().__init__(llm_client, **kwargs)
 
-    def developer_message(self, messages: list[ChatMessage]) -> str | None:
+    async def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
             "---",
             "## Instructions",

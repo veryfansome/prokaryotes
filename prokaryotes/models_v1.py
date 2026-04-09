@@ -107,7 +107,7 @@ class TextEmbeddingPrompt(Enum):
 class TextEmbeddingRequest(BaseModel):
     batch_size: int = 1
     prompt: TextEmbeddingPrompt
-    texts: list[str]
+    texts: tuple[str, ...]
     truncate_to: int | None = None
 
 

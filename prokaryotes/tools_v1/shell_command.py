@@ -83,7 +83,7 @@ class ShellCommandCallback(FunctionCallOutputIndexer, FunctionToolCallback):
             arguments_dict = json.loads(arguments)
             command = arguments_dict["command"]
             reason = arguments_dict["reason"]
-            reason_emb = (await get_document_embs([reason]))[0]
+            reason_emb = (await get_document_embs((reason,)))[0]
             return await self.search_client.index_tool_call(
                 call_id=call_id,
                 labels=labels,
