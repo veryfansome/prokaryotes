@@ -23,7 +23,9 @@ topic_mappings = {
             "similarity": "cosine",
         },
         "name": {
-            "type": "text",
+            "type":            "text",
+            "analyzer":        "standard",
+            "search_analyzer": "custom_query_analyzer",
             "fields": {
                 "keyword": {
                     "type": "keyword",
@@ -87,12 +89,29 @@ class TopicSearcher(ABC):
             return []
         query = {
             "should": [
-                {"match": {"name": {"query": match, "boost": lexical_match_boost}}},
-                {"term": {"name.keyword": {"value": match, "boost": keyword_match_boost}}}
+                {
+                    "match": {
+                        "name": {
+                            "query": match,
+                            "boost": lexical_match_boost,
+                            "_name": "topic_name_match",
+                        }
+                    }
+                },
+                {
+                    "term": {
+                        "name.keyword": {
+                            "value": match,
+                            "boost": keyword_match_boost,
+                            "_name": "topic_name_exact",
+                        }
+                    }
+                }
             ]
         }
         search_kwargs = {
             "index": "topics",
+            "include_named_queries_score": True,
             "query": {
                 "bool": query,
             },
@@ -111,7 +130,9 @@ class TopicSearcher(ABC):
         hits = response["hits"]["hits"]
         for h in hits:
             name = h['_source']['name']
-            logger.debug(f"Score: {h['_score']:.4f} | Topic: {name}")
+            logger.debug(
+                f"Score: {h['_score']:.4f} | matched_queries: {h.get('matched_queries')} | Topic: {name}"
+            )
         seen_topics = set()
         topics = []
         for h in hits:
