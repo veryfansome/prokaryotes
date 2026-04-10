@@ -144,9 +144,31 @@ class NamedEntitySearcher(ABC):
         response = await self.es.search(**search_kwargs)
         hits = response["hits"]["hits"]
         for h in hits:
-            name = h['_source']['name']
+            name = h["_source"]["name"]
+            total_score = float(h.get("_score", 0.0) or 0.0)
+            matched_queries = h.get("matched_queries")
+            lexical_score = 0.0
+            matched_query_names = set()
+            if isinstance(matched_queries, dict):
+                matched_query_names = set(matched_queries)
+                lexical_score = sum(
+                    value for value in matched_queries.values()
+                    if isinstance(value, (int, float))
+                )
+            elif isinstance(matched_queries, list):
+                matched_query_names = {
+                    matched_query for matched_query in matched_queries if isinstance(matched_query, str)
+                }
+            semantic_score = max(0.0, total_score - lexical_score)
+            keyword_hit = "named_entity_name_exact" in matched_query_names
             logger.debug(
-                f"Score: {h['_score']:.4f} | matched_queries: {h.get('matched_queries')} | Named entity: {name}"
+                f"Score: {total_score:.4f}"
+                f" | lex: {lexical_score:.4f}"
+                f" | sem: {semantic_score:.4f}"
+                f" | final: {total_score:.4f}"
+                f" | keyword: {keyword_hit}"
+                f" | matched: {sorted(matched_query_names)}"
+                f" | named_entity: {name}"
             )
         return list(dict.fromkeys(
             named_entity for named_entity in (h["_source"]["name"] for h in hits)
