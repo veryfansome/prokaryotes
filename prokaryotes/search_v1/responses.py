@@ -40,11 +40,11 @@ class ResponseSearcher(ABC):
 
     async def index_response(
             self,
-            prompt_uuid: str,
             about: list[str],
             labels: list[str],
-            response_text: str,
+            prompt_uuid: str,
             response_emb: list[float],
+            response_text: str,
     ):
         now = datetime.now(UTC)
         doc = ResponseDoc(about=about, created_at=now, doc_id=prompt_uuid, labels=labels, text=response_text)

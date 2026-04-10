@@ -84,7 +84,8 @@ class PromptContext:
 
 
 class PromptDoc(BaseModel):
-    about: list[str]
+    topics: list[str] = Field(default_factory=list)
+    named_entities: list[str] = Field(default_factory=list)
     created_at: datetime
     doc_id: str | None = Field(default=None, exclude=True)
     labels: list[str] = Field(default_factory=list)

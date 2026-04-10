@@ -20,9 +20,16 @@ logger = logging.getLogger(__name__)
 
 
 class NamedEntityObserver(Observer):
-    def __init__(self, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+    def __init__(
+            self,
+            llm_client: LLMClient,
+            search_client: SearchClient,
+            seed_entities: list[str] | None = None,
+            **kwargs
+    ):
         super().__init__(llm_client, **kwargs)
         self.search_client = search_client
+        self.seed_entities = seed_entities or []
 
     async def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
@@ -48,13 +55,25 @@ class NamedEntityObserver(Observer):
                 " explicitly named elsewhere in the conversation."
             ),
         ]
+        max_example_entities = 10
+        example_entities = [named_entity for named_entity in self.seed_entities if named_entity][:max_example_entities]
         last_user_message = next((msg for msg in reversed(messages) if msg.role == "user"), None)
-        if last_user_message:
+        if last_user_message and len(example_entities) < max_example_entities:
             search_text = await run_in_threadpool(normalize_text_for_search, last_user_message.content)
             search_emb = (await get_query_embs((search_text,)))[0]
-            similar_entities = await self.search_client.search_named_entities(search_text, search_emb)
-            if similar_entities:
-                message_parts.append(f"- For example: {similar_entities}")
+            similar_entities = await self.search_client.search_named_entities(
+                search_text,
+                search_emb,
+                excluded_entities=self.seed_entities,
+                keyword_match_boost=1.0,
+                knn_boost=3.0,
+                lexical_match_boost=1.0,
+                min_score=0.0,  # Rely on semantic similarity, rather than lexical similarity
+            )
+            knn_example_limit = max_example_entities - len(example_entities)
+            example_entities.extend(similar_entities[:knn_example_limit])
+        if example_entities:
+            message_parts.append(f"- For example: {example_entities[:max_example_entities]}")
         return "\n".join(message_parts)
 
     async def get_named_entities(self) -> list[str]:

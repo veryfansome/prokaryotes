@@ -64,7 +64,7 @@ class RecallResponsesCallback(FunctionToolCallback):
                 topic_search_tasks.append(asyncio.create_task(
                     self.search_client.search_topics(
                         query, query_embs[idx],
-                        min_score=0.75,
+                        min_lexical_score=0.75,
                     )
                 ))
             for topic_results in await asyncio.gather(*topic_search_tasks):

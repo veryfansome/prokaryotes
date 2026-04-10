@@ -60,13 +60,13 @@ async def test_index_topics_normalizes_and_dedupes(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_search_topics_normalizes_query_and_results(es_mock: AsyncMock):
+async def test_search_topics_preserves_query_and_dedupes_exact_results(es_mock: AsyncMock):
     searcher = DummyTopicSearcher(es_mock)
     es_mock.search.return_value = {
         "hits": {
             "hits": [
                 {"_score": 3.0, "_source": {"name": "Nathan Hale’s Hazardous Tales"}},
-                {"_score": 2.0, "_source": {"name": "Nathan Hale's Hazardous Tales"}},
+                {"_score": 2.0, "_source": {"name": "Nathan Hale’s Hazardous Tales"}},
             ]
         }
     }
@@ -74,10 +74,27 @@ async def test_search_topics_normalizes_query_and_results(es_mock: AsyncMock):
     topics = await searcher.search_topics(
         match="Nathan Hale’s Hazardous Tales",
         match_emb=None,
-        min_score=0.5,
+        min_lexical_score=0.5,
     )
 
-    assert topics == ["Nathan Hale's Hazardous Tales"]
+    assert topics == ["Nathan Hale’s Hazardous Tales"]
     kwargs = es_mock.search.await_args.kwargs
     assert kwargs["min_score"] == 0.5
-    assert kwargs["query"]["bool"]["should"][1]["term"]["name.keyword"]["value"] == "Nathan Hale's Hazardous Tales"
+    assert kwargs["query"]["bool"]["should"][1]["term"]["name.keyword"]["value"] == "Nathan Hale’s Hazardous Tales"
+
+
+@pytest.mark.asyncio
+async def test_search_topics_excludes_seed_topics_from_lexical_and_knn(es_mock: AsyncMock):
+    searcher = DummyTopicSearcher(es_mock)
+    es_mock.search.return_value = {"hits": {"hits": []}}
+
+    await searcher.search_topics(
+        match="reading",
+        match_emb=[0.1, 0.2],
+        excluded_topics=["Seed Topic", "Seed Topic", ""],
+        min_lexical_score=0.0,
+    )
+
+    kwargs = es_mock.search.await_args.kwargs
+    assert kwargs["query"]["bool"]["must_not"][0]["terms"]["name.keyword"] == ["Seed Topic"]
+    assert kwargs["knn"]["filter"]["bool"]["must_not"][0]["terms"]["name.keyword"] == ["Seed Topic"]

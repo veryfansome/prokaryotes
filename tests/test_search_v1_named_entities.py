@@ -60,13 +60,13 @@ async def test_index_named_entities_normalizes_and_dedupes(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_search_named_entities_normalizes_query_and_results(es_mock: AsyncMock):
+async def test_search_named_entities_preserves_query_and_dedupes_exact_results(es_mock: AsyncMock):
     searcher = DummyNamedEntitySearcher(es_mock)
     es_mock.search.return_value = {
         "hits": {
             "hits": [
                 {"_score": 3.0, "_source": {"name": "Nathan Hale’s Hazardous Tales"}},
-                {"_score": 2.0, "_source": {"name": "Nathan Hale's Hazardous Tales"}},
+                {"_score": 2.0, "_source": {"name": "Nathan Hale’s Hazardous Tales"}},
             ]
         }
     }
@@ -77,8 +77,25 @@ async def test_search_named_entities_normalizes_query_and_results(es_mock: Async
         min_score=0.5,
     )
 
-    assert named_entities == ["Nathan Hale's Hazardous Tales"]
+    assert named_entities == ["Nathan Hale’s Hazardous Tales"]
     kwargs = es_mock.search.await_args.kwargs
     assert kwargs["index"] == "named-entities"
     assert kwargs["min_score"] == 0.5
-    assert kwargs["query"]["bool"]["should"][1]["term"]["name.keyword"]["value"] == "Nathan Hale's Hazardous Tales"
+    assert kwargs["query"]["bool"]["should"][1]["term"]["name.keyword"]["value"] == "Nathan Hale’s Hazardous Tales"
+
+
+@pytest.mark.asyncio
+async def test_search_named_entities_excludes_seed_entities_from_lexical_and_knn(es_mock: AsyncMock):
+    searcher = DummyNamedEntitySearcher(es_mock)
+    es_mock.search.return_value = {"hits": {"hits": []}}
+
+    await searcher.search_named_entities(
+        match="reading",
+        match_emb=[0.1, 0.2],
+        excluded_entities=["Seed Entity", "Seed Entity", ""],
+        min_score=0.0,
+    )
+
+    kwargs = es_mock.search.await_args.kwargs
+    assert kwargs["query"]["bool"]["must_not"][0]["terms"]["name.keyword"] == ["Seed Entity"]
+    assert kwargs["knn"]["filter"]["bool"]["must_not"][0]["terms"]["name.keyword"] == ["Seed Entity"]
