@@ -172,17 +172,18 @@ class ProkaryoteV1(WebBase):
         )
         prompt_doc, _, _, _ = await asyncio.gather(
             self.search_client.index_prompt(
-                about=topics,
-                prompt_uuid=prompt_uuid,
                 labels=common_labels,
                 messages=prompt_messages,
+                named_entities=named_entities,
+                prompt_uuid=prompt_uuid,
+                topics=topics,
             ),
             self.search_client.index_response(
-                prompt_uuid=prompt_uuid,
                 about=topics,
                 labels=common_labels,
-                response_text=generated_response,
+                prompt_uuid=prompt_uuid,
                 response_emb=generated_response_emb,
+                response_text=generated_response,
             ),
             self.search_client.index_topics(topics, topic_embs),
             self.search_client.index_named_entities(named_entities, named_entity_embs),
@@ -432,11 +433,26 @@ class ProkaryoteV1(WebBase):
 
         # Pre-recall observers 
 
-        named_entity_observer = NamedEntityObserver(self.llm_client, self.search_client)
+        previous_prompt = await self.search_client.get_previous_prompt_by_conversation(payload.conversation_uuid)
+        seed_topics = previous_prompt.topics if previous_prompt else []
+        seed_named_entities = previous_prompt.named_entities if previous_prompt else []
+        if previous_prompt:
+            logger.info(
+                "Using previous prompt as observer seed source:"
+                f" {len(seed_topics)} topics and {len(seed_named_entities)} named entities"
+            )
+
+        named_entity_observer = NamedEntityObserver(
+            self.llm_client, self.search_client,
+            seed_entities=seed_named_entities,
+        )
         named_entity_observer.observe_in_background(payload.messages.copy())
         summary_observer = MessageSummarizingObserver(self.llm_client)
         summary_observer.observe_in_background(payload.messages.copy())
-        topic_observer = TopicClassifyingObserver(self.llm_client, self.search_client)
+        topic_observer = TopicClassifyingObserver(
+            self.llm_client, self.search_client,
+            seed_topics=seed_topics,
+        )
         topic_observer.observe_in_background(payload.messages.copy())
 
         # Recall

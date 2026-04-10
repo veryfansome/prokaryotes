@@ -77,6 +77,7 @@ class TopicSearcher(ABC):
             self,
             match: str,
             match_emb: list[float],
+            excluded_topics: list[str] | None = None,
             keyword_match_boost: float = 2.0,
             knn_boost: float = 1.0,
             knn_num_candidates: int = 100,
@@ -84,9 +85,15 @@ class TopicSearcher(ABC):
             lexical_match_boost: float = 1.0,
             min_lexical_score: float = 0.5,
     ) -> list[str]:
-        match = normalize_text_for_identity(match)
         if not match:
             return []
+        deduped_excluded_topics = []
+        seen_excluded_topics = set()
+        for topic in excluded_topics or []:
+            if not topic or topic in seen_excluded_topics:
+                continue
+            seen_excluded_topics.add(topic)
+            deduped_excluded_topics.append(topic)
         query = {
             "should": [
                 {
@@ -109,6 +116,8 @@ class TopicSearcher(ABC):
                 }
             ]
         }
+        if deduped_excluded_topics:
+            query["must_not"] = [{"terms": {"name.keyword": deduped_excluded_topics}}]
         search_kwargs = {
             "index": "topics",
             "include_named_queries_score": True,
@@ -126,6 +135,12 @@ class TopicSearcher(ABC):
                 "num_candidates": knn_num_candidates,
                 "k": knn_top_k,
             }
+            if deduped_excluded_topics:
+                search_kwargs["knn"]["filter"] = {
+                    "bool": {
+                        "must_not": [{"terms": {"name.keyword": deduped_excluded_topics}}],
+                    }
+                }
         response = await self.es.search(**search_kwargs)
         hits = response["hits"]["hits"]
         for h in hits:
@@ -133,12 +148,7 @@ class TopicSearcher(ABC):
             logger.debug(
                 f"Score: {h['_score']:.4f} | matched_queries: {h.get('matched_queries')} | Topic: {name}"
             )
-        seen_topics = set()
-        topics = []
-        for h in hits:
-            topic = normalize_text_for_identity(h["_source"]["name"])
-            if not topic or topic in seen_topics:
-                continue
-            seen_topics.add(topic)
-            topics.append(topic)
-        return topics
+        return list(dict.fromkeys(
+            topic for topic in (h["_source"]["name"] for h in hits)
+            if topic
+        ))

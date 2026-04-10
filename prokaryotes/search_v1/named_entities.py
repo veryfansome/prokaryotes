@@ -77,6 +77,7 @@ class NamedEntitySearcher(ABC):
             self,
             match: str,
             match_emb: list[float],
+            excluded_entities: list[str] | None = None,
             keyword_match_boost: float = 2.0,
             knn_boost: float = 1.0,
             knn_num_candidates: int = 100,
@@ -84,9 +85,15 @@ class NamedEntitySearcher(ABC):
             lexical_match_boost: float = 1.0,
             min_score: float = 0.5,
     ) -> list[str]:
-        match = normalize_text_for_identity(match)
         if not match:
             return []
+        deduped_excluded_entities = []
+        seen_excluded_entities = set()
+        for named_entity in excluded_entities or []:
+            if not named_entity or named_entity in seen_excluded_entities:
+                continue
+            seen_excluded_entities.add(named_entity)
+            deduped_excluded_entities.append(named_entity)
         query = {
             "should": [
                 {
@@ -109,6 +116,8 @@ class NamedEntitySearcher(ABC):
                 }
             ]
         }
+        if deduped_excluded_entities:
+            query["must_not"] = [{"terms": {"name.keyword": deduped_excluded_entities}}]
         search_kwargs = {
             "index": "named-entities",
             "include_named_queries_score": True,
@@ -126,6 +135,12 @@ class NamedEntitySearcher(ABC):
                 "num_candidates": knn_num_candidates,
                 "k": knn_top_k,
             }
+            if deduped_excluded_entities:
+                search_kwargs["knn"]["filter"] = {
+                    "bool": {
+                        "must_not": [{"terms": {"name.keyword": deduped_excluded_entities}}],
+                    }
+                }
         response = await self.es.search(**search_kwargs)
         hits = response["hits"]["hits"]
         for h in hits:
@@ -133,12 +148,7 @@ class NamedEntitySearcher(ABC):
             logger.debug(
                 f"Score: {h['_score']:.4f} | matched_queries: {h.get('matched_queries')} | Named entity: {name}"
             )
-        seen_named_entities = set()
-        named_entities = []
-        for h in hits:
-            named_entity = normalize_text_for_identity(h["_source"]["name"])
-            if not named_entity or named_entity in seen_named_entities:
-                continue
-            seen_named_entities.add(named_entity)
-            named_entities.append(named_entity)
-        return named_entities
+        return list(dict.fromkeys(
+            named_entity for named_entity in (h["_source"]["name"] for h in hits)
+            if named_entity
+        ))

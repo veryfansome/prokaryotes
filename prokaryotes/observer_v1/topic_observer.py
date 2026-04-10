@@ -20,9 +20,16 @@ logger = logging.getLogger(__name__)
 
 
 class TopicClassifyingObserver(Observer):
-    def __init__(self, llm_client: LLMClient, search_client: SearchClient, **kwargs):
+    def __init__(
+            self,
+            llm_client: LLMClient,
+            search_client: SearchClient,
+            seed_topics: list[str] | None = None,
+            **kwargs
+    ):
         super().__init__(llm_client, **kwargs)
         self.search_client = search_client
+        self.seed_topics = seed_topics or []
 
     async def developer_message(self, messages: list[ChatMessage]) -> str | None:
         message_parts = [
@@ -39,21 +46,25 @@ class TopicClassifyingObserver(Observer):
                 " events, or works) in `topic_words`."
             ),
         ]
+        max_example_topics = 10
+        example_topics = [topic for topic in self.seed_topics if topic][:max_example_topics]
         last_user_message = next((msg for msg in reversed(messages) if msg.role == "user"), None)
-        if last_user_message:
-            # TODO: Graph search of topics from previous messages in conversation
+        if last_user_message and len(example_topics) < max_example_topics:
             search_text = await run_in_threadpool(normalize_text_for_search, last_user_message.content)
             search_emb = (await get_query_embs((search_text,)))[0]
             similar_topics = await self.search_client.search_topics(
                 search_text,
                 search_emb,
+                excluded_topics=self.seed_topics,
                 keyword_match_boost=1.0,
                 knn_boost=3.0,
                 lexical_match_boost=1.0,
                 min_lexical_score=0.0,  # Rely on semantic similarity, rather than lexical similarity
             )
-            if similar_topics:
-                message_parts.append(f"- For example: {similar_topics}")
+            knn_example_limit = max_example_topics - len(example_topics)
+            example_topics.extend(similar_topics[:knn_example_limit])
+        if example_topics:
+            message_parts.append(f"- For example: {example_topics[:max_example_topics]}")
         return "\n".join(message_parts)
 
     async def get_topics(self) -> list[str]:
