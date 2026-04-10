@@ -74,7 +74,7 @@ async def test_search_topics_normalizes_query_and_results(es_mock: AsyncMock):
     topics = await searcher.search_topics(
         match="Nathan Hale’s Hazardous Tales",
         match_emb=None,
-        min_score=0.5,
+        min_lexical_score=0.5,
     )
 
     assert topics == ["Nathan Hale's Hazardous Tales"]

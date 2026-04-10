@@ -181,7 +181,7 @@ class ToolCallSearcher(TopicSearcher, ABC):
         if match and match_emb:
             similar_topics = await self.search_topics(
                 match, match_emb,
-                min_score=0.75,
+                min_lexical_score=0.75,
             )
         match_tokens = []
         if match:

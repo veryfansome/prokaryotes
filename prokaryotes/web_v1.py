@@ -337,7 +337,7 @@ class ProkaryoteV1(WebBase):
                 self.search_client.search_topics(
                     match=topic,
                     match_emb=topic_emb,
-                    min_score=min_score,
+                    min_lexical_score=min_score,
                 )
             ))
         similar_topics_by_topic = await asyncio.gather(*search_tasks)

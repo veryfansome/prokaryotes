@@ -41,9 +41,17 @@ class TopicClassifyingObserver(Observer):
         ]
         last_user_message = next((msg for msg in reversed(messages) if msg.role == "user"), None)
         if last_user_message:
+            # TODO: Graph search of topics from previous messages in conversation
             search_text = await run_in_threadpool(normalize_text_for_search, last_user_message.content)
             search_emb = (await get_query_embs((search_text,)))[0]
-            similar_topics = await self.search_client.search_topics(search_text, search_emb)
+            similar_topics = await self.search_client.search_topics(
+                search_text,
+                search_emb,
+                keyword_match_boost=1.0,
+                knn_boost=3.0,
+                lexical_match_boost=1.0,
+                min_lexical_score=0.0,  # Rely on semantic similarity, rather than lexical similarity
+            )
             if similar_topics:
                 message_parts.append(f"- For example: {similar_topics}")
         return "\n".join(message_parts)

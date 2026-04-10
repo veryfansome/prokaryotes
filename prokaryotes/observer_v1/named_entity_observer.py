@@ -50,9 +50,17 @@ class NamedEntityObserver(Observer):
         ]
         last_user_message = next((msg for msg in reversed(messages) if msg.role == "user"), None)
         if last_user_message:
+            # TODO: Graph search of entities from previous messages in conversation
             search_text = await run_in_threadpool(normalize_text_for_search, last_user_message.content)
             search_emb = (await get_query_embs((search_text,)))[0]
-            similar_entities = await self.search_client.search_named_entities(search_text, search_emb)
+            similar_entities = await self.search_client.search_named_entities(
+                search_text,
+                search_emb,
+                keyword_match_boost=1.0,
+                knn_boost=3.0,
+                lexical_match_boost=1.0,
+                min_score=0.0,  # Rely on semantic similarity, rather than lexical similarity
+            )
             if similar_entities:
                 message_parts.append(f"- For example: {similar_entities}")
         return "\n".join(message_parts)

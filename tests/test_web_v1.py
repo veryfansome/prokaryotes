@@ -189,7 +189,7 @@ async def test_get_similar_topic_pairs_filters_to_extremely_similar_matches():
     kwargs = web.search_client.search_topics.await_args.kwargs
     assert kwargs["match"] == "Nathan Hale's Hazardous Tales"
     assert kwargs["match_emb"] == [0.1, 0.2]
-    assert kwargs["min_score"] == 0.95
+    assert kwargs["min_lexical_score"] == 0.95
 
 
 @pytest.mark.asyncio

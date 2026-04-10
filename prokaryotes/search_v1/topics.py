@@ -75,17 +75,20 @@ class TopicSearcher(ABC):
             self,
             match: str,
             match_emb: list[float],
+            keyword_match_boost: float = 2.0,
+            knn_boost: float = 1.0,
             knn_num_candidates: int = 100,
             knn_top_k: int = 10,
-            min_score: float = 0.5,
+            lexical_match_boost: float = 1.0,
+            min_lexical_score: float = 0.5,
     ) -> list[str]:
         match = normalize_text_for_identity(match)
         if not match:
             return []
         query = {
             "should": [
-                {"match": {"name": {"query": match, "boost": 1.0}}},
-                {"term": {"name.keyword": {"value": match, "boost": 2.0}}}
+                {"match": {"name": {"query": match, "boost": lexical_match_boost}}},
+                {"term": {"name.keyword": {"value": match, "boost": keyword_match_boost}}}
             ]
         }
         search_kwargs = {
@@ -94,13 +97,13 @@ class TopicSearcher(ABC):
                 "bool": query,
             },
         }
-        if min_score is not None:
-            search_kwargs["min_score"] = min_score
+        if min_lexical_score is not None:
+            search_kwargs["min_score"] = min_lexical_score
         if match_emb:
             search_kwargs["knn"] = {
                 "field": "emb",
                 "query_vector": match_emb,
-                "boost": 1.0,
+                "boost": knn_boost,
                 "num_candidates": knn_num_candidates,
                 "k": knn_top_k,
             }
