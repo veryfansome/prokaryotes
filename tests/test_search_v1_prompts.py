@@ -28,7 +28,7 @@ def es_mock() -> AsyncMock:
 
 
 @pytest.mark.asyncio
-async def test_get_previous_prompt_by_conversation_returns_latest(es_mock: AsyncMock):
+async def test_get_last_prompt_returns_latest(es_mock: AsyncMock):
     searcher = DummyPromptSearcher(es_mock)
     created_at = datetime(2026, 4, 10, tzinfo=UTC)
     es_mock.search.return_value = {
@@ -37,20 +37,22 @@ async def test_get_previous_prompt_by_conversation_returns_latest(es_mock: Async
                 {
                     "_id": "prompt-123",
                     "_source": {
-                        "topics": ["historical comics", "reading"],
-                        "named_entities": ["Donner Dinner Party"],
                         "created_at": created_at,
                         "labels": ["conversation:abc", "user:1"],
                         "messages": [
                             {"role": "user", "content": "What should we read next?", "type": "message"},
                         ],
+                        "named_entities": ["Donner Dinner Party"],
+                        "summary": "The user wants to know what to read next.",
+                        "summary_emb": [0.0, 0.1, 0.2],
+                        "topics": ["historical comics", "reading"],
                     },
                 },
             ]
         }
     }
 
-    prompt = await searcher.get_previous_prompt_by_conversation("abc")
+    prompt = await searcher.get_last_prompt("abc")
 
     assert prompt is not None
     assert prompt.doc_id == "prompt-123"
@@ -69,6 +71,8 @@ async def test_index_prompt_persists_topics_and_named_entities(es_mock: AsyncMoc
         messages=[ChatMessage(role="user", content="we read one dead spy")],
         named_entities=["Donner Dinner Party"],
         prompt_uuid="prompt-xyz",
+        summary="The user read One Dead Spy.",
+        summary_emb=[0.0, 0.1, 0.2],
         topics=["historical comics", "reading"],
     )
 

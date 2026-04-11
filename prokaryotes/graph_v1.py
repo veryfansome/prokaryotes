@@ -96,6 +96,24 @@ class GraphClient:
         except Exception:
             logger.exception(f"Failed to execute: {cypher}")
 
+    async def create_prompt_node(self, prompt: PromptDoc):
+        cypher = """
+        MERGE (p:Prompt {doc_id: $input_struct.doc_id})
+        SET p.labels = $input_struct.labels
+        SET p.summary = $input_struct.summary
+        """
+        async def _node(tx):
+            await tx.run(cypher, input_struct={
+                'doc_id': prompt.doc_id,
+                'labels': prompt.labels,
+                'summary': prompt.summary,
+            })
+        try:
+            async with self.driver.session() as session:
+                return await session.execute_write(_node)
+        except Exception:
+            logger.exception(f"Failed to execute: {cypher}")
+
     async def create_similar_topic_edges(self, topic_pairs: list[tuple[str, str]]):
         cypher = """
         UNWIND $input_structs AS input_struct

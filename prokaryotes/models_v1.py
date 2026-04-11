@@ -84,12 +84,13 @@ class PromptContext:
 
 
 class PromptDoc(BaseModel):
-    topics: list[str] = Field(default_factory=list)
-    named_entities: list[str] = Field(default_factory=list)
     created_at: datetime
     doc_id: str | None = Field(default=None, exclude=True)
     labels: list[str] = Field(default_factory=list)
     messages: list[ChatMessage]
+    named_entities: list[str] = Field(default_factory=list)
+    summary: str
+    topics: list[str] = Field(default_factory=list)
 
 
 class ResponseDoc(BaseModel):

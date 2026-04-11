@@ -159,7 +159,7 @@ class ProkaryoteV1(WebBase):
             ),
             (
                 summary,
-                summary_embs,
+                summary_emb,
             ),
         ) = await asyncio.gather(
             self.get_generated_response_emb(generated_response),
@@ -176,6 +176,8 @@ class ProkaryoteV1(WebBase):
                 messages=prompt_messages,
                 named_entities=named_entities,
                 prompt_uuid=prompt_uuid,
+                summary=summary,
+                summary_emb=summary_emb,
                 topics=topics,
             ),
             self.search_client.index_response(
@@ -193,6 +195,10 @@ class ProkaryoteV1(WebBase):
         # TODO: Evaluate recalled tool outs and facts?
 
         tasks = []
+        if prompt_doc:
+            tasks.append(asyncio.create_task(
+                self.graph_client.create_prompt_node(prompt_doc)
+            ))
 
         for call_id, output in func_call_outputs.items():
             call_resp_idx, call_resp = func_call_resp[call_id]
@@ -206,7 +212,7 @@ class ProkaryoteV1(WebBase):
                             labels=common_labels,
                             output=output,
                             prompt_summary=summary,
-                            prompt_summary_emb=summary_embs,
+                            prompt_summary_emb=summary_emb,
                             topics=topics,
                         )
                         if tool_call and prompt_doc:
@@ -433,12 +439,12 @@ class ProkaryoteV1(WebBase):
 
         # Pre-recall observers 
 
-        previous_prompt = await self.search_client.get_previous_prompt_by_conversation(payload.conversation_uuid)
-        seed_topics = previous_prompt.topics if previous_prompt else []
-        seed_named_entities = previous_prompt.named_entities if previous_prompt else []
-        if previous_prompt:
+        last_prompt = await self.search_client.get_last_prompt(payload.conversation_uuid)
+        seed_topics = last_prompt.topics if last_prompt else []
+        seed_named_entities = last_prompt.named_entities if last_prompt else []
+        if last_prompt:
             logger.info(
-                "Using previous prompt as observer seed source:"
+                "Using last prompt as observer seed source:"
                 f" {len(seed_topics)} topics and {len(seed_named_entities)} named entities"
             )
 

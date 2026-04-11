@@ -31,6 +31,17 @@ prompt_mappings = {
             }
         },
         "named_entities": {"type": "keyword"},
+        "summary": {
+            "type":            "text",
+            "analyzer":        "standard",
+            "search_analyzer": "custom_query_analyzer",
+        },
+        "summary_emb": {
+            "type":       "dense_vector",
+            "dims":       256,
+            "index":      True,
+            "similarity": "cosine",
+        },
         "topics":         {"type": "keyword"},
     }
 }
@@ -42,7 +53,7 @@ class PromptSearcher(ABC):
     def es(self) -> AsyncElasticsearch:
         pass
 
-    async def get_previous_prompt_by_conversation(self, conversation_uuid: str) -> PromptDoc | None:
+    async def get_last_prompt(self, conversation_uuid: str) -> PromptDoc | None:
         conversation_label = f"conversation:{conversation_uuid}"
         try:
             response = await self.es.search(
@@ -72,6 +83,8 @@ class PromptSearcher(ABC):
             messages: list[ChatMessage],
             named_entities: list[str],
             prompt_uuid: str,
+            summary: str,
+            summary_emb: list[float],
             topics: list[str],
     ) -> PromptDoc | None:
         now = datetime.now(UTC)
@@ -81,13 +94,14 @@ class PromptSearcher(ABC):
             labels=labels,
             messages=messages,
             named_entities=named_entities,
+            summary=summary,
             topics=topics,
         )
         try:
             await self.es.index(
                 id=prompt_uuid,
                 index="prompts",
-                document=doc.model_dump(exclude={"messages": {"__all__": "type"}})
+                document=(doc.model_dump(exclude={"messages": {"__all__": "type"}} | {"summary_emb": summary_emb}))
             )
             return doc
         except Exception:
