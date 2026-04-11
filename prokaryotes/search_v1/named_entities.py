@@ -165,9 +165,7 @@ class NamedEntitySearcher(ABC):
                 f"Score: {total_score:.4f}"
                 f" | lex: {lexical_score:.4f}"
                 f" | sem: {semantic_score:.4f}"
-                f" | final: {total_score:.4f}"
                 f" | keyword: {keyword_hit}"
-                f" | matched: {sorted(matched_query_names)}"
                 f" | named_entity: {name}"
             )
         return list(dict.fromkeys(
