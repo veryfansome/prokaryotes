@@ -4,6 +4,7 @@ import logging
 from dotenv import load_dotenv
 
 from prokaryotes.search_v1 import get_elastic_search
+from prokaryotes.search_v1.context_partitions import context_partition_mappings
 from prokaryotes.search_v1.named_entities import named_entity_mappings
 from prokaryotes.search_v1.topics import topic_mappings
 from prokaryotes.utils_v1.logging_utils import setup_logging
@@ -16,6 +17,7 @@ setup_logging()
 
 async def sync_mappings(replicas: int = 0):
     schemas = {
+        "context-partitions": context_partition_mappings,
         "named-entities": named_entity_mappings,
         "topics": topic_mappings,
     }

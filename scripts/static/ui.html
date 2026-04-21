@@ -196,6 +196,35 @@
             color: #1d4ed8;
         }
 
+        .context-status {
+            max-width: 48rem;
+            margin: 0 auto 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .context-meter {
+            flex: 1;
+            height: 3px;
+            overflow: hidden;
+            border-radius: 9999px;
+            background-color: #e5e7eb;
+        }
+
+        .context-fill {
+            width: 0;
+            height: 100%;
+            background-color: #2563eb;
+            transition: width 0.2s ease;
+        }
+
+        .compaction-indicator {
+            font-size: 0.75rem;
+            color: #6b7280;
+            white-space: nowrap;
+        }
+
         .chat-input {
             flex: 1;
             padding: 0.8rem 1rem;
@@ -296,6 +325,12 @@
     </div>
 
     <div class="input-container">
+        <div class="context-status">
+            <div class="context-meter" aria-hidden="true">
+                <div id="context-fill" class="context-fill"></div>
+            </div>
+            <div id="compaction-indicator" class="compaction-indicator" hidden>Compressing context...</div>
+        </div>
         <div class="input-wrapper">
             <textarea
                 id="chatInput"

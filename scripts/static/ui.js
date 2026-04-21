@@ -35,8 +35,22 @@ export function parseStreamPayloadLine(line) {
         return { type: 'text_delta', text_delta: payload.text_delta };
     }
 
-    if ('prompt_uuid' in payload) {
-        return { type: 'prompt', payload };
+    if ('partition_uuid' in payload) {
+        if (typeof payload.partition_uuid !== 'string') {
+            throw new Error('Invalid stream payload: partition_uuid must be a string');
+        }
+        return { type: 'partition_uuid', partition_uuid: payload.partition_uuid };
+    }
+
+    if ('context_pct' in payload) {
+        if (typeof payload.context_pct !== 'number') {
+            throw new Error('Invalid stream payload: context_pct must be a number');
+        }
+        return { type: 'context_pct', context_pct: payload.context_pct };
+    }
+
+    if ('compaction_pending' in payload) {
+        return { type: 'compaction_pending' };
     }
 
     return { type: 'unknown', payload };
@@ -113,6 +127,7 @@ export function createChatApp({
         role: 'root',
         content: '',
         parentId: null,
+        partitionUuid: null,
         children: [],
         activeChildId: null,
     });
@@ -133,6 +148,7 @@ export function createChatApp({
             role,
             content,
             parentId,
+            partitionUuid: null,
             children: [],
             activeChildId: null,
         };
@@ -236,6 +252,17 @@ export function createChatApp({
         });
     }
 
+    function getLastPartitionUuid(upToNodeId) {
+        const pathIds = getPathIdsToNode(upToNodeId);
+        for (let i = pathIds.length - 1; i >= 0; i -= 1) {
+            const node = getNode(pathIds[i]);
+            if (node && node.partitionUuid) {
+                return node.partitionUuid;
+            }
+        }
+        return null;
+    }
+
     function getUserSiblingIds(nodeId) {
         const node = getNode(nodeId);
         if (!node || node.role !== 'user' || node.parentId === null) {
@@ -251,6 +278,36 @@ export function createChatApp({
             const childNode = getNode(childId);
             return Boolean(childNode && childNode.role === 'user');
         });
+    }
+
+    let compactionIndicatorVisible = false;
+    let pendingCompactionPartitionUuid = null;
+
+    function setContextFill(pct) {
+        const el = doc.getElementById('context-fill');
+        if (el) {
+            const clampedPct = Math.max(0, Math.min(pct, 100));
+            el.style.width = `${clampedPct}%`;
+            el.title = `${pct}% of context window used`;
+        }
+    }
+
+    function showCompactionIndicator(partitionUuid) {
+        const el = doc.getElementById('compaction-indicator');
+        if (el) {
+            el.hidden = false;
+        }
+        compactionIndicatorVisible = true;
+        pendingCompactionPartitionUuid = partitionUuid;
+    }
+
+    function clearCompactionIndicator() {
+        const el = doc.getElementById('compaction-indicator');
+        if (el) {
+            el.hidden = true;
+        }
+        compactionIndicatorVisible = false;
+        pendingCompactionPartitionUuid = null;
     }
 
     // 4) rendering helpers
@@ -637,6 +694,7 @@ export function createChatApp({
                 },
                 body: JSON.stringify({
                     conversation_uuid: conversationUuid,
+                    partition_uuid: getLastPartitionUuid(parentNodeId),
                     messages: getConversationMessagesUpTo(parentNodeId),
                 }),
             });
@@ -651,10 +709,33 @@ export function createChatApp({
             const decoder = new TextDecoder();
             let fullResponse = '';
             let streamBuffer = '';
+            let receivedPartitionUuid = null;
 
             const processLine = line => {
                 const parsed = parseStreamPayloadLine(line);
                 if (!parsed) {
+                    return;
+                }
+
+                if (parsed.type === 'partition_uuid') {
+                    if (
+                        compactionIndicatorVisible
+                        && pendingCompactionPartitionUuid
+                        && parsed.partition_uuid !== pendingCompactionPartitionUuid
+                    ) {
+                        clearCompactionIndicator();
+                    }
+                    receivedPartitionUuid = parsed.partition_uuid;
+                    return;
+                }
+
+                if (parsed.type === 'context_pct') {
+                    setContextFill(parsed.context_pct);
+                    return;
+                }
+
+                if (parsed.type === 'compaction_pending') {
+                    showCompactionIndicator(receivedPartitionUuid);
                     return;
                 }
 
@@ -665,11 +746,6 @@ export function createChatApp({
                     fullResponse += parsed.text_delta;
                     assistantContent.textContent = fullResponse;
                     maybeAutoScrollDuringGeneration();
-                    return;
-                }
-
-                if (parsed.type === 'prompt') {
-                    console.log('Prompt:', parsed.payload);
                 }
             };
 
@@ -695,9 +771,15 @@ export function createChatApp({
                 processLine(finalLine);
             }
 
-            createMessageNode('assistant', fullResponse, parentNodeId);
+            const assistantNode = createMessageNode('assistant', fullResponse, parentNodeId);
+            if (assistantNode && receivedPartitionUuid) {
+                assistantNode.partitionUuid = receivedPartitionUuid;
+            }
             didCompleteResponse = true;
         } catch (error) {
+            if (compactionIndicatorVisible) {
+                clearCompactionIndicator();
+            }
             console.error('Error:', error);
             assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;
         } finally {

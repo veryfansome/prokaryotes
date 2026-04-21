@@ -126,7 +126,6 @@ services:
     volumes:
       - ./tests:/app/tests:ro
       - ~/.cache/huggingface:/root/.cache/huggingface:ro
-      - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
     environment: &common-model-env
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
@@ -147,23 +146,22 @@ services:
       elasticsearch:
         condition: service_healthy
 
-  emb:
-    networks: [prokaryotes]
-    container_name: prokaryotes-emb
-    image: "prokaryotes:latest"
-    pull_policy: build
-    ports:
-      - "8001:8001" # HTTP
-    working_dir: /app
-    volumes:
-      - ./.env:/app/.env:ro
-      - ~/.cache/huggingface:/root/.cache/huggingface:ro
-      - ~/.cache/prokaryotes:/root/.cache/prokaryotes:ro
-    environment: *common-model-env
-    command: ["uvicorn", "scripts.emb:v1.app", "--host", "0.0.0.0", "--port", "8001"]
-    depends_on:
-      unit-tests:
-        condition: service_completed_successfully
+  #emb:
+  #  networks: [prokaryotes]
+  #  container_name: prokaryotes-emb
+  #  image: "prokaryotes:latest"
+  #  pull_policy: build
+  #  ports:
+  #    - "8001:8001" # HTTP
+  #  working_dir: /app
+  #  volumes:
+  #    - ./.env:/app/.env:ro
+  #    - ~/.cache/huggingface:/root/.cache/huggingface:ro
+  #  environment: *common-model-env
+  #  command: ["uvicorn", "scripts.emb:v1.app", "--host", "0.0.0.0", "--port", "8001"]
+  #  depends_on:
+  #    unit-tests:
+  #      condition: service_completed_successfully
 
   web:
     networks: [prokaryotes]
@@ -175,9 +173,12 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
+      #- ./project/bugs/context_pct_reset/overlay/prokaryotes/anthropic_v1/__init__.py:/app/prokaryotes/anthropic_v1/__init__.py:ro
+      #- ./project/bugs/context_pct_reset/overlay/prokaryotes/api_v1/models.py:/app/prokaryotes/api_v1/models.py:ro
+      #- ./project/bugs/context_pct_reset/overlay/prokaryotes/openai_v1/__init__.py:/app/prokaryotes/openai_v1/__init__.py:ro
     environment:
-      WEB_HARNESS_IMPL: "anthropic"
-      #WEB_HARNESS_IMPL: "openai"
+      #WEB_HARNESS_IMPL: "anthropic"
+      WEB_HARNESS_IMPL: "openai"
     command: ["uvicorn", "scripts.web:harness.app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       elasticsearch:

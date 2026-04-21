@@ -10,6 +10,7 @@ from starsessions import load_session
 
 from prokaryotes.api_v1.models import (
     ChatConversation,
+    ContextPartition,
     ContextPartitionItem,
     FunctionToolCallback,
 )
@@ -17,6 +18,13 @@ from prokaryotes.openai_v1 import LLMClient
 from prokaryotes.tools_v1.shell_command import ShellCommandTool
 from prokaryotes.tools_v1.think import ThinkTool
 from prokaryotes.utils_v1 import system_message_utils
+from prokaryotes.utils_v1.llm_utils import (
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    COMPACTION_TOKEN_THRESHOLD_PCT,
+    DEFAULT_CONTEXT_WINDOW,
+    MODEL_CONTEXT_WINDOWS,
+    OPENAI_DEFAULT_MODEL,
+)
 from prokaryotes.web_v1 import WebBase
 
 logger = logging.getLogger(__name__)
@@ -44,7 +52,7 @@ class WebHarness(WebBase):
             conversation: ChatConversation,
             latitude: float = Query(None),
             longitude: float = Query(None),
-            model: str = Query("gpt-5.4"),
+            model: str = Query(OPENAI_DEFAULT_MODEL),
             reasoning_effort: str = Query(None),
             time_zone: str = Query(None),
     ):
@@ -64,7 +72,7 @@ class WebHarness(WebBase):
             think_tool.name: think_tool,
         }
 
-        developer_message_parts = []
+        developer_message_parts = list(context_partition.ancestor_summaries)
         developer_message_parts.append("# Tool usage")
         for name in sorted(tool_callbacks.keys()):
             developer_message_parts.extend(tool_callbacks[name].system_message_parts)
@@ -79,15 +87,24 @@ class WebHarness(WebBase):
             role="developer", content="\n".join(developer_message_parts)
         )
         context_partition.items.insert(0, developer_message)
-        logger.info(f"Web-harness developer message:\n{developer_message.content}")
+
+        # List so on_usage can mutate the flag in place; a plain bool passed to
+        # stream_and_finalize would be an immutable copy unreachable by nonlocal.
+        pending_compaction = [False]
 
         def on_usage(input_tokens: int, output_tokens: int) -> None:
-            # TODO: trigger compaction when input_tokens exceeds threshold
-            pass
+            context_window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+            context_pct = int(input_tokens / context_window * 100)
+            if context_pct >= COMPACTION_TOKEN_THRESHOLD_PCT:
+                pending_compaction[0] = True
+
+        async def compact(snapshot: ContextPartition) -> str:
+            return await self._summarize_and_compact(snapshot=snapshot, model=model)
 
         return StreamingResponse(
             self.stream_and_finalize(
                 context_partition=context_partition,
+                conversation_uuid=conversation.conversation_uuid,
                 response_generator=self.llm_client.stream_response(
                     context_partition=context_partition,
                     model=model,
@@ -95,7 +112,42 @@ class WebHarness(WebBase):
                     reasoning_effort=reasoning_effort,
                     stream_ndjson=True,
                     tool_callbacks=tool_callbacks,
-                )
+                ),
+                pending_compaction=pending_compaction,
+                compact_fn=compact,
             ),
             media_type="text/event-stream",
         )
+
+    async def _summarize_and_compact(
+            self,
+            snapshot: ContextPartition,
+            model: str,
+    ) -> str:
+        items = []
+        if snapshot.ancestor_summaries:
+            items.append({
+                "role": "developer",
+                "content": (
+                    "Prior conversation context summarized for continuation:\n\n"
+                    + "\n\n".join(snapshot.ancestor_summaries)
+                ),
+                "type": "message",
+            })
+        items.extend(snapshot.to_openai_input())
+        items.append({
+            "role": "user",
+            "content": (
+                "Summarize the conversation above as a structured briefing for future continuation. "
+                "Preserve key decisions, facts, code produced, and tool call outcomes. "
+                "Use markdown sections. Be concise."
+            ),
+            "type": "message",
+        })
+        response = await self.llm_client.async_openai.responses.create(
+            model=model,
+            max_output_tokens=COMPACTION_SUMMARY_MAX_TOKENS,
+            input=items,
+            stream=False,
+        )
+        return response.output_text

@@ -47,7 +47,6 @@ build-backend = "setuptools.build_meta"
 source = ["prokaryotes"]
 omit = [
     "tests/*",
-    "**/__init__.py",
 ]
 
 [tool.coverage.report]
