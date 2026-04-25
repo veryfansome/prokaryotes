@@ -33,3 +33,13 @@
 | Redis | `REDIS_HOST/PORT` | 6379 |
 
 Use a `.env` file at the project root (loaded via `python-dotenv` in `scripts/web.py`).
+
+## Code organization
+
+**Classes**: introduce a class when methods need to share mutable state. A set of related functions is not sufficient justification — keep them at module level.
+
+**Method type**: use the least powerful form that satisfies the need — instance method if it needs `self`, `@classmethod` if it needs `cls` but not an instance (e.g. alternative constructors), `@staticmethod` if it logically belongs to the class but needs neither, and module-level if it has no meaningful connection to any class.
+
+**Ordering**: `__init__` first within a class, then everything else — methods and module-level functions alike — sorted alphabetically. Alphabetical order gives a predictable location for any definition without requiring the reader to reconstruct call graphs or execution flow.
+
+**Parameter ordering**: required parameters before optional ones, and alphabetical within each group.
