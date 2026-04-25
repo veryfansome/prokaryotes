@@ -31,9 +31,6 @@ class LLMClient:
     def __init__(self):
         self.async_openai: AsyncOpenAI | None = None
 
-    def init_client(self):
-        self.async_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
     async def close(self):
         await self.async_openai.close()
 
@@ -59,16 +56,16 @@ class LLMClient:
 
     @staticmethod
     async def handle_response_stream_event(
-            event: ResponseStreamEvent,
-            context_window: ContextPartition,
             callback_tasks: list[asyncio.Task[ContextPartitionItem | None]],
+            context_window: ContextPartition,
+            event: ResponseStreamEvent,
             tool_callbacks: dict[str, FunctionToolCallback],
             accumulated_text: list[str] | None = None,
-            round_text: list[str] | None = None,
             log_events: bool = False,
             model: str = "",
             ndjson: bool = False,
             on_usage: Callable[[int, int], None] | None = None,
+            round_text: list[str] | None = None,
     ) -> str | None:
         if event.type == "response.output_text.delta":
             if accumulated_text is not None:
@@ -108,6 +105,9 @@ class LLMClient:
             logger.info(event)
         return None
 
+    def init_client(self):
+        self.async_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
     async def stream_response(
             self,
             context_partition: ContextPartition,
@@ -142,13 +142,16 @@ class LLMClient:
                 tool_params=tool_params,
         ):
             str_to_yield = await self.handle_response_stream_event(
-                event, context_partition, callback_tasks, tool_callbacks,
+                callback_tasks,
+                context_partition,
+                event,
+                tool_callbacks,
                 accumulated_text=accumulated_text,
-                round_text=round_text,
                 log_events=log_events,
                 model=model,
                 ndjson=stream_ndjson,
                 on_usage=on_usage,
+                round_text=round_text,
             )
             if str_to_yield:
                 text_yielded = True
@@ -177,13 +180,16 @@ class LLMClient:
                         tool_params=tool_params,
                 ):
                     str_to_yield = await self.handle_response_stream_event(
-                        event, context_partition, callback_tasks, tool_callbacks,
+                        callback_tasks,
+                        context_partition,
+                        event,
+                        tool_callbacks,
                         accumulated_text=accumulated_text,
-                        round_text=round_text,
                         log_events=log_events,
                         model=model,
                         ndjson=stream_ndjson,
                         on_usage=on_usage,
+                        round_text=round_text,
                     )
                     if str_to_yield:
                         text_yielded = True

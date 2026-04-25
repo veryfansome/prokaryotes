@@ -9,6 +9,13 @@ from prokaryotes.api_v1.models import (
 class ThinkTool(FunctionToolCallback):
     """Tool to give the model a scratchpad for structured reasoning between tool calls."""
 
+    async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None:
+        return ContextPartitionItem(
+            call_id=call_id,
+            output="ok",
+            type="function_call_output",
+        )
+
     @property
     def name(self) -> str:
         return "think"
@@ -45,11 +52,4 @@ class ThinkTool(FunctionToolCallback):
                 },
                 required=["thought"],
             ),
-        )
-
-    async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None:
-        return ContextPartitionItem(
-            call_id=call_id,
-            output="ok",
-            type="function_call_output",
         )

@@ -224,7 +224,7 @@ async def test_summarize_and_compact_excludes_text_preamble():
         ],
     )
 
-    result = await harness._summarize_and_compact(snapshot=snapshot, model="gpt-5.4-mini")
+    result = await harness._summarize_and_compact(model="gpt-5.4-mini", snapshot=snapshot)
 
     assert result == "Summary."
     assert len(calls) == 1

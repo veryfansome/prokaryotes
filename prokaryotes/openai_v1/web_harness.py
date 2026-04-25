@@ -35,6 +35,39 @@ class WebHarness(WebBase):
         super().__init__(static_dir)
         self.llm_client = LLMClient()
 
+    async def _summarize_and_compact(
+            self,
+            model: str,
+            snapshot: ContextPartition,
+    ) -> str:
+        items = []
+        if snapshot.ancestor_summaries:
+            items.append({
+                "role": "developer",
+                "content": (
+                    "Prior conversation context summarized for continuation:\n\n"
+                    + "\n\n".join(snapshot.ancestor_summaries)
+                ),
+                "type": "message",
+            })
+        items.extend(snapshot.to_openai_input())
+        items.append({
+            "role": "user",
+            "content": (
+                "Summarize the conversation above as a structured briefing for future continuation. "
+                "Preserve key decisions, facts, code produced, and tool call outcomes. "
+                "Use markdown sections. Be concise."
+            ),
+            "type": "message",
+        })
+        response = await self.llm_client.async_openai.responses.create(
+            model=model,
+            max_output_tokens=COMPACTION_SUMMARY_MAX_TOKENS,
+            input=items,
+            stream=False,
+        )
+        return response.output_text
+
     def init(self):
         """Synchronous setup steps"""
         super().init()
@@ -48,8 +81,8 @@ class WebHarness(WebBase):
 
     async def post_chat(
             self,
-            request: Request,
             conversation: ChatConversation,
+            request: Request,
             latitude: float = Query(None),
             longitude: float = Query(None),
             model: str = Query(OPENAI_DEFAULT_MODEL),
@@ -118,36 +151,3 @@ class WebHarness(WebBase):
             ),
             media_type="text/event-stream",
         )
-
-    async def _summarize_and_compact(
-            self,
-            snapshot: ContextPartition,
-            model: str,
-    ) -> str:
-        items = []
-        if snapshot.ancestor_summaries:
-            items.append({
-                "role": "developer",
-                "content": (
-                    "Prior conversation context summarized for continuation:\n\n"
-                    + "\n\n".join(snapshot.ancestor_summaries)
-                ),
-                "type": "message",
-            })
-        items.extend(snapshot.to_openai_input())
-        items.append({
-            "role": "user",
-            "content": (
-                "Summarize the conversation above as a structured briefing for future continuation. "
-                "Preserve key decisions, facts, code produced, and tool call outcomes. "
-                "Use markdown sections. Be concise."
-            ),
-            "type": "message",
-        })
-        response = await self.llm_client.async_openai.responses.create(
-            model=model,
-            max_output_tokens=COMPACTION_SUMMARY_MAX_TOKENS,
-            input=items,
-            stream=False,
-        )
-        return response.output_text

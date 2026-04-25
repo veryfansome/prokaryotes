@@ -24,12 +24,12 @@ class LLMClient:
     def __init__(self):
         self.async_anthropic: AsyncAnthropic | None = None
 
-    def init_client(self):
-        self.async_anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
     async def close(self):
         if self.async_anthropic is not None:
             await self.async_anthropic.close()
+
+    def init_client(self):
+        self.async_anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     async def stream_response(
         self,
