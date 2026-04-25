@@ -19,6 +19,10 @@ from prokaryotes.api_v1.models import (
     ContextPartitionItem,
     FunctionToolCallback,
 )
+from prokaryotes.utils_v1.llm_utils import (
+    DEFAULT_CONTEXT_WINDOW,
+    MODEL_CONTEXT_WINDOWS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +39,17 @@ class LLMClient:
 
     async def create_response(
             self,
-            context_window: ContextPartition,
+            input: list[dict],
             model: str,
-            reasoning_effort: str = None,
+            reasoning_effort: str | None = None,
             stream: bool = False,
-            text: ResponseTextConfigParam = None,
+            text: ResponseTextConfigParam | None = None,
             tool_choice: ToolChoice = "auto",
-            tool_params: list[ToolParam] = None,
+            tool_params: list[ToolParam] | None = None,
     ):
         return await self.async_openai.responses.create(  # type: ignore
             model=model,
-            input=[item.model_dump(exclude_none=True) for item in context_window.items],
+            input=input,
             text=text,
             tools=tool_params if tool_params else None,
             tool_choice=tool_choice,
@@ -53,24 +57,36 @@ class LLMClient:
             stream=stream,
         )
 
-    @classmethod
+    @staticmethod
     async def handle_response_stream_event(
-            cls,
             event: ResponseStreamEvent,
             context_window: ContextPartition,
             callback_tasks: list[asyncio.Task[ContextPartitionItem | None]],
             tool_callbacks: dict[str, FunctionToolCallback],
+            accumulated_text: list[str] | None = None,
+            round_text: list[str] | None = None,
             log_events: bool = False,
+            model: str = "",
             ndjson: bool = False,
             on_usage: Callable[[int, int], None] | None = None,
     ) -> str | None:
         if event.type == "response.output_text.delta":
+            if accumulated_text is not None:
+                accumulated_text.append(event.delta)
+            if round_text is not None:
+                round_text.append(event.delta)
             return (json.dumps({"text_delta": event.delta}) + "\n") if ndjson else event.delta
         elif event.type == "response.output_text.done":
-            context_window.append(ContextPartitionItem(role="assistant", content=event.text))
+            pass  # combined assistant item appended after all rounds complete
         elif event.type == "response.output_item.done" and event.item.type == "function_call":
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
-            context_window.append(ContextPartitionItem(**event.item.__dict__))
+            preamble = "".join(round_text) if round_text else None
+            if round_text is not None:
+                round_text.clear()
+            item = ContextPartitionItem(**event.item.__dict__)
+            if preamble:
+                item.text_preamble = preamble
+            context_window.append(item)
             callback_task: asyncio.Task[ContextPartitionItem | None] = asyncio.create_task(
                 tool_callbacks[event.item.name].call(
                     event.item.arguments,
@@ -82,6 +98,9 @@ class LLMClient:
             if on_usage is not None:
                 usage = event.response.usage
                 on_usage(usage.input_tokens, usage.output_tokens)
+            context_win = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+            context_pct = int(event.response.usage.input_tokens / context_win * 100)
+            return (json.dumps({"context_pct": context_pct}) + "\n") if ndjson else None
         elif (event.type.startswith("response.web_search_call")
               or (event.type == "response.output_item.done" and event.item.type == "search")):
             logger.info(event)
@@ -94,23 +113,28 @@ class LLMClient:
             context_partition: ContextPartition,
             model: str,
             log_events: bool = False,
-            max_tool_call_rounds: int = None,
+            max_tool_call_rounds: int | None = None,
             on_usage: Callable[[int, int], None] | None = None,
-            reasoning_effort: str = None,
+            reasoning_effort: str | None = None,
             stream_ndjson: bool = False,
-            text: ResponseTextConfigParam = None,
-            tool_callbacks: dict[str, FunctionToolCallback] = None,
+            text: ResponseTextConfigParam | None = None,
+            tool_callbacks: dict[str, FunctionToolCallback] | None = None,
             tool_choice: ToolChoice = "auto",
     ) -> AsyncGenerator[str, Any]:
         tool_params = (
             [cb.tool_spec.to_openai_function_tool_param() for cb in tool_callbacks.values()]
             if tool_callbacks else None
         )
+        accumulated_text: list[str] = []
+        round_text: list[str] = []
         callback_tasks: list[asyncio.Task[ContextPartitionItem | None]] = []
         text_yielded = False
         tool_call_rounds = 0
+        input_items = context_partition.to_openai_input()
+        if input_items and input_items[0].get("role") == "developer":
+            logger.info(f"LLM developer message:\n{input_items[0].get('content', '')}")
         async for event in await self.create_response(
-                context_partition, model,
+                input_items, model,
                 reasoning_effort=reasoning_effort,
                 stream=True,
                 text=text,
@@ -119,7 +143,10 @@ class LLMClient:
         ):
             str_to_yield = await self.handle_response_stream_event(
                 event, context_partition, callback_tasks, tool_callbacks,
+                accumulated_text=accumulated_text,
+                round_text=round_text,
                 log_events=log_events,
+                model=model,
                 ndjson=stream_ndjson,
                 on_usage=on_usage,
             )
@@ -129,8 +156,6 @@ class LLMClient:
         while callback_tasks:
             callback_results = await asyncio.gather(*callback_tasks)
             callback_tasks = []
-            # Continuation will fail if all requested function call results are not returned. All FunctionToolCallback
-            # calls *MUST* return something if continuation is required.
             if all(item is not None for item in callback_results):
                 tool_call_rounds += 1
                 if max_tool_call_rounds is not None and tool_call_rounds >= max_tool_call_rounds:
@@ -138,10 +163,13 @@ class LLMClient:
                     break
                 context_partition.extend(result for result in callback_results if result is not None)
                 if text_yielded:
-                    yield (json.dumps({"text_delta": "\n"}) + "\n") if stream_ndjson else "\n"
+                    sep = "\n"
+                    accumulated_text.append(sep)
+                    yield (json.dumps({"text_delta": sep}) + "\n") if stream_ndjson else sep
                 text_yielded = False
+                round_text.clear()
                 async for event in await self.create_response(
-                        context_partition, model,
+                        context_partition.to_openai_input(), model,
                         reasoning_effort=reasoning_effort,
                         stream=True,
                         text=text,
@@ -150,10 +178,18 @@ class LLMClient:
                 ):
                     str_to_yield = await self.handle_response_stream_event(
                         event, context_partition, callback_tasks, tool_callbacks,
+                        accumulated_text=accumulated_text,
+                        round_text=round_text,
                         log_events=log_events,
+                        model=model,
                         ndjson=stream_ndjson,
                         on_usage=on_usage,
                     )
                     if str_to_yield:
                         text_yielded = True
                         yield str_to_yield
+
+        if accumulated_text:
+            context_partition.append(ContextPartitionItem(
+                role="assistant", content="".join(accumulated_text)
+            ))

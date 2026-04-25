@@ -1,0 +1,20 @@
+import os
+
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-7": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5": 128_000,
+    "gpt-5.4": 200_000,
+    "gpt-5.4-mini": 128_000,
+}
+
+DEFAULT_CONTEXT_WINDOW = 128_000
+
+ANTHROPIC_DEFAULT_MODEL = os.getenv("ANTHROPIC_DEFAULT_MODEL", "claude-haiku-4-5")
+OPENAI_DEFAULT_MODEL = os.getenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
+
+COMPACTION_LOCK_TTL_SECONDS = int(os.getenv("COMPACTION_LOCK_TTL_SECONDS", "300"))
+COMPACTION_RECENCY_TAIL = int(os.getenv("COMPACTION_RECENCY_TAIL", "6"))
+COMPACTION_SUMMARY_MAX_TOKENS = int(os.getenv("COMPACTION_SUMMARY_MAX_TOKENS", "2048"))
+COMPACTION_TOKEN_THRESHOLD_PCT = int(os.getenv("COMPACTION_TOKEN_THRESHOLD_PCT", "80"))
+

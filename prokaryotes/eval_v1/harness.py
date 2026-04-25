@@ -5,6 +5,7 @@ import traceback
 from pathlib import Path
 
 from prokaryotes.eval_v1.models import EvalResult, EvalRun, EvalTask
+from prokaryotes.utils_v1.llm_utils import ANTHROPIC_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class EvalHarness:
     ):
         self.impl = impl
         self.max_tool_call_rounds = max_tool_call_rounds
-        self.model = model or ("claude-opus-4-7" if impl == "anthropic" else "gpt-5.4")
+        self.model = model or (ANTHROPIC_DEFAULT_MODEL if impl == "anthropic" else OPENAI_DEFAULT_MODEL)
         self.reasoning_effort = reasoning_effort
 
     @classmethod

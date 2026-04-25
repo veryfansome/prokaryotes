@@ -3,14 +3,16 @@ import asyncio
 
 from dotenv import load_dotenv
 
+from prokaryotes.utils_v1.llm_utils import ANTHROPIC_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL
+
 
 async def main(args: argparse.Namespace):
     if args.impl == "anthropic":
         from prokaryotes.anthropic_v1.script_harness import ScriptHarness
-        model = args.model or "claude-opus-4-7"
+        model = args.model or ANTHROPIC_DEFAULT_MODEL
     else:
         from prokaryotes.openai_v1.script_harness import ScriptHarness
-        model = args.model or "gpt-5.4"
+        model = args.model or OPENAI_DEFAULT_MODEL
 
     harness = ScriptHarness(model=model, reasoning_effort=args.reasoning_effort)
     try:

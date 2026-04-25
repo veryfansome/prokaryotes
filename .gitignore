@@ -1,5 +1,6 @@
 *.egg-info
 .DS_Store
+.claude
 .coverage
 .env
 .idea

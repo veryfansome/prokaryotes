@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(uv run pytest *)",
-      "Bash(uv run ruff *)",
-      "WebFetch(domain:www.anthropic.com)"
-    ]
-  }
-}

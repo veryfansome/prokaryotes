@@ -5,6 +5,9 @@ from prokaryotes.api_v1.models import (
     ChatMessage,
     ContextPartition,
     ContextPartitionItem,
+    ConversationMatchesPartitionError,
+    compute_boundary_hash,
+    compute_tail_hash,
 )
 
 
@@ -224,7 +227,7 @@ def test_find_context_divergence(
 def test_sync_context_window(partition_items, conversation_messages, post_sync_items):
     context_partition = ContextPartition(conversation_uuid="test", items=partition_items)
     context_partition.sync_from_conversation(ChatConversation(conversation_uuid="abc", messages=conversation_messages))
-    assert context_partition == ContextPartition(conversation_uuid="test", items=post_sync_items)
+    assert context_partition.items == post_sync_items
 
 
 @pytest.mark.parametrize("partition_items, conversation_messages", [
@@ -240,9 +243,55 @@ def test_sync_context_window(partition_items, conversation_messages, post_sync_i
     ),
 ])
 def test_sync_context_window_exception(partition_items, conversation_messages):
-    with pytest.raises(Exception, match="Conversation does not alter partition state"):
+    with pytest.raises(ConversationMatchesPartitionError, match="Conversation does not alter partition state"):
         (ContextPartition(conversation_uuid="test", items=partition_items)
             .sync_from_conversation(ChatConversation(conversation_uuid="abc", messages=conversation_messages)))
+
+
+def test_sync_context_window_with_raw_message_start_index():
+    context_partition = ContextPartition(
+        conversation_uuid="test",
+        ancestor_summaries=["Earlier summary"],
+        raw_message_start_index=2,
+        items=[
+            ContextPartitionItem(role="user", content="U2"),
+            ContextPartitionItem(role="assistant", content="A2"),
+        ],
+    )
+
+    context_partition.sync_from_conversation(ChatConversation(
+        conversation_uuid="abc",
+        messages=[
+            ChatMessage(role="user", content="U1"),
+            ChatMessage(role="assistant", content="A1"),
+            ChatMessage(role="user", content="U2"),
+            ChatMessage(role="assistant", content="A2"),
+            ChatMessage(role="user", content="U3"),
+        ],
+    ))
+
+    assert context_partition.items == [
+        ContextPartitionItem(role="user", content="U2"),
+        ContextPartitionItem(role="assistant", content="A2"),
+        ContextPartitionItem(role="user", content="U3"),
+    ]
+
+
+def test_hash_helpers_are_role_and_content_sensitive():
+    messages = [
+        ChatMessage(role="user", content="Same text"),
+        ChatMessage(role="assistant", content="Answer"),
+    ]
+    changed_role = [
+        ChatMessage(role="assistant", content="Same text"),
+        ChatMessage(role="assistant", content="Answer"),
+    ]
+
+    assert compute_boundary_hash(messages) != compute_boundary_hash(changed_role)
+    assert compute_tail_hash(messages) == compute_tail_hash([
+        ContextPartitionItem(role="user", content="Same text"),
+        ContextPartitionItem(role="assistant", content="Answer"),
+    ])
 
 
 def test_to_anthropic_messages_conversion():
@@ -277,3 +326,33 @@ def test_to_anthropic_messages_conversion():
             "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": '{"name":"Ada Lovelace"}'}],
         },
     ]
+
+
+def test_to_anthropic_messages_prepends_ancestor_summaries():
+    context_partition = ContextPartition(conversation_uuid="test", ancestor_summaries=[
+        "Summary 1",
+        "Summary 2",
+    ], items=[
+        ContextPartitionItem(role="system", content="Be concise"),
+        ContextPartitionItem(role="user", content="Hello"),
+    ])
+
+    system, messages = context_partition.to_anthropic_messages()
+
+    assert system.startswith("Summary 1")
+    assert "Summary 2" in system
+    assert "Be concise" in system
+    assert messages == [
+        {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+    ]
+
+
+def test_partition_uuid_round_trip():
+    partition = ContextPartition(
+        conversation_uuid="test",
+        items=[ContextPartitionItem(role="user", content="Hello")],
+    )
+
+    restored = ContextPartition.model_validate_json(partition.model_dump_json())
+
+    assert restored.partition_uuid == partition.partition_uuid

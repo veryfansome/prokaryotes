@@ -153,7 +153,7 @@ class NamedEntitySearcher(ABC):
                 matched_query_names = set(matched_queries)
                 lexical_score = sum(
                     value for value in matched_queries.values()
-                    if isinstance(value, (int, float))
+                    if isinstance(value, int | float)
                 )
             elif isinstance(matched_queries, list):
                 matched_query_names = {
