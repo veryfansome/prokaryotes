@@ -246,7 +246,7 @@ Because summaries are immutable, they can safely travel with the partition throu
 | File | Role |
 |---|---|
 | `prokaryotes/api_v1/models.py` | `ContextPartition` (with new compaction fields), `ChatConversation`, `ContextPartitionItem`, `compute_boundary_hash`, `compute_tail_hash`, `conversation_message_items`, exception classes |
-| `prokaryotes/web_v1.py` | `WebBase.sync_context_partition`, `_compact_partition`, `_rebuild_from_chain`, `_boundary_message_items_for_partition`, `stream_and_finalize`, `finalize`, `_load_exact_partition`, `_walk_partition_chain`, `_recency_tail_items` |
+| `prokaryotes/web_v1/__init__.py` | `WebBase.sync_context_partition`, `_compact_partition`, `_rebuild_from_chain`, `_boundary_message_items_for_partition`, `stream_and_finalize`, `finalize`, `_load_exact_partition`, `_walk_partition_chain`, `_recency_tail_items` |
 | `prokaryotes/search_v1/context_partitions.py` | `ContextPartitionSearcher` mixin: `get_partition`, `put_partition`, `update_partition`, `find_partition_by_tail_hash`, `search_partitions`; Elasticsearch index mapping |
 | `prokaryotes/search_v1/__init__.py` | `SearchClient` inheriting `ContextPartitionSearcher` |
 | `prokaryotes/anthropic_v1/web_harness.py` | `on_usage` closure, `pending_compaction` flag, `compact` closure, `_summarize_and_compact` |
