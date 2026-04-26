@@ -25,8 +25,8 @@ class EvalHarness:
         self.model = model or (ANTHROPIC_DEFAULT_MODEL if impl == "anthropic" else OPENAI_DEFAULT_MODEL)
         self.reasoning_effort = reasoning_effort
 
-    @classmethod
-    def count_turns(cls, items) -> int:
+    @staticmethod
+    def count_turns(items) -> int:
         """Count LLM API calls (turns) from a partition's item list.
 
         A turn starts on the first function_call after user/function_call_output items, or on any
@@ -55,6 +55,45 @@ class EvalHarness:
         else:
             from prokaryotes.openai_v1.script_harness import ScriptHarness
         return ScriptHarness(model=self.model, reasoning_effort=self.reasoning_effort)
+
+    async def run(
+        self,
+        tasks: list[EvalTask],
+        output_path: Path | None = None,
+    ) -> EvalRun:
+        run = EvalRun(
+            model=self.model,
+            impl=self.impl,
+            reasoning_effort=self.reasoning_effort,
+            max_tool_call_rounds=self.max_tool_call_rounds,
+        )
+
+        run_dir = WORKSPACE_ROOT / run.run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Tasks run sequentially: ScriptHarness.run() calls os.chdir() which is process-global.
+        for task in tasks:
+            result = await self.run_task(task, run_dir / task.id)
+            run.results.append(result)
+            status = "PASS" if result.passed else "FAIL"
+            print(
+                f"[{status}] {task.id} ("
+                f"{result.duration_seconds:.1f}s"
+                f", {result.turn_count} turns"
+                f", {result.tool_call_count} tool calls"
+                f", {result.think_call_count} think"
+                f", {result.input_tokens} in / {result.output_tokens} out tokens"
+                f") — {run_dir / task.id}"
+            )
+            if result.error:
+                print(f"       error: {result.error.splitlines()[0]}")
+
+        if output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(run.model_dump_json(indent=2))
+            logger.info("Results written to %s", output_path)
+
+        return run
 
     async def run_task(self, task: EvalTask, workspace: Path) -> EvalResult:
         workspace.mkdir(parents=True, exist_ok=True)
@@ -142,42 +181,3 @@ class EvalHarness:
             tool_call_count=tool_call_count,
             turn_count=turn_count,
         )
-
-    async def run(
-        self,
-        tasks: list[EvalTask],
-        output_path: Path | None = None,
-    ) -> EvalRun:
-        run = EvalRun(
-            model=self.model,
-            impl=self.impl,
-            reasoning_effort=self.reasoning_effort,
-            max_tool_call_rounds=self.max_tool_call_rounds,
-        )
-
-        run_dir = WORKSPACE_ROOT / run.run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Tasks run sequentially: ScriptHarness.run() calls os.chdir() which is process-global.
-        for task in tasks:
-            result = await self.run_task(task, run_dir / task.id)
-            run.results.append(result)
-            status = "PASS" if result.passed else "FAIL"
-            print(
-                f"[{status}] {task.id} ("
-                f"{result.duration_seconds:.1f}s"
-                f", {result.turn_count} turns"
-                f", {result.tool_call_count} tool calls"
-                f", {result.think_call_count} think"
-                f", {result.input_tokens} in / {result.output_tokens} out tokens"
-                f") — {run_dir / task.id}"
-            )
-            if result.error:
-                print(f"       error: {result.error.splitlines()[0]}")
-
-        if output_path:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(run.model_dump_json(indent=2))
-            logger.info("Results written to %s", output_path)
-
-        return run

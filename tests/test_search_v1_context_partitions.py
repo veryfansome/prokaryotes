@@ -158,7 +158,7 @@ def test_partition_from_doc_returns_partition():
     doc = make_doc(source)
     doc["conversation_uuid"] = "abc"
 
-    result = partition_from_doc(doc, "abc")
+    result = partition_from_doc("abc", doc)
 
     assert result is not None
     assert result.partition_uuid == "p1"
@@ -172,12 +172,12 @@ def test_partition_from_doc_returns_none_for_wrong_conversation():
     doc = make_doc(source)
     doc["conversation_uuid"] = "other"
 
-    assert partition_from_doc(doc, "abc") is None
+    assert partition_from_doc("abc", doc) is None
 
 
 def test_partition_from_doc_returns_none_for_missing_items_json():
     doc = {"partition_uuid": "p1", "conversation_uuid": "abc"}
-    assert partition_from_doc(doc, "abc") is None
+    assert partition_from_doc("abc", doc) is None
 
 
 def test_partition_from_doc_skips_conversation_check_when_key_absent():
@@ -191,7 +191,7 @@ def test_partition_from_doc_skips_conversation_check_when_key_absent():
     doc = make_doc(source)
     del doc["conversation_uuid"]
 
-    result = partition_from_doc(doc, "different-conversation")
+    result = partition_from_doc("different-conversation", doc)
 
     assert result is not None
     assert result.partition_uuid == "p1"

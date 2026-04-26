@@ -18,44 +18,6 @@ class ShellCommandTool(FunctionToolCallback):
 
     max_output_lines = 400
 
-    @property
-    def name(self) -> str:
-        return "shell_command"
-
-    @property
-    def system_message_parts(self) -> list[str]:
-        lines = [
-            f"## Using the `{self.name}` tool",
-            (
-                "- Don't chain multiple commands with '&&' or ';' unless the intended task can't be accomplished"
-                " without doing so. Whenever possible, use a single, focused `command`, with a distinct `reason`"
-                " per tool call."
-            ),
-            "- When reading files, default to previewing the first 200 lines, e.g. `sed -n '1,200p' <path>`.",
-            f"- Command output is truncated after {self.max_output_lines} lines so plan around that.",
-        ]
-        return lines
-
-    @property
-    def tool_spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            description="Use the tool to run arbitrary shell commands.",
-            parameters=ToolParameters(
-                properties={
-                    "command": {
-                        "type": "string",
-                        "description": "A command string to pass to asyncio.create_subprocess_shell()."
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "A concise reason for the command.",
-                    },
-                },
-                required=["command", "reason"],
-            ),
-        )
-
     async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None:
         error = ""
         output = ""
@@ -92,4 +54,42 @@ class ShellCommandTool(FunctionToolCallback):
             call_id=call_id,
             output=output,
             type="function_call_output",
+        )
+
+    @property
+    def name(self) -> str:
+        return "shell_command"
+
+    @property
+    def system_message_parts(self) -> list[str]:
+        lines = [
+            f"## Using the `{self.name}` tool",
+            (
+                "- Don't chain multiple commands with '&&' or ';' unless the intended task can't be accomplished"
+                " without doing so. Whenever possible, use a single, focused `command`, with a distinct `reason`"
+                " per tool call."
+            ),
+            "- When reading files, default to previewing the first 200 lines, e.g. `sed -n '1,200p' <path>`.",
+            f"- Command output is truncated after {self.max_output_lines} lines so plan around that.",
+        ]
+        return lines
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description="Use the tool to run arbitrary shell commands.",
+            parameters=ToolParameters(
+                properties={
+                    "command": {
+                        "type": "string",
+                        "description": "A command string to pass to asyncio.create_subprocess_shell()."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "A concise reason for the command.",
+                    },
+                },
+                required=["command", "reason"],
+            ),
         )

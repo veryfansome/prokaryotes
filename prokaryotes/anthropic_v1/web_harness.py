@@ -35,6 +35,30 @@ class WebHarness(WebBase):
         super().__init__(static_dir)
         self.llm_client = LLMClient()
 
+    async def _summarize_and_compact(
+            self,
+            model: str,
+            snapshot: ContextPartition,
+    ) -> str:
+        system_str, messages = snapshot.to_anthropic_messages()
+        summarization_messages = messages + [{
+            "role": "user",
+            "content": (
+                "Summarize the conversation above as a structured briefing for future continuation. "
+                "Preserve key decisions, facts, code produced, and tool call outcomes. "
+                "Use markdown sections. Be concise."
+            ),
+        }]
+        create_params: dict = {
+            "model": model,
+            "max_tokens": COMPACTION_SUMMARY_MAX_TOKENS,
+            "messages": summarization_messages,
+        }
+        if system_str:
+            create_params["system"] = system_str
+        response = await self.llm_client.async_anthropic.messages.create(**create_params)
+        return response.content[0].text
+
     def init(self):
         """Synchronous setup steps"""
         super().init()
@@ -48,8 +72,8 @@ class WebHarness(WebBase):
 
     async def post_chat(
             self,
-            request: Request,
             conversation: ChatConversation,
+            request: Request,
             latitude: float = Query(None),
             longitude: float = Query(None),
             model: str = Query(ANTHROPIC_DEFAULT_MODEL),
@@ -118,27 +142,3 @@ class WebHarness(WebBase):
             ),
             media_type="text/event-stream",
         )
-
-    async def _summarize_and_compact(
-            self,
-            snapshot: ContextPartition,
-            model: str,
-    ) -> str:
-        system_str, messages = snapshot.to_anthropic_messages()
-        summarization_messages = messages + [{
-            "role": "user",
-            "content": (
-                "Summarize the conversation above as a structured briefing for future continuation. "
-                "Preserve key decisions, facts, code produced, and tool call outcomes. "
-                "Use markdown sections. Be concise."
-            ),
-        }]
-        create_params: dict = {
-            "model": model,
-            "max_tokens": COMPACTION_SUMMARY_MAX_TOKENS,
-            "messages": summarization_messages,
-        }
-        if system_str:
-            create_params["system"] = system_str
-        response = await self.llm_client.async_anthropic.messages.create(**create_params)
-        return response.content[0].text

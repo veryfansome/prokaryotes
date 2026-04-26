@@ -23,6 +23,9 @@ class ScriptHarness:
         self.model = model
         self.reasoning_effort = reasoning_effort
 
+    async def close(self):
+        await self.llm_client.close()
+
     async def run(
         self,
         task: str,
@@ -72,6 +75,3 @@ class ScriptHarness:
             print()
 
         return context_partition
-
-    async def close(self):
-        await self.llm_client.close()

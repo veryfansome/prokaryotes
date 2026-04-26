@@ -15,12 +15,12 @@ class SearchClient(
     def __init__(self):
         self._es: AsyncElasticsearch | None = None
 
+    async def close(self):
+        await self._es.close()
+
     @property
     def es(self) -> AsyncElasticsearch | None:
         return self._es
-
-    async def close(self):
-        await self._es.close()
 
     def init_client(self):
         self._es = get_elastic_search()

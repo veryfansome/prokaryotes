@@ -38,14 +38,6 @@ class ChatMessage(BaseModel):
         return ContextPartitionItem(content=self.content, role=self.role)
 
 
-class ConversationMatchesPartitionError(Exception):
-    """Raised when the incoming conversation exactly matches a partition's raw span."""
-
-
-class ConversationOutsideRawWindowError(Exception):
-    """Raised when the incoming conversation cannot be reconciled with a compacted raw span."""
-
-
 class ContextPartition(BaseModel):
     """A provider-agnostic conversation history as a list of `ContextPartitionItem` objects."""
 
@@ -62,9 +54,8 @@ class ContextPartition(BaseModel):
     def extend(self, items: Iterable[ContextPartitionItem]):
         self.items.extend(items)
 
-    @classmethod
+    @staticmethod
     def find_context_divergence(
-            cls,
             context_items: list[ContextPartitionItem],
             conversation_items: list[ContextPartitionItem],
     ) -> tuple[int | None, bool, bool]:
@@ -78,10 +69,6 @@ class ContextPartition(BaseModel):
         else:
             return min(context_items_len, conversation_items_len), False, context_items_len > conversation_items_len
 
-    def pop_system_message(self):
-        if self.items and self.items[0].role in {"developer", "system"}:
-            self.items.pop(0)
-
     def message_items_for_sync(self) -> tuple[list[ContextPartitionItem], list[int]]:
         partition_messages = []
         partition_message_indexes = []
@@ -90,6 +77,10 @@ class ContextPartition(BaseModel):
                 partition_messages.append(item)
                 partition_message_indexes.append(idx)
         return partition_messages, partition_message_indexes
+
+    def pop_system_message(self):
+        if self.items and self.items[0].role in {"developer", "system"}:
+            self.items.pop(0)
 
     def sync_from_conversation(self, conversation: ChatConversation):
         if len(conversation.messages) < self.raw_message_start_index:
@@ -266,14 +257,6 @@ class ContextPartitionItem(BaseModel):
     """
 
 
-def conversation_message_items(items: Iterable[ContextPartitionItem]) -> list[ContextPartitionItem]:
-    return [
-        item
-        for item in items
-        if item.type == "message" and item.role in {"user", "assistant"}
-    ]
-
-
 def _message_hash_payload(items: Iterable[ChatMessage | ContextPartitionItem]) -> list[dict[str, str]]:
     payload = []
     for item in items:
@@ -297,6 +280,22 @@ def compute_tail_hash(items: Iterable[ChatMessage | ContextPartitionItem], n: in
     ][-n:]
     encoded = json.dumps(tail_user_messages, ensure_ascii=False, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def conversation_message_items(items: Iterable[ContextPartitionItem]) -> list[ContextPartitionItem]:
+    return [
+        item
+        for item in items
+        if item.type == "message" and item.role in {"user", "assistant"}
+    ]
+
+
+class ConversationMatchesPartitionError(Exception):
+    """Raised when the incoming conversation exactly matches a partition's raw span."""
+
+
+class ConversationOutsideRawWindowError(Exception):
+    """Raised when the incoming conversation cannot be reconciled with a compacted raw span."""
 
 
 class FunctionToolCallback(Protocol):
