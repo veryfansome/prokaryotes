@@ -24,5 +24,5 @@ from prokaryotes.utils_v1.text_utils import normalize_text_for_identity
         ("co\u00ADoperate reading", "cooperate reading"),
     ],
 )
-def test_normalize_text_for_identity_common_identity_variants(input_text: str, expected: str):
+def test_normalize_text_for_identity_with_common_variants(input_text: str, expected: str):
     assert normalize_text_for_identity(input_text) == expected

@@ -2,7 +2,7 @@
 
 ## Location
 
-- `prokaryotes/anthropic_v1/__init__.py:85-95` — computed in `stream_response`
+- `prokaryotes/anthropic_v1/__init__.py:85-95` — computed in `stream_turn`
 - `prokaryotes/openai_v1/__init__.py:98-104` — computed in `handle_response_stream_event`
 - `prokaryotes/anthropic_v1/web_harness.py:93-97` — recomputed in `on_usage`
 - `prokaryotes/openai_v1/web_harness.py:93-97` — recomputed in `on_usage`

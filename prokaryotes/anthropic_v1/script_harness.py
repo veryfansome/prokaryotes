@@ -3,7 +3,7 @@ import os
 import uuid
 from collections.abc import Callable
 
-from prokaryotes.anthropic_v1 import LLMClient
+from prokaryotes.anthropic_v1 import AnthropicClient
 from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class ScriptHarness:
     def __init__(self, model: str, reasoning_effort: str = None):
-        self.llm_client = LLMClient()
+        self.llm_client = AnthropicClient()
         self.llm_client.init_client()
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -38,7 +38,7 @@ class ScriptHarness:
             os.chdir(cwd)
 
         shell_command_tool = ShellCommandTool()
-        think_tool = ThinkTool()
+        think_tool = ThinkTool(self.llm_client)
         tool_callbacks: dict[str, FunctionToolCallback] = {
             shell_command_tool.name: shell_command_tool,
             think_tool.name: think_tool,
@@ -64,7 +64,7 @@ class ScriptHarness:
             ],
         )
 
-        async for chunk in self.llm_client.stream_response(
+        async for chunk in self.llm_client.stream_turn(
             context_partition=context_partition,
             model=self.model,
             max_tool_call_rounds=max_tool_call_rounds,

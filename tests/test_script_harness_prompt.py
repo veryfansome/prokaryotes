@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 
-async def empty_stream_response(*args, **kwargs):
+async def empty_stream_turn(*args, **kwargs):
     if False:
         yield ""
 
@@ -13,7 +13,7 @@ async def test_anthropic_script_harness_includes_core_instructions_without_summa
     from prokaryotes.anthropic_v1.script_harness import ScriptHarness
 
     harness = ScriptHarness.__new__(ScriptHarness)
-    harness.llm_client = SimpleNamespace(stream_response=empty_stream_response)
+    harness.llm_client = SimpleNamespace(stream_turn=empty_stream_turn)
     harness.model = "claude-opus-4-7"
     harness.reasoning_effort = None
 
@@ -32,7 +32,7 @@ async def test_openai_script_harness_includes_core_instructions_without_summary_
     from prokaryotes.openai_v1.script_harness import ScriptHarness
 
     harness = ScriptHarness.__new__(ScriptHarness)
-    harness.llm_client = SimpleNamespace(stream_response=empty_stream_response)
+    harness.llm_client = SimpleNamespace(stream_turn=empty_stream_turn)
     harness.model = "gpt-5.4-mini"
     harness.reasoning_effort = None
 

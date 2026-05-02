@@ -10,11 +10,11 @@
 
 3. `post_chat()` assembles the system/developer `ContextPartitionItem` (core instructions, personality, tool guidance, runtime context, ancestor summaries per provider — see below) and inserts it at `context_partition.items[0]`.
 
-4. `WebBase.stream_and_finalize()` wraps `LLMClient.stream_response()`. It first yields `{"partition_uuid": "..."}` as the first NDJSON event so the client can track the active branch. Then it streams NDJSON events from `stream_response()`: `{"text_delta": "..."}` per chunk, `{"context_pct": N}` after each LLM round.
+4. `WebBase.stream_and_finalize()` wraps `stream_turn()`. It first yields `{"partition_uuid": "..."}` as the first NDJSON event so the client can track the active branch. Then it streams NDJSON events from `stream_turn()`: `{"text_delta": "..."}` per chunk, `{"context_pct": N}` after each LLM round.
 
-5. Inside `stream_response()`, tool calls are dispatched to `FunctionToolCallback.call()` after each round. Results are appended to the partition and fed back into the next LLM call. The loop repeats until no tool calls are produced or `max_tool_call_rounds` is reached.
+5. Inside `stream_turn()`, tool calls are dispatched to `FunctionToolCallback.call()` after each round. Results are appended to the partition and fed back into the next LLM call. The loop repeats until no tool calls are produced or `max_tool_call_rounds` is reached.
 
-6. After `stream_response()` exhausts, `stream_and_finalize()` checks whether compaction was triggered. Two paths:
+6. After `stream_turn()` exhausts, `stream_and_finalize()` checks whether compaction was triggered. Two paths:
    - **Compaction path** (lock acquired): `finalize()` is awaited directly — not backgrounded, to prevent a race where a delayed finalize overwrites the compaction result. Then `{"compaction_pending": true}` is emitted and `_compact_partition()` is fired as a background task.
    - **Normal path**: `finalize()` runs as a background task via `background_and_forget()`.
 
@@ -60,13 +60,13 @@ Do not call `finalize()` directly from `post_chat()`. `stream_and_finalize()` ma
 
 ### `_summarize_and_compact()` — background compaction
 
-Must produce a plain `str` summary using the provider's own API directly (not via `stream_response()`). It is called from a background task after the streaming response has been finalized, so streaming is unavailable at this point.
+Must produce a plain `str` summary using the provider's own API directly (not via `stream_turn()`). It is called from a background task after the streaming response has been finalized, so streaming is unavailable at this point.
 
 ## Ancestor summary injection
 
 Ancestor summaries are injected differently per provider.
 
-**Anthropic**: build the main system prompt from `get_core_instruction_parts(summaries=...)`, then personality, then the rest of the harness context. Do not include `ancestor_summaries` manually. `ContextPartition.to_anthropic_messages()` — called inside `LLMClient.stream_response()` — appends them automatically as a trailing `# Compacted conversation summary` background-memory block after the core system instructions. Including them manually would duplicate them.
+**Anthropic**: build the main system prompt from `get_core_instruction_parts(summaries=...)`, then personality, then the rest of the harness context. Do not include `ancestor_summaries` manually. `ContextPartition.to_anthropic_messages()` — called inside `stream_turn()` — appends them automatically as a trailing `# Compacted conversation summary` background-memory block after the core system instructions. Including them manually would duplicate them.
 
 **OpenAI**: build the main developer prompt from `get_core_instruction_parts(summaries=...)`, then personality, then the rest of the harness context. `to_openai_input()` does not inject `ancestor_summaries`; append `context_partition.ancestor_summary_block()` as the final background-memory section when present.
 

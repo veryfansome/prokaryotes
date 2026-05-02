@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Iterable,
+)
 from enum import Enum
 from typing import (
+    Any,
     Literal,
     Protocol,
 )
@@ -274,39 +279,6 @@ class ContextPartitionItem(BaseModel):
     """
 
 
-def _message_hash_payload(items: Iterable[ChatMessage | ContextPartitionItem]) -> list[dict[str, str]]:
-    payload = []
-    for item in items:
-        item_type = getattr(item, "type", "message")
-        if item_type == "message" and item.role in {"user", "assistant"}:
-            payload.append({"role": item.role or "", "content": item.content or ""})
-    return payload
-
-
-def compute_boundary_hash(items: Iterable[ChatMessage | ContextPartitionItem]) -> str:
-    payload = _message_hash_payload(items)
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def compute_tail_hash(items: Iterable[ChatMessage | ContextPartitionItem], n: int = 5) -> str:
-    tail_user_messages = [
-        item.content or ""
-        for item in items
-        if getattr(item, "type", "message") == "message" and item.role == "user" and item.content
-    ][-n:]
-    encoded = json.dumps(tail_user_messages, ensure_ascii=False, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def conversation_message_items(items: Iterable[ContextPartitionItem]) -> list[ContextPartitionItem]:
-    return [
-        item
-        for item in items
-        if item.type == "message" and item.role in {"user", "assistant"}
-    ]
-
-
 class ConversationMatchesPartitionError(Exception):
     """Raised when the incoming conversation exactly matches a partition's raw span."""
 
@@ -326,6 +298,29 @@ class FunctionToolCallback(Protocol):
     def tool_spec(self) -> ToolSpec: ...
 
     async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None: ...
+
+
+class LLMClient(Protocol):
+
+    async def complete(
+        self,
+        context_partition: ContextPartition,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        ...
+
+    async def stream_turn(
+        self,
+        context_partition: ContextPartition,
+        model: str,
+        max_tool_call_rounds: int | None = None,
+        on_usage: Callable[[int, int], None] | None = None,
+        reasoning_effort: str | None = None,
+        stream_ndjson: bool = False,
+        tool_callbacks: dict[str, FunctionToolCallback] | None = None,
+    ) -> AsyncGenerator[str, Any]:
+        ...
 
 
 class TextEmbeddingPrompt(Enum):
@@ -374,3 +369,36 @@ class ToolSpec(BaseModel):
             strict=self.strict,
             type="function",
         )
+
+
+def _message_hash_payload(items: Iterable[ChatMessage | ContextPartitionItem]) -> list[dict[str, str]]:
+    payload = []
+    for item in items:
+        item_type = getattr(item, "type", "message")
+        if item_type == "message" and item.role in {"user", "assistant"}:
+            payload.append({"role": item.role or "", "content": item.content or ""})
+    return payload
+
+
+def compute_boundary_hash(items: Iterable[ChatMessage | ContextPartitionItem]) -> str:
+    payload = _message_hash_payload(items)
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def compute_tail_hash(items: Iterable[ChatMessage | ContextPartitionItem], n: int = 5) -> str:
+    tail_user_messages = [
+        item.content or ""
+        for item in items
+        if getattr(item, "type", "message") == "message" and item.role == "user" and item.content
+    ][-n:]
+    encoded = json.dumps(tail_user_messages, ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def conversation_message_items(items: Iterable[ContextPartitionItem]) -> list[ContextPartitionItem]:
+    return [
+        item
+        for item in items
+        if item.type == "message" and item.role in {"user", "assistant"}
+    ]

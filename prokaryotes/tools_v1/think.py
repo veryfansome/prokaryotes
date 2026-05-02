@@ -1,6 +1,7 @@
 from prokaryotes.api_v1.models import (
     ContextPartitionItem,
     FunctionToolCallback,
+    LLMClient,
     ToolParameters,
     ToolSpec,
 )
@@ -8,6 +9,9 @@ from prokaryotes.api_v1.models import (
 
 class ThinkTool(FunctionToolCallback):
     """Tool to give the model a scratchpad for structured reasoning between tool calls."""
+
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
 
     async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None:
         return ContextPartitionItem(
@@ -24,7 +28,7 @@ class ThinkTool(FunctionToolCallback):
     def system_message_parts(self) -> list[str]:
         lines = [
             f"## Using the `{self.name}` tool",
-            "- Use the think tool as a scratchpad when pausing to think could yield better results— for example:"
+            "- Use the think tool as a scratchpad when pausing to think could yield better results— for example:",
             "  - Planning multi-step tasks that require sequential tool calls.",
             "  - Navigating policy-heavy or constraint-laden requirements.",
             "  - Analysing outputs from multiple prior tool calls.",

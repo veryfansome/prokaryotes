@@ -8,7 +8,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from starsessions import load_session
 
-from prokaryotes.anthropic_v1 import LLMClient
+from prokaryotes.anthropic_v1 import AnthropicClient
 from prokaryotes.api_v1.models import (
     ChatConversation,
     ContextPartition,
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class WebHarness(WebBase):
     def __init__(self, static_dir: str):
         super().__init__(static_dir)
-        self.llm_client = LLMClient()
+        self.llm_client = AnthropicClient()
 
     async def _summarize_and_compact(
             self,
@@ -90,7 +90,7 @@ class WebHarness(WebBase):
         context_partition = await self.sync_context_partition(conversation)
 
         shell_command_tool = ShellCommandTool()
-        think_tool = ThinkTool()
+        think_tool = ThinkTool(self.llm_client)
         tool_callbacks: dict[str, FunctionToolCallback] = {
             shell_command_tool.name: shell_command_tool,
             think_tool.name: think_tool,
@@ -136,7 +136,7 @@ class WebHarness(WebBase):
             self.stream_and_finalize(
                 context_partition=context_partition,
                 conversation_uuid=conversation.conversation_uuid,
-                response_generator=self.llm_client.stream_response(
+                response_generator=self.llm_client.stream_turn(
                     context_partition=context_partition,
                     model=model,
                     on_usage=on_usage,

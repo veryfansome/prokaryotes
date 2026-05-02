@@ -8,16 +8,15 @@ from typing import Any
 from openai import AsyncOpenAI
 from openai.types.responses import (
     ResponseStreamEvent,
-    ResponseTextConfigParam,
     ToolParam,
 )
-from openai.types.responses.response_create_params import ToolChoice
 from openai.types.shared_params import Reasoning
 
 from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
     FunctionToolCallback,
+    LLMClient,
 )
 from prokaryotes.utils_v1.llm_utils import (
     DEFAULT_CONTEXT_WINDOW,
@@ -27,31 +26,33 @@ from prokaryotes.utils_v1.llm_utils import (
 logger = logging.getLogger(__name__)
 
 
-class LLMClient:
+class OpenAIClient(LLMClient):
     def __init__(self):
         self.async_openai: AsyncOpenAI | None = None
 
     async def close(self):
         await self.async_openai.close()
 
-    async def create_response(
+    async def complete(
             self,
-            input: list[dict],
+            context_partition: ContextPartition,
             model: str,
             reasoning_effort: str | None = None,
-            stream: bool = False,
-            text: ResponseTextConfigParam | None = None,
-            tool_choice: ToolChoice = "auto",
-            tool_params: list[ToolParam] | None = None,
-    ):
-        return await self.async_openai.responses.create(  # type: ignore
+    ) -> str:
+        input_items = context_partition.to_openai_input()
+        reasoning = Reasoning(effort=reasoning_effort if reasoning_effort else "none")
+        response = await self.async_openai.responses.create(  # type: ignore
             model=model,
-            input=input,
-            text=text,
-            tools=tool_params if tool_params else None,
-            tool_choice=tool_choice,
-            reasoning=Reasoning(effort=reasoning_effort if reasoning_effort else "none"),
-            stream=stream,
+            input=input_items,
+            reasoning=reasoning,
+            stream=False,
+        )
+        return "".join(
+            block.text
+            for item in response.output
+            if item.type == "message"
+            for block in item.content
+            if block.type == "output_text"
         )
 
     @staticmethod
@@ -61,7 +62,6 @@ class LLMClient:
             event: ResponseStreamEvent,
             tool_callbacks: dict[str, FunctionToolCallback],
             accumulated_text: list[str] | None = None,
-            log_events: bool = False,
             model: str = "",
             ndjson: bool = False,
             on_usage: Callable[[int, int], None] | None = None,
@@ -101,45 +101,40 @@ class LLMClient:
         elif (event.type.startswith("response.web_search_call")
               or (event.type == "response.output_item.done" and event.item.type == "search")):
             logger.info(event)
-        elif log_events:
-            logger.info(event)
         return None
 
     def init_client(self):
         self.async_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    async def stream_response(
+    async def stream_turn(
             self,
             context_partition: ContextPartition,
             model: str,
-            log_events: bool = False,
             max_tool_call_rounds: int | None = None,
             on_usage: Callable[[int, int], None] | None = None,
             reasoning_effort: str | None = None,
             stream_ndjson: bool = False,
-            text: ResponseTextConfigParam | None = None,
             tool_callbacks: dict[str, FunctionToolCallback] | None = None,
-            tool_choice: ToolChoice = "auto",
     ) -> AsyncGenerator[str, Any]:
-        tool_params = (
+        accumulated_text: list[str] = []
+        callback_tasks: list[asyncio.Task[ContextPartitionItem | None]] = []
+        input_items = context_partition.to_openai_input()
+        reasoning = Reasoning(effort=reasoning_effort if reasoning_effort else "none")
+        round_text: list[str] = []
+        text_yielded = False
+        tool_call_rounds = 0
+        tool_params: list[ToolParam] | None = (
             [cb.tool_spec.to_openai_function_tool_param() for cb in tool_callbacks.values()]
             if tool_callbacks else None
         )
-        accumulated_text: list[str] = []
-        round_text: list[str] = []
-        callback_tasks: list[asyncio.Task[ContextPartitionItem | None]] = []
-        text_yielded = False
-        tool_call_rounds = 0
-        input_items = context_partition.to_openai_input()
         if input_items and input_items[0].get("role") == "developer":
             logger.info(f"LLM developer message:\n{input_items[0].get('content', '')}")
-        async for event in await self.create_response(
-                input_items, model,
-                reasoning_effort=reasoning_effort,
+        async for event in await self.async_openai.responses.create(  # type: ignore
+                model=model,
+                input=input_items,
+                tools=tool_params,
+                reasoning=reasoning,
                 stream=True,
-                text=text,
-                tool_choice=tool_choice,
-                tool_params=tool_params,
         ):
             str_to_yield = await self.handle_response_stream_event(
                 callback_tasks,
@@ -147,7 +142,6 @@ class LLMClient:
                 event,
                 tool_callbacks,
                 accumulated_text=accumulated_text,
-                log_events=log_events,
                 model=model,
                 ndjson=stream_ndjson,
                 on_usage=on_usage,
@@ -171,13 +165,12 @@ class LLMClient:
                     yield (json.dumps({"text_delta": sep}) + "\n") if stream_ndjson else sep
                 text_yielded = False
                 round_text.clear()
-                async for event in await self.create_response(
-                        context_partition.to_openai_input(), model,
-                        reasoning_effort=reasoning_effort,
+                async for event in await self.async_openai.responses.create(  # type: ignore
+                        model=model,
+                        input=context_partition.to_openai_input(),
+                        tools=tool_params,
+                        reasoning=reasoning,
                         stream=True,
-                        text=text,
-                        tool_choice=tool_choice,
-                        tool_params=tool_params,
                 ):
                     str_to_yield = await self.handle_response_stream_event(
                         callback_tasks,
@@ -185,7 +178,6 @@ class LLMClient:
                         event,
                         tool_callbacks,
                         accumulated_text=accumulated_text,
-                        log_events=log_events,
                         model=model,
                         ndjson=stream_ndjson,
                         on_usage=on_usage,

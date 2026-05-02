@@ -14,7 +14,7 @@ from prokaryotes.api_v1.models import (
     ContextPartitionItem,
     FunctionToolCallback,
 )
-from prokaryotes.openai_v1 import LLMClient
+from prokaryotes.openai_v1 import OpenAIClient
 from prokaryotes.tools_v1.shell_command import ShellCommandTool
 from prokaryotes.tools_v1.think import ThinkTool
 from prokaryotes.utils_v1 import system_message_utils
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class WebHarness(WebBase):
     def __init__(self, static_dir: str):
         super().__init__(static_dir)
-        self.llm_client = LLMClient()
+        self.llm_client = OpenAIClient()
 
     async def _summarize_and_compact(
             self,
@@ -97,7 +97,7 @@ class WebHarness(WebBase):
         context_partition = await self.sync_context_partition(conversation)
 
         shell_command_tool = ShellCommandTool()
-        think_tool = ThinkTool()
+        think_tool = ThinkTool(self.llm_client)
         tool_callbacks: dict[str, FunctionToolCallback] = {
             shell_command_tool.name: shell_command_tool,
             think_tool.name: think_tool,
@@ -147,7 +147,7 @@ class WebHarness(WebBase):
             self.stream_and_finalize(
                 context_partition=context_partition,
                 conversation_uuid=conversation.conversation_uuid,
-                response_generator=self.llm_client.stream_response(
+                response_generator=self.llm_client.stream_turn(
                     context_partition=context_partition,
                     model=model,
                     on_usage=on_usage,

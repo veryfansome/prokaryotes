@@ -11,6 +11,7 @@ from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
     FunctionToolCallback,
+    LLMClient,
 )
 from prokaryotes.utils_v1.llm_utils import (
     DEFAULT_CONTEXT_WINDOW,
@@ -20,7 +21,7 @@ from prokaryotes.utils_v1.llm_utils import (
 logger = logging.getLogger(__name__)
 
 
-class LLMClient:
+class AnthropicClient(LLMClient):
     def __init__(self):
         self.async_anthropic: AsyncAnthropic | None = None
 
@@ -28,10 +29,31 @@ class LLMClient:
         if self.async_anthropic is not None:
             await self.async_anthropic.close()
 
+    async def complete(
+        self,
+        context_partition: ContextPartition,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        thinking_budget = {"low": 1024, "medium": 2048, "high": 4096}.get(reasoning_effort or "")
+        thinking = {"type": "enabled", "budget_tokens": thinking_budget} if thinking_budget else None
+        system, messages = context_partition.to_anthropic_messages()
+        params: dict[str, Any] = {
+            "model": model,
+            "max_tokens": int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
+            "messages": messages,
+        }
+        if system:
+            params["system"] = system
+        if thinking:
+            params["thinking"] = thinking
+        response = await self.async_anthropic.messages.create(**params)
+        return "".join(block.text for block in response.content if block.type == "text")
+
     def init_client(self):
         self.async_anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    async def stream_response(
+    async def stream_turn(
         self,
         context_partition: ContextPartition,
         model: str,
@@ -40,7 +62,6 @@ class LLMClient:
         reasoning_effort: str | None = None,
         stream_ndjson: bool = False,
         tool_callbacks: dict[str, FunctionToolCallback] | None = None,
-        tool_choice: dict[str, Any] | None = None,
     ) -> AsyncGenerator[str, Any]:
         tool_params = (
             [cb.tool_spec.to_anthropic_tool_param() for cb in tool_callbacks.values()]
@@ -71,7 +92,6 @@ class LLMClient:
                 params["system"] = system
             if tool_params:
                 params["tools"] = tool_params
-                params["tool_choice"] = tool_choice or {"type": "auto"}
             if thinking:
                 params["thinking"] = thinking
 

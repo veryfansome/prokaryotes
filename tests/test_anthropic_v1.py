@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from prokaryotes.anthropic_v1 import LLMClient
+from prokaryotes.anthropic_v1 import AnthropicClient
 from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
@@ -98,10 +98,10 @@ class FakeAnthropicClient:
 
 
 @pytest.mark.asyncio
-async def test_stream_response_context_pct_includes_cached_tokens():
+async def test_stream_turn_context_pct_includes_cached_tokens():
     # cache_read_input_tokens and cache_creation_input_tokens must be summed with
     # input_tokens; omitting them causes the indicator to reset when the cache warms.
-    client = LLMClient()
+    client = AnthropicClient()
     client.async_anthropic = FakeAnthropicClient([
         FakeStreamContext(
             text_chunks=["ok"], tool_uses=[], stop_reason="end_turn",
@@ -116,7 +116,7 @@ async def test_stream_response_context_pct_includes_cached_tokens():
     )
 
     chunks = [
-        chunk async for chunk in client.stream_response(
+        chunk async for chunk in client.stream_turn(
             context_partition=context_partition,
             model="claude-opus-4-7",
             stream_ndjson=True,
@@ -128,9 +128,9 @@ async def test_stream_response_context_pct_includes_cached_tokens():
 
 
 @pytest.mark.asyncio
-async def test_stream_response_emits_context_pct_for_ndjson_stream():
+async def test_stream_turn_emits_context_pct_for_ndjson_stream():
     # 160_000 / 200_000 * 100 == 80; validates the percentage math, not just presence.
-    client = LLMClient()
+    client = AnthropicClient()
     client.async_anthropic = FakeAnthropicClient([
         FakeStreamContext(text_chunks=["ok"], tool_uses=[], stop_reason="end_turn", input_tokens=160_000),
     ])
@@ -140,7 +140,7 @@ async def test_stream_response_emits_context_pct_for_ndjson_stream():
     )
 
     chunks = [
-        chunk async for chunk in client.stream_response(
+        chunk async for chunk in client.stream_turn(
             context_partition=context_partition,
             model="claude-opus-4-7",
             stream_ndjson=True,
@@ -151,12 +151,12 @@ async def test_stream_response_emits_context_pct_for_ndjson_stream():
 
 
 @pytest.mark.asyncio
-async def test_stream_response_no_intermediate_assistant_item_before_tool_call():
+async def test_stream_turn_no_intermediate_assistant_item_before_tool_call():
     # Regression guard: the partition must NOT contain a standalone assistant text item
     # positioned before a function_call item. Such a shape causes sync_from_conversation
     # to truncate the context on the next request.
     callback = DummyToolCallback()
-    client = LLMClient()
+    client = AnthropicClient()
     client.async_anthropic = FakeAnthropicClient([
         FakeStreamContext(
             text_chunks=["Checking "],
@@ -170,7 +170,7 @@ async def test_stream_response_no_intermediate_assistant_item_before_tool_call()
         items=[ContextPartitionItem(role="user", content="Tell me about Mars")],
     )
 
-    _ = [chunk async for chunk in client.stream_response(
+    _ = [chunk async for chunk in client.stream_turn(
         context_partition=context_partition,
         model="claude-opus-4-7",
         tool_callbacks={"lookup": callback},
@@ -186,9 +186,9 @@ async def test_stream_response_no_intermediate_assistant_item_before_tool_call()
 
 
 @pytest.mark.asyncio
-async def test_stream_response_passes_correct_params():
+async def test_stream_turn_passes_correct_params():
     callback = DummyToolCallback()
-    client = LLMClient()
+    client = AnthropicClient()
     client.async_anthropic = FakeAnthropicClient([
         FakeStreamContext(text_chunks=["ok"], tool_uses=[], stop_reason="end_turn"),
     ])
@@ -197,11 +197,10 @@ async def test_stream_response_passes_correct_params():
         ContextPartitionItem(role="user", content="Hi"),
     ])
 
-    _ = [chunk async for chunk in client.stream_response(
+    _ = [chunk async for chunk in client.stream_turn(
         context_partition=context_partition,
         model="claude-opus-4-7",
         reasoning_effort="medium",
-        tool_choice={"type": "any"},
         tool_callbacks={"lookup": callback},
     )]
 
@@ -212,14 +211,13 @@ async def test_stream_response_passes_correct_params():
         "system": "Be brief",
         "thinking": {"type": "enabled", "budget_tokens": 2048},
         "tools": [callback.tool_spec.to_anthropic_tool_param()],
-        "tool_choice": {"type": "any"},
     }
 
 
 @pytest.mark.asyncio
-async def test_stream_response_yields_text_and_continues_after_tool_callback():
+async def test_stream_turn_yields_text_and_continues_after_tool_callback():
     callback = DummyToolCallback()
-    client = LLMClient()
+    client = AnthropicClient()
     client.async_anthropic = FakeAnthropicClient([
         FakeStreamContext(
             text_chunks=["Checking "],
@@ -238,7 +236,7 @@ async def test_stream_response_yields_text_and_continues_after_tool_callback():
     )
 
     chunks = [
-        chunk async for chunk in client.stream_response(
+        chunk async for chunk in client.stream_turn(
             context_partition=context_partition,
             model="claude-opus-4-7",
             tool_callbacks={"lookup": callback},

@@ -9,7 +9,7 @@ from prokaryotes.api_v1.models import (
     ToolParameters,
     ToolSpec,
 )
-from prokaryotes.openai_v1 import LLMClient
+from prokaryotes.openai_v1 import OpenAIClient
 
 
 class AsyncEventStream:
@@ -87,9 +87,9 @@ def text_done(text: str):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_emits_context_pct_for_ndjson_stream():
+async def test_stream_turn_emits_context_pct_for_ndjson_stream():
     # 102_400 / 128_000 * 100 == 80; validates the percentage math, not just presence.
-    client = LLMClient()
+    client = OpenAIClient()
     client.async_openai = FakeOpenAIClient([
         [text_delta("ok"), text_done("ok"), response_completed(input_tokens=102_400)],
     ])
@@ -99,7 +99,7 @@ async def test_stream_response_emits_context_pct_for_ndjson_stream():
     )
 
     chunks = [
-        chunk async for chunk in client.stream_response(
+        chunk async for chunk in client.stream_turn(
             context_partition=context_partition,
             model="gpt-5.4-mini",
             stream_ndjson=True,
@@ -110,11 +110,11 @@ async def test_stream_response_emits_context_pct_for_ndjson_stream():
 
 
 @pytest.mark.asyncio
-async def test_stream_response_no_intermediate_assistant_item_before_tool_call():
+async def test_stream_turn_no_intermediate_assistant_item_before_tool_call():
     # Regression guard: the partition must NOT contain a standalone assistant text item
     # positioned before a function_call item.
     callback = DummyToolCallback()
-    client = LLMClient()
+    client = OpenAIClient()
     client.async_openai = FakeOpenAIClient([
         [
             text_delta("Checking "),
@@ -128,7 +128,7 @@ async def test_stream_response_no_intermediate_assistant_item_before_tool_call()
         items=[ContextPartitionItem(role="user", content="Tell me about Mars")],
     )
 
-    _ = [chunk async for chunk in client.stream_response(
+    _ = [chunk async for chunk in client.stream_turn(
         context_partition=context_partition,
         model="gpt-5.4",
         tool_callbacks={"lookup": callback},
@@ -143,9 +143,9 @@ async def test_stream_response_no_intermediate_assistant_item_before_tool_call()
 
 
 @pytest.mark.asyncio
-async def test_stream_response_passes_correct_params():
+async def test_stream_turn_passes_correct_params():
     callback = DummyToolCallback()
-    client = LLMClient()
+    client = OpenAIClient()
     client.async_openai = FakeOpenAIClient([
         [text_delta("ok"), text_done("ok")],
     ])
@@ -153,7 +153,7 @@ async def test_stream_response_passes_correct_params():
         ContextPartitionItem(role="user", content="Hi"),
     ])
 
-    _ = [chunk async for chunk in client.stream_response(
+    _ = [chunk async for chunk in client.stream_turn(
         context_partition=context_partition,
         model="gpt-5.4",
         reasoning_effort="low",
@@ -164,15 +164,14 @@ async def test_stream_response_passes_correct_params():
     assert call["model"] == "gpt-5.4"
     assert call["stream"] is True
     assert call["tools"] == [callback.tool_spec.to_openai_function_tool_param()]
-    assert call["tool_choice"] == "auto"
     assert call["reasoning"] == Reasoning(effort="low")
     assert call["input"] == [{"content": "Hi", "role": "user", "type": "message"}]
 
 
 @pytest.mark.asyncio
-async def test_stream_response_yields_text_and_continues_after_tool_callback():
+async def test_stream_turn_yields_text_and_continues_after_tool_callback():
     callback = DummyToolCallback()
-    client = LLMClient()
+    client = OpenAIClient()
     client.async_openai = FakeOpenAIClient([
         [
             text_delta("Checking "),
@@ -190,7 +189,7 @@ async def test_stream_response_yields_text_and_continues_after_tool_callback():
     )
 
     chunks = [
-        chunk async for chunk in client.stream_response(
+        chunk async for chunk in client.stream_turn(
             context_partition=context_partition,
             model="gpt-5.4",
             tool_callbacks={"lookup": callback},
