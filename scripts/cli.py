@@ -14,7 +14,11 @@ async def main(args: argparse.Namespace):
         from prokaryotes.openai_v1.script_harness import ScriptHarness
         model = args.model or OPENAI_DEFAULT_MODEL
 
-    harness = ScriptHarness(model=model, reasoning_effort=args.reasoning_effort)
+    harness = ScriptHarness(
+        model=model,
+        reasoning_effort=args.reasoning_effort,
+        think_reasoning_effort=args.think_reasoning_effort,
+    )
     try:
         await harness.run(
             task=args.task,
@@ -35,4 +39,5 @@ if __name__ == "__main__":
     parser.add_argument("--max-tool-call-rounds", type=int, default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--reasoning-effort", default=None, choices=["low", "medium", "high"])
+    parser.add_argument("--think-reasoning-effort", default=None, choices=["low", "medium", "high"])
     asyncio.run(main(parser.parse_args()))

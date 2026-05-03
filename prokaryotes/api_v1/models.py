@@ -214,7 +214,10 @@ class ContextPartition(BaseModel):
         for item in self.items:
             if item.type == "function_call" and item.text_preamble:
                 result.append({"role": "assistant", "content": item.text_preamble, "type": "message"})
-            result.append(item.model_dump(exclude_none=True, exclude={"text_preamble"}))
+            item_dict = item.model_dump(exclude_none=True, exclude={"text_preamble"})
+            if item_dict.get("role") == "system":
+                item_dict["role"] = "developer"
+            result.append(item_dict)
         return result
 
 
