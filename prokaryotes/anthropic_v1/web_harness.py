@@ -90,7 +90,7 @@ class WebHarness(WebBase):
         context_partition = await self.sync_context_partition(conversation)
 
         shell_command_tool = ShellCommandTool()
-        think_tool = ThinkTool(self.llm_client)
+        think_tool = ThinkTool(self.llm_client, model)
         tool_callbacks: dict[str, FunctionToolCallback] = {
             shell_command_tool.name: shell_command_tool,
             think_tool.name: think_tool,

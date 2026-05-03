@@ -17,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class ScriptHarness:
-    def __init__(self, model: str, reasoning_effort: str = None):
+    def __init__(self, model: str, reasoning_effort: str = None, think_reasoning_effort: str = None):
         self.llm_client = AnthropicClient()
         self.llm_client.init_client()
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.think_reasoning_effort = think_reasoning_effort
 
     async def close(self):
         await self.llm_client.close()
@@ -38,7 +39,7 @@ class ScriptHarness:
             os.chdir(cwd)
 
         shell_command_tool = ShellCommandTool()
-        think_tool = ThinkTool(self.llm_client)
+        think_tool = ThinkTool(self.llm_client, self.model, reasoning_effort=self.think_reasoning_effort)
         tool_callbacks: dict[str, FunctionToolCallback] = {
             shell_command_tool.name: shell_command_tool,
             think_tool.name: think_tool,
