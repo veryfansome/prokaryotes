@@ -173,9 +173,7 @@ services:
     working_dir: /app
     volumes:
       - ./.env:/app/.env:ro
-      #- ./project/bugs/context_pct_reset/overlay/prokaryotes/anthropic_v1/__init__.py:/app/prokaryotes/anthropic_v1/__init__.py:ro
-      #- ./project/bugs/context_pct_reset/overlay/prokaryotes/api_v1/models.py:/app/prokaryotes/api_v1/models.py:ro
-      #- ./project/bugs/context_pct_reset/overlay/prokaryotes/openai_v1/__init__.py:/app/prokaryotes/openai_v1/__init__.py:ro
+      - ./project:/app/project:rw
     environment:
       #WEB_HARNESS_IMPL: "anthropic"
       WEB_HARNESS_IMPL: "openai"

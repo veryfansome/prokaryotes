@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ThinkTool(FunctionToolCallback):
     """Tool to give the model a scratchpad for structured reasoning between tool calls."""
 
-    def __init__(self, llm_client: LLMClient, model: str, reasoning_effort: str = None):
+    def __init__(self, llm_client: LLMClient, model: str, reasoning_effort: str | None = None):
         self.llm_client = llm_client
         self.model = model
         self.reasoning_effort = reasoning_effort or os.getenv("THINK_TOOL_REASONING_EFFORT", "low")
