@@ -36,6 +36,35 @@ export function parseStreamPayloadLine(line) {
         return { type: 'text_delta', text_delta: payload.text_delta };
     }
 
+    if ('progress_message' in payload) {
+        if (typeof payload.progress_message !== 'string') {
+            throw new Error('Invalid stream payload: progress_message must be a string');
+        }
+        return { type: 'progress_message', progress_message: payload.progress_message };
+    }
+
+    if ('tool_call' in payload) {
+        if (!payload.tool_call || typeof payload.tool_call !== 'object') {
+            throw new Error('Invalid stream payload: tool_call must be an object');
+        }
+        if (typeof payload.tool_call.name !== 'string') {
+            throw new Error('Invalid stream payload: tool_call.name must be a string');
+        }
+        if (
+            'arguments' in payload.tool_call
+            && typeof payload.tool_call.arguments !== 'string'
+        ) {
+            throw new Error('Invalid stream payload: tool_call.arguments must be a string');
+        }
+        return {
+            type: 'tool_call',
+            tool_call: {
+                name: payload.tool_call.name,
+                arguments: payload.tool_call.arguments || '{}',
+            },
+        };
+    }
+
     if ('partition_uuid' in payload) {
         if (typeof payload.partition_uuid !== 'string') {
             throw new Error('Invalid stream payload: partition_uuid must be a string');
@@ -73,6 +102,12 @@ function setInputHeight(inputEl) {
 
 function cloneMessages(sourceMessages) {
     return sourceMessages.map(message => ({ ...message }));
+}
+
+function humanizeLabel(label) {
+    return label
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, char => char.toUpperCase());
 }
 
 // 2) createChatApp setup
@@ -149,6 +184,7 @@ export function createChatApp({
     let nextMessageId = 1;
 
     const messageTree = new Map();
+    const activityByNodeId = new Map();
     messageTree.set(0, {
         id: 0,
         role: 'root',
@@ -307,6 +343,16 @@ export function createChatApp({
         });
     }
 
+    function getActivityEntriesForNode(nodeId) {
+        return activityByNodeId.get(nodeId) || [];
+    }
+
+    function getProgressMessagesForNode(nodeId) {
+        return getActivityEntriesForNode(nodeId)
+            .filter(entry => entry.type === 'progress')
+            .map(entry => entry.text);
+    }
+
     let compactionIndicatorVisible = false;
     let pendingCompactionPartitionUuid = null;
     let compactionPollInterval = null;
@@ -445,9 +491,156 @@ export function createChatApp({
         });
     }
 
+    function formatCodeBlock(text, language = '') {
+        return `\`\`\`${language}\n${text}\n\`\`\``;
+    }
+
+    function formatGenericToolValueMarkdown(label, value) {
+        if (value === null || value === undefined) {
+            return null;
+        }
+        if (typeof value === 'string') {
+            if (!value.trim()) {
+                return null;
+            }
+            if (value.includes('\n')) {
+                return `**${humanizeLabel(label)}**\n\n${formatCodeBlock(value)}`;
+            }
+            return `**${humanizeLabel(label)}**: ${value}`;
+        }
+        if (Array.isArray(value)) {
+            if (value.length === 0) {
+                return null;
+            }
+            if (value.every(item => ['string', 'number', 'boolean'].includes(typeof item))) {
+                return `**${humanizeLabel(label)}**\n${value.map(item => `- ${item}`).join('\n')}`;
+            }
+            return `**${humanizeLabel(label)}**\n\n${formatCodeBlock(JSON.stringify(value, null, 2), 'json')}`;
+        }
+        if (typeof value === 'object') {
+            if (Object.keys(value).length === 0) {
+                return null;
+            }
+            return `**${humanizeLabel(label)}**\n\n${formatCodeBlock(JSON.stringify(value, null, 2), 'json')}`;
+        }
+        return `**${humanizeLabel(label)}**: \`${String(value)}\``;
+    }
+
+    function formatGenericToolCallMarkdown(name, parsedArgs) {
+        const parts = [`Tool call: \`${name}\``];
+        Object.entries(parsedArgs)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .forEach(([key, value]) => {
+                const section = formatGenericToolValueMarkdown(key, value);
+                if (section) {
+                    parts.push(section);
+                }
+            });
+        return parts.join('\n\n');
+    }
+
+    function formatThinkToolCallMarkdown(parsedArgs) {
+        const parts = ['Tool call: `think`'];
+        if (typeof parsedArgs.goal === 'string' && parsedArgs.goal.trim()) {
+            parts.push(`**Goal**\n\n${parsedArgs.goal}`);
+        }
+        if (typeof parsedArgs.context === 'string' && parsedArgs.context.trim()) {
+            parts.push(`**Context**\n\n${parsedArgs.context}`);
+        }
+        if (Array.isArray(parsedArgs.perspectives) && parsedArgs.perspectives.length > 0) {
+            parts.push(`**Perspectives**\n${parsedArgs.perspectives.map(item => `- ${item}`).join('\n')}`);
+        }
+        Object.entries(parsedArgs)
+            .filter(([key]) => !['goal', 'context', 'perspectives'].includes(key))
+            .sort(([left], [right]) => left.localeCompare(right))
+            .forEach(([key, value]) => {
+                const section = formatGenericToolValueMarkdown(key, value);
+                if (section) {
+                    parts.push(section);
+                }
+            });
+        return parts.join('\n\n');
+    }
+
+    function formatShellCommandToolCallMarkdown(parsedArgs) {
+        const parts = ['Tool call: `shell_command`'];
+        if (typeof parsedArgs.reason === 'string' && parsedArgs.reason.trim()) {
+            parts.push(`**Reason**: ${parsedArgs.reason}`);
+        }
+        if (typeof parsedArgs.command === 'string' && parsedArgs.command.trim()) {
+            parts.push(`**Command**\n\n${formatCodeBlock(parsedArgs.command, 'sh')}`);
+        }
+        Object.entries(parsedArgs)
+            .filter(([key]) => !['command', 'reason'].includes(key))
+            .sort(([left], [right]) => left.localeCompare(right))
+            .forEach(([key, value]) => {
+                const section = formatGenericToolValueMarkdown(key, value);
+                if (section) {
+                    parts.push(section);
+                }
+            });
+        return parts.join('\n\n');
+    }
+
+    function formatToolCallMarkdown(name, rawArguments) {
+        let parsedArgs;
+        try {
+            parsedArgs = JSON.parse(rawArguments || '{}');
+        } catch {
+            return [
+                `Tool call: \`${name}\``,
+                '**Arguments**',
+                '',
+                formatCodeBlock(rawArguments || '{}', 'json'),
+            ].join('\n');
+        }
+
+        if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
+            return [
+                `Tool call: \`${name}\``,
+                '**Arguments**',
+                '',
+                formatCodeBlock(JSON.stringify(parsedArgs, null, 2), 'json'),
+            ].join('\n');
+        }
+
+        if (name === 'shell_command') {
+            return formatShellCommandToolCallMarkdown(parsedArgs);
+        }
+        if (name === 'think') {
+            return formatThinkToolCallMarkdown(parsedArgs);
+        }
+        return formatGenericToolCallMarkdown(name, parsedArgs);
+    }
+
+    function renderActivityEntry(entry) {
+        const activityDiv = doc.createElement('div');
+        activityDiv.className = `message-activity message-activity-${entry.type}`;
+        if (entry.type === 'progress') {
+            activityDiv.innerHTML = renderMarkdown(entry.text);
+        } else if (entry.type === 'tool_call') {
+            activityDiv.innerHTML = renderMarkdown(
+                formatToolCallMarkdown(entry.name, entry.arguments),
+            );
+            attachCopyButtons(activityDiv);
+        }
+        return activityDiv;
+    }
+
     function addMessage(role, content, messageIndex = null) {
         const messageDiv = doc.createElement('div');
         messageDiv.className = `message ${role}`;
+
+        const messageData = messageIndex !== null ? messages[messageIndex] : null;
+        const messageNode = messageData ? getNode(messageData.id) : null;
+        if (role === 'assistant' && messageNode) {
+            const activityEntries = getActivityEntriesForNode(messageNode.id);
+            if (activityEntries.length > 0) {
+                activityEntries.forEach(entry => {
+                    messageDiv.appendChild(renderActivityEntry(entry));
+                });
+            }
+        }
 
         const contentDiv = doc.createElement('div');
         contentDiv.className = 'message-content';
@@ -459,9 +652,6 @@ export function createChatApp({
         if (role === 'assistant') {
             attachCopyButtons(contentDiv);
         }
-
-        const messageData = messageIndex !== null ? messages[messageIndex] : null;
-        const messageNode = messageData ? getNode(messageData.id) : null;
 
         if (role === 'user' && messageNode) {
             contentDiv.setAttribute('data-message-index', messageIndex);
@@ -726,6 +916,10 @@ export function createChatApp({
         const pendingMessageDiv = doc.createElement('div');
         pendingMessageDiv.className = 'message assistant';
 
+        const activityContainer = doc.createElement('div');
+        activityContainer.hidden = true;
+        pendingMessageDiv.appendChild(activityContainer);
+
         const assistantContent = doc.createElement('div');
         assistantContent.className = 'message-content';
         pendingMessageDiv.appendChild(assistantContent);
@@ -761,8 +955,17 @@ export function createChatApp({
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let fullResponse = '';
+            const activityEntries = [];
             let streamBuffer = '';
             let receivedPartitionUuid = null;
+
+            const renderPendingActivity = () => {
+                activityContainer.innerHTML = '';
+                activityEntries.forEach(entry => {
+                    activityContainer.appendChild(renderActivityEntry(entry));
+                });
+                activityContainer.hidden = activityEntries.length === 0;
+            };
 
             const processLine = line => {
                 const parsed = parseStreamPayloadLine(line);
@@ -790,6 +993,24 @@ export function createChatApp({
 
                 if (parsed.type === 'compaction_pending') {
                     showCompactionIndicator(receivedPartitionUuid);
+                    return;
+                }
+
+                if (parsed.type === 'progress_message') {
+                    activityEntries.push({ type: 'progress', text: parsed.progress_message });
+                    renderPendingActivity();
+                    maybeAutoScrollDuringGeneration();
+                    return;
+                }
+
+                if (parsed.type === 'tool_call') {
+                    activityEntries.push({
+                        type: 'tool_call',
+                        name: parsed.tool_call.name,
+                        arguments: parsed.tool_call.arguments,
+                    });
+                    renderPendingActivity();
+                    maybeAutoScrollDuringGeneration();
                     return;
                 }
 
@@ -826,12 +1047,16 @@ export function createChatApp({
             if (assistantNode && receivedPartitionUuid) {
                 assistantNode.partitionUuid = receivedPartitionUuid;
             }
+            if (assistantNode && activityEntries.length > 0) {
+                activityByNodeId.set(assistantNode.id, [...activityEntries]);
+            }
             didCompleteResponse = true;
         } catch (error) {
             if (compactionIndicatorVisible) {
                 clearCompactionIndicator();
             }
             console.error('Error:', error);
+            activityContainer.hidden = true;
             assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;
         } finally {
             loadingIndicator.style.display = 'none';
@@ -920,8 +1145,10 @@ export function createChatApp({
         editMessage,
         generateAssistantResponse,
         getIsEditing: () => editSession !== null,
+        getActivityEntriesForNode,
         getMessages: () => cloneMessages(messages),
         getNode,
+        getProgressMessagesForNode,
         getUserSiblingIds,
         regenerateMessage,
         sendMessage,

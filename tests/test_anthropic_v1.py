@@ -246,8 +246,8 @@ async def test_stream_turn_yields_text_and_continues_after_tool_callback():
     assert chunks == ["Checking ", "\n", "Done."]
 
     # Intermediate text is stored as text_preamble on the function_call item, not as a
-    # standalone assistant message. The single combined assistant message at the end
-    # matches what the UI accumulates in fullResponse — preventing sync truncation.
+    # standalone assistant message. The persisted assistant message contains only the
+    # final answer text; progress preambles stay on the function_call item.
     assert context_partition.items == [
         ContextPartitionItem(role="user", content="Tell me about Mars"),
         ContextPartitionItem(
@@ -256,7 +256,7 @@ async def test_stream_turn_yields_text_and_continues_after_tool_callback():
             text_preamble="Checking ",
         ),
         ContextPartitionItem(call_id="toolu_1", output="Mars facts", type="function_call_output"),
-        ContextPartitionItem(role="assistant", content="Checking \nDone."),
+        ContextPartitionItem(role="assistant", content="Done."),
     ]
 
     assert len(client.async_anthropic.messages.calls) == 2
@@ -276,3 +276,40 @@ async def test_stream_turn_yields_text_and_continues_after_tool_callback():
             "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "Mars facts"}],
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_emits_progress_message_for_ndjson_tool_rounds():
+    callback = DummyToolCallback()
+    client = AnthropicClient()
+    client.async_anthropic = FakeAnthropicClient([
+        FakeStreamContext(
+            text_chunks=["Checking "],
+            tool_uses=[{"id": "toolu_1", "name": "lookup", "input": {"query": "mars"}}],
+            stop_reason="tool_use",
+        ),
+        FakeStreamContext(
+            text_chunks=["Done."],
+            tool_uses=[],
+            stop_reason="end_turn",
+        ),
+    ])
+    context_partition = ContextPartition(
+        conversation_uuid="test",
+        items=[ContextPartitionItem(role="user", content="Tell me about Mars")],
+    )
+
+    chunks = [
+        chunk async for chunk in client.stream_turn(
+            context_partition=context_partition,
+            model="claude-opus-4-7",
+            stream_ndjson=True,
+            tool_callbacks={"lookup": callback},
+        )
+    ]
+
+    assert '{"progress_message": "Checking "}\n' in chunks
+    assert '{"tool_call": {"name": "lookup", "arguments": "{\\"query\\":\\"mars\\"}"}}\n' in chunks
+    assert '{"text_delta": "Checking "}\n' not in chunks
+    assert '{"text_delta": "Done."}\n' in chunks
+    assert context_partition.items[-1] == ContextPartitionItem(role="assistant", content="Done.")
