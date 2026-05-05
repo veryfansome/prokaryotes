@@ -152,7 +152,7 @@ class ShellCommandTool(FunctionToolCallback):
             await asyncio.wait_for(asyncio.shield(wait_task), timeout=self.foreground_timeout_seconds)
             await self._finalize_job(job)
             return self._render_completed_job(job, header="Completed within foreground timeout.")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return self._render_running_job(job)
 
     async def _handle_job_action(self, payload: dict) -> str:
@@ -266,7 +266,10 @@ class ShellCommandTool(FunctionToolCallback):
                 f"- New commands are waited on for up to {self.foreground_timeout_seconds:.1f} seconds. If a command"
                 " is still running after that, it continues in the background and the tool returns a `job_id`."
             ),
-            "- To check a background command later, call the tool with `job_id` and optional `action` of `status` or `terminate`.",
+            (
+                "- To check a background command later, call the tool with `job_id` and optional `action` of"
+                " `status` or `terminate`."
+            ),
             f"- Captured stdout and stderr are each truncated to the last {self.max_output_lines} lines.",
         ]
         return lines
