@@ -54,13 +54,13 @@ def get_personality_parts(profile: OceanProfile | None = None) -> list[str]:
     lines = ["# Personality"]
     for trait in ("openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"):
         level = getattr(profile, trait)
-        lines.append(f"- {trait}: *{level.value}*, you SHOULD {OCEAN_PROFILE_DESC[trait][level]}")
+        lines.append(f"- {trait.capitalize()}: *{level.value}*, you SHOULD {OCEAN_PROFILE_DESC[trait][level]}")
     return lines
 
 
 def get_script_harness_runtime_context_parts() -> list[str]:
     lines = [
-        "# Your runtime context",
+        "# Runtime context",
         f"- Runtime: Python-{os_utils.get_python_version()} / {os_utils.get_platform()}",
         f"- Working directory: {os_utils.get_cwd()}",
         f"- Unix user: {os_utils.uid_to_name(os_utils.get_process_uid())}",
