@@ -72,24 +72,29 @@
             justify-content: flex-start;
         }
 
-        .message-content {
+        .message-content,
+        .message-activity {
             line-height: 1.6;
             max-width: 100%;
         }
 
-        .message-content p {
+        .message-content p,
+        .message-activity p {
             margin: 0 0 0.5em;
         }
 
-        .message-content p:first-child {
+        .message-content p:first-child,
+        .message-activity p:first-child {
             margin-top: 0;
         }
 
-        .message-content p:last-child {
+        .message-content p:last-child,
+        .message-activity p:last-child {
             margin-bottom: 0;
         }
 
-        .message-content pre {
+        .message-content pre,
+        .message-activity pre {
             position: relative;
             border-radius: 0.5rem;
             overflow: hidden;
@@ -118,7 +123,8 @@
             transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
         }
 
-        .message-content pre:hover .copy-btn {
+        .message-content pre:hover .copy-btn,
+        .message-activity pre:hover .copy-btn {
             opacity: 1;
         }
 
@@ -127,7 +133,8 @@
             color: #f3f4f6;
         }
 
-        .message-content code {
+        .message-content code,
+        .message-activity code {
             font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace;
             font-size: 0.875em;
             background-color: rgba(0, 0, 0, 0.06);
@@ -135,19 +142,27 @@
             border-radius: 0.25rem;
         }
 
-        .message-content pre code {
+        .message-content pre code,
+        .message-activity pre code {
             background-color: #000;
             font-size: inherit;
             padding-right: 2.75rem; /* reserve space so the copy button never overlaps code text */
         }
 
+        .message-activity pre code {
+            background-color: #374151;
+        }
+
         .message-content ul,
-        .message-content ol {
+        .message-content ol,
+        .message-activity ul,
+        .message-activity ol {
             padding-left: 1.5rem;
             margin: 0.5em 0;
         }
 
-        .message-content li {
+        .message-content li,
+        .message-activity li {
             margin: 0.2em 0;
         }
 
@@ -156,7 +171,13 @@
         .message-content h3,
         .message-content h4,
         .message-content h5,
-        .message-content h6 {
+        .message-content h6,
+        .message-activity h1,
+        .message-activity h2,
+        .message-activity h3,
+        .message-activity h4,
+        .message-activity h5,
+        .message-activity h6 {
             margin: 0.75em 0 0.25em;
             font-weight: 600;
             line-height: 1.3;
@@ -166,32 +187,38 @@
         .message-content h2 { font-size: 1.25em; }
         .message-content h3 { font-size: 1.1em; }
 
-        .message-content a {
+        .message-content a,
+        .message-activity a {
             color: #2563eb;
             text-decoration: underline;
         }
 
-        .message-content blockquote {
+        .message-content blockquote,
+        .message-activity blockquote {
             margin: 0.5em 0;
             padding-left: 1rem;
             border-left: 3px solid #d1d5db;
             color: #6b7280;
         }
 
-        .message-content table {
+        .message-content table,
+        .message-activity table {
             border-collapse: collapse;
             margin: 0.5em 0;
             max-width: 100%;
         }
 
         .message-content th,
-        .message-content td {
+        .message-content td,
+        .message-activity th,
+        .message-activity td {
             border: 1px solid #e5e7eb;
             padding: 0.35em 0.75em;
             text-align: left;
         }
 
-        .message-content th {
+        .message-content th,
+        .message-activity th {
             background-color: #f9fafb;
             font-weight: 600;
         }
@@ -243,6 +270,25 @@
 
         .message.assistant .message-content:hover {
             background-color: #f9fafb;
+        }
+
+        .message-activity {
+            margin: 0 0 0.5rem;
+            padding: 0.65rem 0.8rem;
+            border-left: 2px solid #d1d5db;
+            color: #6b7280;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        .message-activity-progress {
+            background-color: rgba(249, 250, 251, 0.8);
+        }
+
+        .message-activity-tool_call {
+            border-left-color: #bfdbfe;
+            color: #1d4ed8;
+            background-color: rgba(239, 246, 255, 0.85);
         }
 
         .icon-btn {

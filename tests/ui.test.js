@@ -16,6 +16,14 @@ function textDelta(text) {
     return JSON.stringify({ text_delta: text });
 }
 
+function progressMessage(text) {
+    return JSON.stringify({ progress_message: text });
+}
+
+function toolCall(name, args = '{}') {
+    return JSON.stringify({ tool_call: { name, arguments: args } });
+}
+
 function streamFromJsonLines(lines) {
     const encoder = new TextEncoder();
     return new ReadableStream({
@@ -91,6 +99,12 @@ function createControllableFetchMock() {
         waitForReady,
         pushTextDelta(text) {
             controller.enqueue(encoder.encode(`${textDelta(text)}\n`));
+        },
+        pushProgressMessage(text) {
+            controller.enqueue(encoder.encode(`${progressMessage(text)}\n`));
+        },
+        pushToolCall(name, args = '{}') {
+            controller.enqueue(encoder.encode(`${toolCall(name, args)}\n`));
         },
         close() {
             controller.close();
@@ -183,6 +197,23 @@ describe('parseStreamPayloadLine', () => {
         expect(parseStreamPayloadLine('{"text_delta":"hello"}')).toEqual({ type: 'text_delta', text_delta: 'hello' });
     });
 
+    it('parses progress_message stream payload', () => {
+        expect(parseStreamPayloadLine('{"progress_message":"Looking around"}')).toEqual({
+            type: 'progress_message',
+            progress_message: 'Looking around',
+        });
+    });
+
+    it('parses tool_call stream payload', () => {
+        expect(parseStreamPayloadLine('{"tool_call":{"name":"shell_command","arguments":"{}"}}')).toEqual({
+            type: 'tool_call',
+            tool_call: {
+                name: 'shell_command',
+                arguments: '{}',
+            },
+        });
+    });
+
     it('throws on invalid payload json', () => {
         expect(() => parseStreamPayloadLine('{bad json}')).toThrow('Invalid stream payload');
     });
@@ -214,6 +245,62 @@ describe('createChatApp messageTree flow', () => {
                 { role: 'user', content: 'Hi' },
                 { role: 'assistant', content: 'Hello' },
             ]);
+        });
+
+        it('shows streamed progress separately and keeps it out of the final conversation tree', async () => {
+            const controlledFetch = createControllableFetchMock();
+            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
+            const progressText = 'I’ll inspect the project structure first.';
+            const toolName = 'shell_command';
+            const toolArgs = JSON.stringify({
+                reason: 'Inspect the project directory',
+                command: 'find /app/project -maxdepth 2 -type f | sort',
+            });
+
+            const sendPromise = startSendMessage(app, 'Hi');
+            await controlledFetch.waitForReady();
+
+            controlledFetch.pushProgressMessage(progressText);
+            controlledFetch.pushToolCall(toolName, toolArgs);
+            await flushAsyncWork();
+
+            const progressEl = app.elements.chatWrapper.querySelector('.message-activity-progress');
+            expect(progressEl).not.toBeNull();
+            expect(progressEl.hidden).toBe(false);
+            expect(progressEl.textContent).toContain(progressText);
+            const toolCallEl = app.elements.chatWrapper.querySelector('.message-activity-tool_call');
+            expect(toolCallEl).not.toBeNull();
+            expect(toolCallEl.textContent).toContain(toolName);
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'Hi' },
+            ]);
+
+            controlledFetch.pushTextDelta('Done.');
+            controlledFetch.close();
+            await sendPromise;
+
+            expect(asRoleContent(app.getMessages())).toEqual([
+                { role: 'user', content: 'Hi' },
+                { role: 'assistant', content: 'Done.' },
+            ]);
+
+            const finalProgressEl = app.elements.chatWrapper.querySelector('.message-activity-progress');
+            expect(finalProgressEl).not.toBeNull();
+            expect(finalProgressEl.textContent).toContain(progressText);
+            const finalToolCallEl = app.elements.chatWrapper.querySelector('.message-activity-tool_call');
+            expect(finalToolCallEl).not.toBeNull();
+            expect(finalToolCallEl.textContent).toContain(toolName);
+            expect(finalToolCallEl.textContent).toContain('Inspect the project directory');
+            expect(finalToolCallEl.textContent).toContain('find /app/project -maxdepth 2 -type f | sort');
+            expect(finalToolCallEl.textContent).not.toContain('{"reason"');
+            expect(finalToolCallEl.querySelector('pre code')).not.toBeNull();
+
+            const assistantNodeId = app.getMessages()[1].id;
+            expect(app.getActivityEntriesForNode(assistantNodeId)).toEqual([
+                { type: 'progress', text: progressText },
+                { type: 'tool_call', name: toolName, arguments: toolArgs },
+            ]);
+            expect(app.getProgressMessagesForNode(assistantNodeId)).toEqual([progressText]);
         });
     });
 

@@ -70,16 +70,9 @@ class AnthropicClient(LLMClient):
         thinking_budget = {"low": 1024, "medium": 2048, "high": 4096}.get(reasoning_effort or "")
         thinking = {"type": "enabled", "budget_tokens": thinking_budget} if thinking_budget else None
         tool_call_rounds = 0
-        text_yielded = False
-        all_yielded_text: list[str] = []
+        answer_text: list[str] = []
 
         while True:
-            if tool_call_rounds > 0 and text_yielded:
-                sep = "\n"
-                all_yielded_text.append(sep)
-                yield (json.dumps({"text_delta": sep}) + "\n") if stream_ndjson else sep
-            text_yielded = False
-            round_text_start = len(all_yielded_text)
             system, messages = context_partition.to_anthropic_messages()
             if tool_call_rounds == 0 and system:
                 logger.info(f"LLM system message:\n{system}")
@@ -95,11 +88,12 @@ class AnthropicClient(LLMClient):
             if thinking:
                 params["thinking"] = thinking
 
+            round_text: list[str] = []
             async with self.async_anthropic.messages.stream(**params) as stream:
                 async for delta in stream.text_stream:
-                    text_yielded = True
-                    all_yielded_text.append(delta)
-                    yield (json.dumps({"text_delta": delta}) + "\n") if stream_ndjson else delta
+                    round_text.append(delta)
+                    if not stream_ndjson:
+                        yield delta
                 response = await stream.get_final_message()
 
             total_input = (
@@ -115,19 +109,32 @@ class AnthropicClient(LLMClient):
                 yield json.dumps({"context_pct": context_pct}) + "\n"
 
             if response.stop_reason != "tool_use":
+                answer_text.extend(round_text)
+                if stream_ndjson:
+                    for delta in round_text:
+                        yield json.dumps({"text_delta": delta}) + "\n"
                 break
 
-            round_text = "".join(all_yielded_text[round_text_start:])
+            round_output = "".join(round_text)
+            if stream_ndjson and round_output:
+                yield json.dumps({"progress_message": round_output}) + "\n"
             callback_tasks: list[asyncio.Task] = []
             first_tool_call = True
             for block in response.content:
                 if block.type != "tool_use":
                     continue
                 args = json.dumps(block.input, separators=(",", ":"))
+                if stream_ndjson:
+                    yield json.dumps({
+                        "tool_call": {
+                            "name": block.name,
+                            "arguments": args,
+                        }
+                    }) + "\n"
                 item = ContextPartitionItem(
                     id=block.id, call_id=block.id, name=block.name,
                     arguments=args, type="function_call", status="completed",
-                    text_preamble=round_text if first_tool_call and round_text else None,
+                    text_preamble=round_output if first_tool_call and round_output else None,
                 )
                 first_tool_call = False
                 logger.info("Invoking callback %s with arguments %s", item.name, item.arguments)
@@ -151,8 +158,10 @@ class AnthropicClient(LLMClient):
             if not all(r is not None for r in results):
                 break
             context_partition.extend(r for r in results if r is not None)
+            if round_output and not stream_ndjson:
+                yield "\n"
 
-        if all_yielded_text:
+        if answer_text:
             context_partition.append(ContextPartitionItem(
-                role="assistant", content="".join(all_yielded_text)
+                role="assistant", content="".join(answer_text)
             ))
