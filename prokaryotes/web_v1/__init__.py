@@ -489,7 +489,7 @@ class WebBase:
 
     def init(self):
         """Synchronous setup steps"""
-        self.graph_client.init_client()
+        #self.graph_client.init_client()
         self.redis_client = get_redis_client()
         self.search_client.init_client()
 
@@ -551,7 +551,7 @@ class WebBase:
 
     async def on_stop(self):
         """Asynchronous teardown steps"""
-        await self.graph_client.close()
+        #await self.graph_client.close()
         await self.search_client.close()
 
     async def post_login(
