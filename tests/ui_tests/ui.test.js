@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { buildChatQueryParams, createChatApp, parseStreamPayloadLine } from '../scripts/static/ui.js';
+import { buildChatQueryParams, createChatApp, parseStreamPayloadLine } from '../../scripts/static/ui.js';
 
 // 1) DOM fixtures + network stream mocks
 function renderBaseDOM() {
@@ -569,14 +569,39 @@ describe('createChatApp messageTree flow', () => {
             const app = setupApp({ fetchImpl: fetchMock });
             await sendUserMessage(app, 'Hi');
 
+            const assistantMessage = app.getMessages().find(message => message.role === 'assistant');
+            expect(assistantMessage).toBeTruthy();
+            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('part-1');
+
             const indicator = document.getElementById('compaction-indicator');
             expect(indicator.hidden).toBe(false);
 
             await vi.advanceTimersByTimeAsync(5_000);
+            await flushAsyncWork();
             expect(indicator.hidden).toBe(false);
 
             await vi.advanceTimersByTimeAsync(5_000);
+            await flushAsyncWork();
             expect(indicator.hidden).toBe(true);
+            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('part-1');
+        });
+
+        it('relabels assistant nodes when poll returns a new child partition_uuid', async () => {
+            renderDOMWithCompactionIndicator();
+            vi.useFakeTimers();
+
+            const fetchMock = createCompactionFetchMock([{ done: true, partition_uuid: 'child-uuid' }]);
+            const app = setupApp({ fetchImpl: fetchMock });
+            await sendUserMessage(app, 'Hi');
+
+            const assistantMessage = app.getMessages().find(message => message.role === 'assistant');
+            expect(assistantMessage).toBeTruthy();
+            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('part-1');
+
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushAsyncWork();
+
+            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('child-uuid');
         });
 
         it('stops polling when a new message clears the indicator via partition_uuid change', async () => {

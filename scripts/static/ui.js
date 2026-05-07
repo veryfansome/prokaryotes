@@ -326,6 +326,17 @@ export function createChatApp({
         return null;
     }
 
+    function relabelPartitionUuid(oldPartitionUuid, newPartitionUuid) {
+        if (!oldPartitionUuid || !newPartitionUuid || oldPartitionUuid === newPartitionUuid) {
+            return;
+        }
+        messageTree.forEach(node => {
+            if (node.partitionUuid === oldPartitionUuid) {
+                node.partitionUuid = newPartitionUuid;
+            }
+        });
+    }
+
     function getUserSiblingIds(nodeId) {
         const node = getNode(nodeId);
         if (!node || node.role !== 'user' || node.parentId === null) {
@@ -369,6 +380,9 @@ export function createChatApp({
                 if (!res.ok) { stopCompactionPolling(); return; }
                 const data = await res.json();
                 if (data.done) {
+                    if (typeof data.partition_uuid === 'string' && data.partition_uuid) {
+                        relabelPartitionUuid(partitionUuid, data.partition_uuid);
+                    }
                     clearCompactionIndicator();
                 }
             } catch {
@@ -582,6 +596,43 @@ export function createChatApp({
         return parts.join('\n\n');
     }
 
+    function formatFileToolCallMarkdown(parsedArgs) {
+        const action = parsedArgs.action;
+        const path = typeof parsedArgs.path === 'string' ? parsedArgs.path : '';
+        const startLine = parsedArgs.start_line;
+        const endLine = parsedArgs.end_line;
+        const newText = parsedArgs.new_text;
+        const parts = ['Tool call: `file_tool`'];
+        if (action === 'read') {
+            if (typeof startLine === 'number') {
+                parts.push(`Reading \`${path}\` from line ${startLine}`);
+            } else {
+                parts.push(`Reading \`${path}\``);
+            }
+        } else if (action === 'create_file') {
+            parts.push(`Creating \`${path}\``);
+            if (typeof newText === 'string' && newText.length > 0) {
+                parts.push(formatCodeBlock(newText));
+            }
+        } else if (action === 'replace_lines') {
+            parts.push(`Editing \`${path}\` lines ${startLine}-${endLine}`);
+            if (typeof newText === 'string' && newText.length > 0) {
+                parts.push(formatCodeBlock(newText));
+            }
+        } else if (action === 'insert_lines') {
+            parts.push(`Inserting at \`${path}\` line ${startLine}`);
+            if (typeof newText === 'string' && newText.length > 0) {
+                parts.push(formatCodeBlock(newText));
+            }
+        } else if (action === 'delete_lines') {
+            parts.push(`Deleting \`${path}\` lines ${startLine}-${endLine}`);
+        } else {
+            const actionLabel = typeof action === 'string' && action ? action : 'unknown';
+            parts.push(`Unknown file action: \`${actionLabel}\``);
+        }
+        return parts.join('\n\n');
+    }
+
     function formatToolCallMarkdown(name, rawArguments) {
         let parsedArgs;
         try {
@@ -604,6 +655,9 @@ export function createChatApp({
             ].join('\n');
         }
 
+        if (name === 'file_tool') {
+            return formatFileToolCallMarkdown(parsedArgs);
+        }
         if (name === 'shell_command') {
             return formatShellCommandToolCallMarkdown(parsedArgs);
         }

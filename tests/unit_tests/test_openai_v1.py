@@ -198,26 +198,23 @@ async def test_stream_turn_yields_text_and_continues_after_tool_callback():
 
     assert chunks == ["Checking ", "\n", "Done."]
 
-    # Intermediate text is stored as text_preamble on the function_call item, not as a
-    # standalone assistant message. The persisted assistant message contains only the
-    # final answer text; progress preambles stay on the function_call item.
+    # Intermediate tool-round text is streamed to the user, but not persisted in the
+    # partition. The persisted assistant message contains only the final answer text.
     assert context_partition.items == [
         ContextPartitionItem(role="user", content="Tell me about Mars"),
         ContextPartitionItem(
             type="function_call", name="lookup",
             arguments='{"query":"mars"}', call_id="call_1", id="call_1",
-            text_preamble="Checking ",
         ),
         ContextPartitionItem(call_id="call_1", output="Mars facts", type="function_call_output"),
         ContextPartitionItem(role="assistant", content="Done."),
     ]
 
     assert len(client.async_openai.responses.calls) == 2
-    # The second call must reconstruct the text item from text_preamble so the
-    # Responses API receives the original model turn in the correct order.
+    # The second call receives only persisted conversation items; the transient
+    # progress message is not replayed into provider input.
     assert client.async_openai.responses.calls[1]["input"] == [
         {"content": "Tell me about Mars", "role": "user", "type": "message"},
-        {"content": "Checking ", "role": "assistant", "type": "message"},
         {"type": "function_call", "name": "lookup", "arguments": '{"query":"mars"}',
          "call_id": "call_1", "id": "call_1"},
         {"type": "function_call_output", "call_id": "call_1", "output": "Mars facts"},

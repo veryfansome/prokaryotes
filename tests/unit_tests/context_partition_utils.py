@@ -63,6 +63,9 @@ class FakeRedis:
     def pipeline(self):
         return FakePipeline(self)
 
+    async def aclose(self):
+        return None
+
     async def set(self, key: str, value, ex=None, nx=False):
         stored_value = value.encode() if isinstance(value, str) else value
         if nx and key in self._data:
@@ -76,6 +79,7 @@ class FakeSearchClient:
     def __init__(self, docs=None):
         self.docs = {doc["partition_uuid"]: dict(doc) for doc in (docs or [])}
         self.puts = []
+        self.put_kwargs = []
         self.updates = []
 
     async def find_partition_by_tail_hash(self, conversation_uuid: str, tail_hash: str) -> dict | None:
@@ -84,6 +88,7 @@ class FakeSearchClient:
                 doc.get("conversation_uuid") == conversation_uuid
                 and doc.get("tail_hash") == tail_hash
                 and doc.get("is_compacted")
+                and doc.get("compaction_state", "committed") == "committed"
             ):
                 return doc
         return None
@@ -91,10 +96,24 @@ class FakeSearchClient:
     async def get_partition(self, partition_uuid: str) -> dict | None:
         return self.docs.get(partition_uuid)
 
-    async def put_partition(self, partition: ContextPartition) -> None:
-        doc = make_doc(partition)
+    async def put_partition(
+            self,
+            partition: ContextPartition,
+            *,
+            compaction_attempt_uuid: str | None = None,
+            compaction_state: str = "committed",
+    ) -> None:
+        doc = make_doc(
+            partition,
+            compaction_attempt_uuid=compaction_attempt_uuid,
+            compaction_state=compaction_state,
+        )
         self.docs[partition.partition_uuid] = doc
         self.puts.append(partition)
+        self.put_kwargs.append({
+            "compaction_attempt_uuid": compaction_attempt_uuid,
+            "compaction_state": compaction_state,
+        })
 
     async def search_partitions(self, conversation_uuid: str, query: str) -> list[dict]:
         return []
@@ -117,6 +136,8 @@ def make_doc(partition: ContextPartition, **overrides):
         "partition_uuid": partition.partition_uuid,
         "conversation_uuid": partition.conversation_uuid,
         "parent_partition_uuid": partition.parent_partition_uuid,
+        "compaction_state": "committed",
+        "compaction_attempt_uuid": None,
         "ancestor_summaries": partition.ancestor_summaries,
         "raw_message_start_index": partition.raw_message_start_index,
         "is_compacted": False,

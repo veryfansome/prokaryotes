@@ -6,13 +6,18 @@ on:
       - main
     paths:
       - .github/workflows/tests.yml
+      - database/**
+      - docker-compose.yml
+      - prokaryotes/**/*.py
       - pyproject.toml
+      - scripts/**/*.py
+      - tests/integration_tests/**/*.py
+      - tests/unit_tests/**/*.py
       - uv.lock
-      - '*/**.py'
   pull_request: *repo_trigger
 
 jobs:
-  tests:
+  unit:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -39,3 +44,57 @@ jobs:
           uv run ruff check .
           uv run pytest -vvv --cov --cov-report=xml --cov-report=term
 
+  integration:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          prune-cache: false
+
+      - name: Bring up data stores
+        run: docker compose up -d elasticsearch postgres postgres-migrate redis
+
+      - name: Wait for Elasticsearch
+        run: |
+          for i in {1..60}; do
+            if curl -fsS "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color elasticsearch
+          exit 1
+
+      - name: Install Python deps
+        run: uv sync --extra dev --extra test --frozen --no-install-project
+
+      - name: Initialize search indices
+        env:
+          ELASTIC_URI: http://localhost:9200
+        run: uv run python -m scripts.search_init
+
+      - name: Tier B (fake LLM)
+        run: uv run --extra test pytest tests/integration_tests/tier_b -vvv
+
+      - name: Tier A (live LLM)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: uv run --extra test pytest tests/integration_tests/tier_a -vvv
+
+      - name: Capture compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color > docker-logs.txt
+
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs
+          path: docker-logs.txt

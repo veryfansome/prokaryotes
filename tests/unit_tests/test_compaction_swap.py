@@ -1,13 +1,18 @@
 import pytest
 from redis.exceptions import WatchError
 
+import prokaryotes.web_v1 as web_v1_module
 from prokaryotes.api_v1.models import (
     ContextPartition,
     compute_boundary_hash,
 )
+from prokaryotes.search_v1.context_partitions import (
+    COMPACTION_STATE_COMMITTED,
+    COMPACTION_STATE_PENDING,
+)
 from prokaryotes.utils_v1.llm_utils import COMPACTION_RECENCY_TAIL
 from prokaryotes.web_v1 import _recency_tail_items
-from tests.context_partition_utils import (
+from tests.unit_tests.context_partition_utils import (
     FakePipeline,
     FakeRedis,
     FakeSearchClient,
@@ -70,7 +75,7 @@ async def test_boundary_hash_stored_on_es_covers_full_parent_prefix():
         lock_key=lock_key,
     )
 
-    update_fields = search.updates[0][1]
+    update_fields = next(fields for partition_uuid, fields in search.updates if partition_uuid == "p1")
     assert update_fields["boundary_hash"] == compute_boundary_hash(expected_boundary_items)
     assert update_fields["boundary_message_count"] == 4
 
@@ -102,6 +107,11 @@ async def test_compact_partition_accumulates_ancestor_summaries_across_generatio
     cached = ContextPartition.model_validate_json(await redis.get("context_partition:conv"))
     assert cached.ancestor_summaries == ["S0", "S1"]
     assert cached.parent_partition_uuid == "p1"
+    child_doc = search.docs[cached.partition_uuid]
+    parent_doc = search.docs["p1"]
+    assert child_doc["compaction_state"] == COMPACTION_STATE_COMMITTED
+    assert child_doc["compaction_attempt_uuid"] is not None
+    assert child_doc["compaction_attempt_uuid"] == parent_doc["compaction_attempt_uuid"]
 
 
 @pytest.mark.asyncio
@@ -244,6 +254,9 @@ async def test_compact_partition_retries_redis_swap_on_watch_contention():
     assert cached.parent_partition_uuid == "snap"
     assert cached.ancestor_summaries == ["Summary"]
     assert search.puts[-1].parent_partition_uuid == "snap"
+    child_docs = [doc for uuid, doc in search.docs.items() if uuid != "snap"]
+    assert len(child_docs) == 1
+    assert child_docs[0]["compaction_state"] == COMPACTION_STATE_COMMITTED
     assert await redis.exists(lock_key) == 0
 
 
@@ -365,3 +378,150 @@ async def test_compact_partition_skips_swap_when_redis_partition_missing():
     assert not any(key == "context_partition:conv" for key, *_ in redis.sets)
     assert search.puts == []
     assert await redis.exists(lock_key) == 0
+
+
+@pytest.mark.asyncio
+async def test_compact_partition_aborts_before_redis_swap_if_child_persist_fails(monkeypatch):
+    monkeypatch.setattr(web_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
+    snapshot = make_snapshot()
+    redis = FakeRedis({"context_partition:conv": snapshot.model_dump_json()})
+    lock_key = "compaction_lock:conv"
+    await redis.set(lock_key, "1")
+
+    class FailingChildPersistSearch(FakeSearchClient):
+        def __init__(self, docs=None):
+            super().__init__(docs)
+            self.put_attempts = 0
+
+        async def put_partition(
+                self,
+                partition: ContextPartition,
+                *,
+                compaction_attempt_uuid: str | None = None,
+                compaction_state: str = COMPACTION_STATE_COMMITTED,
+        ) -> None:
+            self.put_attempts += 1
+            raise RuntimeError("ES unavailable")
+
+    search = FailingChildPersistSearch([make_doc(snapshot)])
+    wb = make_web_base(search_client=search)
+    wb.redis_client = redis
+
+    async def compact_fn(current_snapshot):
+        return "Summary"
+
+    await wb._compact_partition(
+        snapshot=snapshot,
+        conversation_uuid="conv",
+        compact_fn=compact_fn,
+        lock_key=lock_key,
+    )
+
+    cached = ContextPartition.model_validate_json(await redis.get("context_partition:conv"))
+    assert cached.partition_uuid == "snap"
+    assert cached.items == snapshot.items
+    assert search.put_attempts == 3
+    assert search.updates == []
+    assert await redis.exists(lock_key) == 0
+
+
+@pytest.mark.asyncio
+async def test_compact_partition_keeps_committed_child_reachable_when_parent_update_retries_exhausted(monkeypatch):
+    monkeypatch.setattr(web_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
+    snapshot = make_snapshot()
+    redis = FakeRedis({"context_partition:conv": snapshot.model_dump_json()})
+    lock_key = "compaction_lock:conv"
+    await redis.set(lock_key, "1")
+
+    class FailingParentUpdateSearch(FakeSearchClient):
+        def __init__(self, docs=None):
+            super().__init__(docs)
+            self.parent_update_attempts = 0
+
+        async def update_partition(self, partition_uuid: str, **fields) -> None:
+            if partition_uuid == "snap":
+                self.parent_update_attempts += 1
+                raise RuntimeError("ES update unavailable")
+            await super().update_partition(partition_uuid, **fields)
+
+    search = FailingParentUpdateSearch([make_doc(snapshot)])
+    wb = make_web_base(search_client=search)
+    wb.redis_client = redis
+
+    async def compact_fn(current_snapshot):
+        return "Summary"
+
+    await wb._compact_partition(
+        snapshot=snapshot,
+        conversation_uuid="conv",
+        compact_fn=compact_fn,
+        lock_key=lock_key,
+    )
+
+    cached = ContextPartition.model_validate_json(await redis.get("context_partition:conv"))
+    assert cached.partition_uuid != "snap"
+    assert cached.parent_partition_uuid == "snap"
+    assert cached.ancestor_summaries == ["Summary"]
+    assert cached.partition_uuid in search.docs
+    assert search.docs[cached.partition_uuid]["parent_partition_uuid"] == "snap"
+    assert search.docs[cached.partition_uuid]["compaction_state"] == COMPACTION_STATE_COMMITTED
+    assert search.docs[cached.partition_uuid]["compaction_attempt_uuid"] is not None
+    assert search.docs["snap"]["is_compacted"] is False
+    assert search.docs["snap"]["compaction_attempt_uuid"] is None
+    assert search.parent_update_attempts == 3
+    assert await redis.exists(lock_key) == 0
+
+
+@pytest.mark.asyncio
+async def test_compact_partition_leaves_pending_child_when_cas_never_commits(monkeypatch):
+    monkeypatch.setattr(web_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
+    snapshot = make_snapshot()
+    execute_calls = []
+    replacement_partition = make_snapshot(
+        partition_uuid="new-branch",
+        items=make_message_items(("user", "U1"), ("assistant", "A1"), ("user", "U2")),
+    )
+
+    class SkipAfterWatchPipeline(FakePipeline):
+        async def execute(self):
+            execute_calls.append(len(execute_calls) + 1)
+            if len(execute_calls) == 1:
+                await self.redis.set(
+                    "context_partition:conv",
+                    replacement_partition.model_dump_json(),
+                )
+                raise WatchError()
+            await super().execute()
+
+    class SkipAfterWatchRedis(FakeRedis):
+        def pipeline(self):
+            return SkipAfterWatchPipeline(self)
+
+    redis = SkipAfterWatchRedis({"context_partition:conv": snapshot.model_dump_json()})
+    lock_key = "compaction_lock:conv"
+    await redis.set(lock_key, "1")
+    search = FakeSearchClient([make_doc(snapshot)])
+    wb = make_web_base(search_client=search)
+    wb.redis_client = redis
+
+    async def compact_fn(current_snapshot):
+        return "Summary"
+
+    await wb._compact_partition(
+        snapshot=snapshot,
+        conversation_uuid="conv",
+        compact_fn=compact_fn,
+        lock_key=lock_key,
+    )
+
+    cached = ContextPartition.model_validate_json(await redis.get("context_partition:conv"))
+    assert cached.partition_uuid == "new-branch"
+    pending_children = [
+        doc for uuid, doc in search.docs.items()
+        if uuid not in {"snap", "new-branch"} and doc["parent_partition_uuid"] == "snap"
+    ]
+    assert len(pending_children) == 1
+    assert pending_children[0]["compaction_state"] == COMPACTION_STATE_PENDING
+    assert pending_children[0]["compaction_attempt_uuid"] is not None
+    assert search.docs["snap"]["is_compacted"] is False
+    assert search.docs["snap"]["compaction_attempt_uuid"] is None

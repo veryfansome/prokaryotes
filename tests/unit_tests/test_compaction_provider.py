@@ -7,7 +7,7 @@ from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
 )
-from tests.context_partition_utils import make_message_items
+from tests.unit_tests.context_partition_utils import make_message_items
 
 
 def make_anthropic_harness(create_fn):
@@ -59,7 +59,7 @@ async def test_anthropic_summarize_and_compact_includes_ancestor_summaries_in_sy
 
 
 @pytest.mark.asyncio
-async def test_openai_summarize_and_compact_excludes_text_preamble():
+async def test_openai_summarize_and_compact_uses_only_persisted_conversation_items():
     calls = []
 
     async def fake_create(**kwargs):
@@ -77,10 +77,9 @@ async def test_openai_summarize_and_compact_excludes_text_preamble():
                 arguments='{"query":"mars"}',
                 call_id="call_1",
                 id="call_1",
-                text_preamble="Let me look that up. ",
             ),
             ContextPartitionItem(call_id="call_1", output="Mars facts", type="function_call_output"),
-            ContextPartitionItem(role="assistant", content="Let me look that up. Here are the facts."),
+            ContextPartitionItem(role="assistant", content="Here are the facts."),
         ],
     )
 
@@ -88,18 +87,27 @@ async def test_openai_summarize_and_compact_excludes_text_preamble():
 
     input_items = calls[0]["input"]
     assert result == "Summary."
-    for item in input_items:
-        assert "text_preamble" not in item
-
-    preamble_msgs = [
-        item for item in input_items
-        if item.get("role") == "assistant" and item.get("content") == "Let me look that up. "
+    assert input_items == [
+        {"role": "user", "content": "Tell me about Mars", "type": "message"},
+        {
+            "type": "function_call",
+            "name": "lookup",
+            "arguments": '{"query":"mars"}',
+            "call_id": "call_1",
+            "id": "call_1",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "Mars facts"},
+        {"role": "assistant", "content": "Here are the facts.", "type": "message"},
+        {
+            "role": "user",
+            "content": (
+                "Summarize the conversation above as a structured briefing for future continuation. "
+                "Preserve key decisions, facts, code produced, and tool call outcomes. "
+                "Use markdown sections. Be concise."
+            ),
+            "type": "message",
+        },
     ]
-    assert len(preamble_msgs) == 1
-
-    preamble_idx = input_items.index(preamble_msgs[0])
-    func_call_idx = next(i for i, item in enumerate(input_items) if item.get("type") == "function_call")
-    assert preamble_idx + 1 == func_call_idx
 
 
 @pytest.mark.asyncio

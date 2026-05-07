@@ -16,6 +16,8 @@ from prokaryotes.api_v1.models import (
 logger = logging.getLogger(__name__)
 
 INDEX = "context-partitions"
+COMPACTION_STATE_COMMITTED = "committed"
+COMPACTION_STATE_PENDING = "pending"
 
 context_partition_mappings = {
     "dynamic": "strict",
@@ -23,6 +25,8 @@ context_partition_mappings = {
         "partition_uuid": {"type": "keyword"},
         "conversation_uuid": {"type": "keyword"},
         "parent_partition_uuid": {"type": "keyword"},
+        "compaction_state": {"type": "keyword"},
+        "compaction_attempt_uuid": {"type": "keyword"},
         "is_compacted": {"type": "boolean"},
         "summary": {"type": "text", "analyzer": "standard"},
         "ancestor_summaries": {"type": "keyword", "index": False, "doc_values": False},
@@ -57,6 +61,18 @@ def _extract_message_content(items: list[ContextPartitionItem]) -> str:
         for item in conversation_message_items(items)
         if item.content
     )
+
+
+def _committed_or_legacy_clause() -> dict[str, object]:
+    return {
+        "bool": {
+            "should": [
+                {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
+                {"bool": {"must_not": [{"exists": {"field": "compaction_state"}}]}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
 
 
 def items_from_doc(doc: dict) -> list[ContextPartitionItem]:
@@ -107,6 +123,7 @@ class ContextPartitionSearcher(ABC):
                         {"term": {"conversation_uuid": conversation_uuid}},
                         {"term": {"tail_hash": tail_hash}},
                         {"term": {"is_compacted": True}},
+                        _committed_or_legacy_clause(),
                     ]
                 }
             },
@@ -122,13 +139,21 @@ class ContextPartitionSearcher(ABC):
         except Exception:
             return None
 
-    async def put_partition(self, partition: ContextPartition) -> None:
+    async def put_partition(
+            self,
+            partition: ContextPartition,
+            *,
+            compaction_attempt_uuid: str | None = None,
+            compaction_state: str = COMPACTION_STATE_COMMITTED,
+    ) -> None:
         now = datetime.now(UTC).isoformat()
         boundary_fields = _default_boundary_fields(partition)
         doc = {
             "partition_uuid": partition.partition_uuid,
             "conversation_uuid": partition.conversation_uuid,
             "parent_partition_uuid": partition.parent_partition_uuid,
+            "compaction_state": compaction_state,
+            "compaction_attempt_uuid": compaction_attempt_uuid,
             "is_compacted": False,
             "summary": None,
             "ancestor_summaries": partition.ancestor_summaries,
@@ -152,6 +177,7 @@ class ContextPartitionSearcher(ABC):
                 "bool": {
                     "must": [
                         {"term": {"conversation_uuid": conversation_uuid}},
+                        _committed_or_legacy_clause(),
                         {
                             "multi_match": {
                                 "query": query,

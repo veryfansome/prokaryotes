@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from fastapi import (
     HTTPException,
@@ -15,6 +16,7 @@ from prokaryotes.api_v1.models import (
     ContextPartitionItem,
     FunctionToolCallback,
 )
+from prokaryotes.tools_v1.file_tool import FileTool, reconcile_tracked_files
 from prokaryotes.tools_v1.shell_command import ShellCommandTool
 from prokaryotes.tools_v1.think import ThinkTool
 from prokaryotes.utils_v1 import system_message_utils
@@ -25,7 +27,7 @@ from prokaryotes.utils_v1.llm_utils import (
     DEFAULT_CONTEXT_WINDOW,
     MODEL_CONTEXT_WINDOWS,
 )
-from prokaryotes.web_v1 import WebBase
+from prokaryotes.web_v1 import WebBase, _strip_live_window_bodies
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,10 @@ class WebHarness(WebBase):
             model: str,
             snapshot: ContextPartition,
     ) -> str:
-        system_str, messages = snapshot.to_anthropic_messages()
+        # Strip live-window file bodies from the summarization input so current file
+        # contents do not fossilize into ancestor summaries.
+        summary_input = _strip_live_window_bodies(snapshot)
+        system_str, messages = summary_input.to_anthropic_messages()
         summarization_messages = messages + [{
             "role": "user",
             "content": (
@@ -88,10 +93,14 @@ class WebHarness(WebBase):
         if len(conversation.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
         context_partition = await self.sync_context_partition(conversation)
+        workspace_root = Path.cwd()
+        await reconcile_tracked_files(context_partition, workspace_root=workspace_root)
 
+        file_tool = FileTool(context_partition, workspace_root=workspace_root)
         shell_command_tool = ShellCommandTool()
         think_tool = ThinkTool(self.llm_client, model)
         tool_callbacks: dict[str, FunctionToolCallback] = {
+            file_tool.name: file_tool,
             shell_command_tool.name: shell_command_tool,
             think_tool.name: think_tool,
         }

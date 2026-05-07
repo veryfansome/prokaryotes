@@ -6,12 +6,12 @@ on:
       - main
     paths:
       - .github/workflows/tests-js.yml
-      - package.json
       - package-lock.json
-      - vitest.config.js
-      - scripts/static/**/*.js
+      - package.json
       - scripts/static/**/*.html
-      - tests/**/*.js
+      - scripts/static/**/*.js
+      - tests/ui_tests/**/*.js
+      - vitest.config.js
   pull_request: *repo_trigger
 
 jobs:

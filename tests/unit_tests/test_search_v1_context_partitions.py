@@ -9,12 +9,14 @@ from prokaryotes.api_v1.models import (
     ContextPartitionItem,
 )
 from prokaryotes.search_v1.context_partitions import (
+    COMPACTION_STATE_COMMITTED,
+    COMPACTION_STATE_PENDING,
     ContextPartitionSearcher,
     _extract_message_content,
     items_from_doc,
     partition_from_doc,
 )
-from tests.context_partition_utils import make_doc
+from tests.unit_tests.context_partition_utils import make_doc
 
 
 class FakeContextPartitionSearcher(ContextPartitionSearcher):
@@ -70,6 +72,11 @@ async def test_find_partition_by_tail_hash_filters_to_compacted_conversation_doc
     assert {"term": {"conversation_uuid": "conv-1"}} in must
     assert {"term": {"tail_hash": "abc123"}} in must
     assert {"term": {"is_compacted": True}} in must
+    committed_filter = next(
+        clause for clause in must
+        if clause.get("bool", {}).get("minimum_should_match") == 1
+    )
+    assert {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}} in committed_filter["bool"]["should"]
 
 
 def test_items_from_doc_returns_empty_list_when_items_json_absent():
@@ -142,6 +149,8 @@ async def test_put_partition_indexes_document_with_boundary_fields():
     assert call_kwargs["index"] == "context-partitions"
     assert call_kwargs["id"] == partition.partition_uuid
     assert doc["conversation_uuid"] == "conv-1"
+    assert doc["compaction_state"] == COMPACTION_STATE_COMMITTED
+    assert doc["compaction_attempt_uuid"] is None
     assert doc["ancestor_summaries"] == ["Earlier summary"]
     assert doc["raw_message_start_index"] == 2
     assert doc["boundary_message_count"] == 4
@@ -162,6 +171,30 @@ async def test_search_partitions_returns_sources():
     results = await searcher.search_partitions("conv-1", "Python")
 
     assert [result["partition_uuid"] for result in results] == ["p1", "p2"]
+    must = es.search.call_args.kwargs["query"]["bool"]["must"]
+    committed_filter = next(
+        clause for clause in must
+        if clause.get("bool", {}).get("minimum_should_match") == 1
+    )
+    assert {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}} in committed_filter["bool"]["should"]
+
+
+@pytest.mark.asyncio
+async def test_put_partition_accepts_pending_compaction_metadata():
+    es = AsyncMock(spec=AsyncElasticsearch)
+    es.index = AsyncMock()
+    searcher = make_searcher(es)
+    partition = make_partition()
+
+    await searcher.put_partition(
+        partition,
+        compaction_attempt_uuid="attempt-1",
+        compaction_state=COMPACTION_STATE_PENDING,
+    )
+
+    doc = es.index.call_args.kwargs["document"]
+    assert doc["compaction_attempt_uuid"] == "attempt-1"
+    assert doc["compaction_state"] == COMPACTION_STATE_PENDING
 
 
 @pytest.mark.asyncio
