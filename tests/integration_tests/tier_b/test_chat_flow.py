@@ -176,7 +176,7 @@ async def test_tool_call_round_trip(web_harness, authed_client, request):
     assert "function_call_output" in item_types
     assert item_types.index("function_call") < item_types.index("function_call_output")
     function_call_item = next(item for item in partition.items if item.type == "function_call")
-    assert function_call_item.text_preamble == "Let me check..."
+    assert function_call_item.arguments == json.dumps({"command": "echo hi", "reason": "test"})
 
 
 @pytest.mark.parametrize(

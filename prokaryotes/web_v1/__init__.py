@@ -6,6 +6,7 @@ import os
 import uuid
 from collections.abc import (
     AsyncGenerator,
+    Callable,
     Coroutine,
 )
 from contextlib import asynccontextmanager
@@ -50,6 +51,8 @@ from prokaryotes.api_v1.models import (
 from prokaryotes.graph_v1 import GraphClient
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.search_v1.context_partitions import (
+    COMPACTION_STATE_COMMITTED,
+    COMPACTION_STATE_PENDING,
     items_from_doc,
     partition_from_doc,
 )
@@ -61,6 +64,246 @@ from prokaryotes.utils_v1.llm_utils import (
 from prokaryotes.utils_v1.logging_utils import log_async_task_exception
 
 logger = logging.getLogger(__name__)
+
+_CURRENT_VIEW_MARKER_PREFIX = "Current view"
+_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2)
+
+
+async def _retry_compaction_search_write(
+        operation_name: str,
+        action: Callable[[], Coroutine[Any, Any, None]],
+) -> None:
+    total_attempts = len(_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS) + 1
+    for attempt_idx in range(total_attempts):
+        try:
+            await action()
+            return
+        except Exception:
+            if attempt_idx == total_attempts - 1:
+                raise
+            delay = _COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS[attempt_idx]
+            logger.warning(
+                "Compaction %s failed on attempt %d/%d; retrying in %.2fs",
+                operation_name,
+                attempt_idx + 1,
+                total_attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+
+def _strip_live_window_bodies(partition: ContextPartition) -> ContextPartition:
+    """Return a deep copy of `partition` with each live-window `output` rewritten so the
+    summarizer cannot fossilize current file contents into `ancestor_summaries`.
+
+    The invariant this enforces is broad: *no* live window's current file contents reach
+    the summary input — not just live windows for paths active in the recency tail. Once
+    a summary is written, no later `reconcile_tracked_files` can reach back into it, so
+    any file body that lands there drifts out of sync with the on-disk truth that future
+    live-window refreshes track. Stripping at the summarization input is the only place
+    we can prevent that.
+
+    Two stripping shapes, depending on the live-window kind (detected by `output` prefix):
+
+    - Ordinary `FILE ... status=live` read results are replaced wholesale with a
+      path-only placeholder. The diagnostic value is just the path.
+    - `ALREADY_EXISTS`, `CONFLICT`, and `RANGE_ERROR` results keep their two header
+      lines (which describe what the model tried and the failure mode) and have only
+      the embedded `Current view ...` body — the actual file contents — replaced with
+      the placeholder. That preserves the historical failure signal in the summary
+      while keeping current content out.
+
+    Edit records, tombstones (`status=stale`), function_call items, and message items
+    are not touched: edit records and tombstones already document file activity without
+    embedding current contents, and the rest are not file-related.
+    """
+    stripped = partition.model_copy(deep=True)
+    for item in stripped.items:
+        if not _is_live_window(item):
+            continue
+        item.output = _strip_live_window_output(item)
+    return stripped
+
+
+def _strip_live_window_output(item: ContextPartitionItem) -> str:
+    ann = item.prokaryotes_annotations or {}
+    path = ann.get("file_tool.path", "<unknown>")
+    placeholder = (
+        f"[Live tracked file: {path} — current contents are tracked via the live-window"
+        f" mechanism on subsequent turns, not summarized here.]"
+    )
+    output = item.output or ""
+    if (
+            output.startswith("ALREADY_EXISTS ")
+            or output.startswith("CONFLICT ")
+            or output.startswith("RANGE_ERROR ")
+    ):
+        diagnostic_lines = []
+        for line in output.splitlines():
+            if line.startswith(_CURRENT_VIEW_MARKER_PREFIX):
+                if diagnostic_lines:
+                    return "\n".join(diagnostic_lines) + "\n" + placeholder
+                break
+            diagnostic_lines.append(line)
+    return placeholder
+
+
+def _is_live_window(item: ContextPartitionItem) -> bool:
+    """A live-window function_call_output is the one mutable kind of partition item:
+    its `output` and the `file_tool.revision` / `file_tool.view_end_line` annotations
+    can change in-place when `reconcile_tracked_files` or a `file_tool` write refreshes
+    it. All other item kinds (messages, function_calls, edit records, tombstoned
+    outputs) are append-only and compared with full Pydantic equality."""
+    ann = item.prokaryotes_annotations
+    return (
+        item.type == "function_call_output"
+        and ann is not None
+        and ann.get("file_tool.status") == "live"
+    )
+
+
+def _items_equal_mod_live_windows(
+        a: list[ContextPartitionItem],
+        b: list[ContextPartitionItem],
+) -> bool:
+    """Compare two item lists treating live-window refresh as equivalent.
+
+    Used by `_compact_partition`'s prefix check so that a concurrent request that ran
+    `reconcile_tracked_files` or applied `file_tool` writes between the snapshot and
+    the swap doesn't falsify the prefix purely by refreshing earlier live windows
+    in-place. Live -> stale tombstoning is still surfaced as a difference because
+    `file_tool.status` is part of the stable identity tuple. Real divergences
+    (appended items, replaced items, modified message content, edit-record changes)
+    fall through to full equality and continue to skip the swap.
+
+    The lifted windows in the resulting swapped partition come from `snapshot.items`
+    and may briefly carry pre-refresh `output`/`revision` until the next request's
+    `reconcile_tracked_files` repairs them — a one-turn lag rather than a regression.
+    """
+    if len(a) != len(b):
+        return False
+    for ai, bi in zip(a, b, strict=True):
+        if _is_live_window(ai) and _is_live_window(bi):
+            if _live_window_stable_repr(ai) != _live_window_stable_repr(bi):
+                return False
+        elif ai != bi:
+            return False
+    return True
+
+
+def _live_window_stable_repr(item: ContextPartitionItem) -> tuple:
+    """Identity tuple for a live-window item — only the fields that don't mutate
+    during `_refresh_live_windows`. The mutable trio (`output`,
+    `file_tool.revision`, `file_tool.view_end_line`) is intentionally excluded."""
+    ann = item.prokaryotes_annotations or {}
+    return (
+        item.type,
+        item.call_id,
+        item.id,
+        ann.get("file_tool.path"),
+        ann.get("file_tool.status"),
+        ann.get("file_tool.view_start_line"),
+    )
+
+
+def _lift_active_live_windows(
+        pre_tail: list[ContextPartitionItem],
+        recency_tail: list[ContextPartitionItem],
+) -> list[ContextPartitionItem]:
+    """Lift pre-tail live windows for paths active in the recency tail.
+
+    Active paths are those carrying a `file_tool.path` annotation in the recency tail
+    (live windows or edit records). For each active path, every pre-tail
+    `(function_call, function_call_output)` pair whose output is a live window for that
+    path is moved into the new tail immediately before the tool-call round that
+    first carries a `file_tool.path` annotation. Original `call_id`s and arguments
+    are preserved.
+
+    The placement is constrained by Anthropic's user-first message requirement and the
+    fact that `_recency_tail_items()` guarantees the tail's leading message is user role:
+    inserting before the annotated tool round slots lifted pairs after that leading user
+    prefix while keeping them adjacent to the downstream activity that uses them without
+    splitting same-round tool calls from their outputs.
+    """
+    tail_function_call_idx_by_call_id: dict[str, int] = {}
+    for idx, item in enumerate(recency_tail):
+        if item.type == "function_call":
+            cid = item.call_id or item.id
+            if cid is not None:
+                tail_function_call_idx_by_call_id[cid] = idx
+
+    active_paths: set[str] = set()
+    insertion_idx: int | None = None
+    for idx, item in enumerate(recency_tail):
+        ann = item.prokaryotes_annotations or {}
+        path = ann.get("file_tool.path")
+        if not path:
+            continue
+        if ann.get("file_tool.status") == "stale":
+            continue
+        active_paths.add(path)
+        if insertion_idx is not None:
+            continue
+        if item.type == "function_call_output":
+            cid = item.call_id or item.id
+            paired_call_idx = tail_function_call_idx_by_call_id.get(cid) if cid else None
+            if paired_call_idx is not None:
+                insertion_idx = _tool_round_start_index(recency_tail, paired_call_idx)
+            else:
+                insertion_idx = _tool_round_start_index(recency_tail, idx)
+        else:
+            insertion_idx = _tool_round_start_index(recency_tail, idx)
+    if not active_paths:
+        return list(recency_tail)
+
+    pre_tail_function_calls: dict[str, ContextPartitionItem] = {}
+    for item in pre_tail:
+        if item.type == "function_call":
+            cid = item.call_id or item.id
+            if cid is not None:
+                pre_tail_function_calls[cid] = item
+
+    lifted_pairs: list[ContextPartitionItem] = []
+    for item in pre_tail:
+        if item.type != "function_call_output":
+            continue
+        ann = item.prokaryotes_annotations or {}
+        if ann.get("file_tool.status") != "live":
+            continue
+        if ann.get("file_tool.path") not in active_paths:
+            continue
+        cid = item.call_id or item.id
+        if cid is None:
+            continue
+        function_call_item = pre_tail_function_calls.get(cid)
+        if function_call_item is None:
+            continue
+        lifted_pairs.append(function_call_item)
+        lifted_pairs.append(item)
+
+    if not lifted_pairs:
+        return list(recency_tail)
+
+    insert_at = insertion_idx if insertion_idx is not None else 0
+    return list(recency_tail[:insert_at]) + lifted_pairs + list(recency_tail[insert_at:])
+
+
+def _tool_round_start_index(items: list[ContextPartitionItem], idx: int) -> int:
+    """Return the earliest index we can insert at without splitting a tool-call round.
+
+    Provider histories represent one parallel tool-call round as a contiguous block of
+    `function_call` items followed by a contiguous block of `function_call_output` items.
+    When the first active file item is inside that structure, insertion must happen before
+    the whole block, otherwise Anthropic can see a tool_use whose matching tool_result is
+    delayed past an unrelated lifted pair.
+    """
+    start = idx
+    while start > 0 and items[start - 1].type == "function_call_output":
+        start -= 1
+    while start > 0 and items[start - 1].type == "function_call":
+        start -= 1
+    return start
 
 
 def _message_count_before_item_index(items: list[ContextPartitionItem], item_index: int) -> int:
@@ -167,21 +410,21 @@ class WebBase:
             if not summary:
                 logger.warning("Compaction produced empty summary for partition %s", snapshot.partition_uuid)
                 return
+            compaction_attempt_uuid = str(uuid.uuid4())
+            child_partition_uuid = str(uuid.uuid4())
 
+            # Boundary fields are derived from `snapshot` (deterministic) so we can compute
+            # them up-front, but we defer writing `is_compacted=True` to ES until the Redis
+            # CAS swap actually succeeds. If the swap is skipped (live -> stale tombstone,
+            # concurrent edit, lost lock, etc.) and ES already says the parent is compacted,
+            # `_rebuild_from_chain` would later treat the parent's stored summary as
+            # authoritative and silently drop the un-swapped tail, including any tracked-file
+            # state that hadn't been lifted yet.
             boundary_items = await self._boundary_message_items_for_partition(snapshot)
             boundary_hash = compute_boundary_hash(boundary_items)
             tail_hash = compute_tail_hash(boundary_items)
             boundary_message_count = len(boundary_items)
             boundary_user_count = sum(1 for item in boundary_items if item.role == "user")
-            await self.search_client.update_partition(
-                snapshot.partition_uuid,
-                is_compacted=True,
-                summary=summary,
-                boundary_hash=boundary_hash,
-                boundary_message_count=boundary_message_count,
-                boundary_user_count=boundary_user_count,
-                tail_hash=tail_hash,
-            )
 
             redis_key = f"context_partition:{conversation_uuid}"
             async with self.redis_client.pipeline() as pipe:
@@ -204,7 +447,10 @@ class WebBase:
                         if (
                             current_partition.raw_message_start_index != snapshot.raw_message_start_index
                             or current_partition.ancestor_summaries != snapshot.ancestor_summaries
-                            or current_partition.items[:len(snapshot.items)] != snapshot.items
+                            or not _items_equal_mod_live_windows(
+                                current_partition.items[:len(snapshot.items)],
+                                snapshot.items,
+                            )
                         ):
                             logger.info(
                                 "Skipping compaction swap for %s because the active prefix changed",
@@ -212,17 +458,37 @@ class WebBase:
                             )
                             return
 
+                        post_snapshot_items = current_partition.items[len(snapshot.items):]
                         recency_tail, tail_offset = _recency_tail_items(
                             snapshot.items,
                             COMPACTION_RECENCY_TAIL,
                         )
-                        post_snapshot_items = current_partition.items[len(snapshot.items):]
+                        pre_tail = snapshot.items[:len(snapshot.items) - len(recency_tail)]
+                        augmented_tail = _lift_active_live_windows(
+                            pre_tail,
+                            recency_tail + post_snapshot_items,
+                        )
                         swapped_partition = ContextPartition(
                             conversation_uuid=conversation_uuid,
+                            partition_uuid=child_partition_uuid,
                             parent_partition_uuid=snapshot.partition_uuid,
                             ancestor_summaries=snapshot.ancestor_summaries + [summary],
                             raw_message_start_index=snapshot.raw_message_start_index + tail_offset,
-                            items=recency_tail + post_snapshot_items,
+                            items=augmented_tail,
+                        )
+
+                        async def put_child_partition(
+                                partition: ContextPartition = swapped_partition,
+                        ) -> None:
+                            await self.search_client.put_partition(
+                                partition,
+                                compaction_attempt_uuid=compaction_attempt_uuid,
+                                compaction_state=COMPACTION_STATE_PENDING,
+                            )
+
+                        await _retry_compaction_search_write(
+                            f"persist child partition {swapped_partition.partition_uuid}",
+                            put_child_partition,
                         )
 
                         pipe.multi()
@@ -243,7 +509,32 @@ class WebBase:
                         await pipe.reset()
 
             if swapped_partition is not None:
-                await self.search_client.put_partition(swapped_partition)
+                # The child is persisted as `pending` before the Redis CAS so the cache
+                # never points at a partition Elasticsearch doesn't know about. After the
+                # CAS commits we first promote the child to `committed`, then mark the
+                # parent compacted. That way discovery paths can ignore staged children
+                # while exact UUID loads still work for an already-relabeled client.
+                await _retry_compaction_search_write(
+                    f"mark child partition {swapped_partition.partition_uuid} committed",
+                    lambda: self.search_client.update_partition(
+                        swapped_partition.partition_uuid,
+                        compaction_state=COMPACTION_STATE_COMMITTED,
+                        compaction_attempt_uuid=compaction_attempt_uuid,
+                    ),
+                )
+                await _retry_compaction_search_write(
+                    f"mark parent partition {snapshot.partition_uuid} compacted",
+                    lambda: self.search_client.update_partition(
+                        snapshot.partition_uuid,
+                        compaction_attempt_uuid=compaction_attempt_uuid,
+                        is_compacted=True,
+                        summary=summary,
+                        boundary_hash=boundary_hash,
+                        boundary_message_count=boundary_message_count,
+                        boundary_user_count=boundary_user_count,
+                        tail_hash=tail_hash,
+                    ),
+                )
         except Exception:
             logger.exception("compact_partition failed for partition %s", snapshot.partition_uuid)
         finally:
@@ -417,10 +708,23 @@ class WebBase:
         lock_exists = await self.redis_client.exists(f"compaction_lock:{conversation_uuid}")
         if lock_exists:
             return {"done": False}
+        # Lock is acquired in `stream_and_finalize` *before* the `compaction_pending`
+        # event the UI polled in response to, so by the time we observe "no lock" the
+        # compaction task has finished. Either the Redis swap committed to a direct
+        # child of the pending UUID or the swap was skipped (empty summary, prefix
+        # divergence, live->stale tombstone). Both must surface as done so the UI stops
+        # polling — only the direct-child swap case carries a `partition_uuid` for
+        # `relabelPartitionUuid` to consume.
         cached = await self.redis_client.get(f"context_partition:{conversation_uuid}")
         if cached:
             partition = ContextPartition.model_validate_json(cached)
-            return {"done": partition.partition_uuid != pending_partition_uuid}
+            response = {"done": True}
+            if (
+                partition.partition_uuid != pending_partition_uuid
+                and partition.parent_partition_uuid == pending_partition_uuid
+            ):
+                response["partition_uuid"] = partition.partition_uuid
+            return response
         return {"done": True}
 
     @staticmethod
@@ -542,7 +846,7 @@ class WebBase:
             http_utils.httpx_client.aclose(),
             self.on_stop(),
             self.postgres_pool.close(),
-            self.redis_client.close(),
+            self.redis_client.aclose(),
         )
 
     async def on_start(self):

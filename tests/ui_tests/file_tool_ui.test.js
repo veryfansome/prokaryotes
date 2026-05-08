@@ -1,14 +1,6 @@
-/**
- * Vitest coverage for the new `file_tool` formatter in `formatToolCallMarkdown`.
- *
- * The formatter itself is closed over inside `createChatApp`, so this test exercises it
- * via the same path the runtime uses: pushing a `tool_call` event and inspecting the
- * `.message-activity-tool_call` rendering.
- */
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createChatApp } from '../scripts/static/ui.js';
+import { createChatApp } from '../../scripts/static/ui.js';
 
 function renderBaseDOM() {
     document.body.innerHTML = `
@@ -118,6 +110,21 @@ describe('file_tool tool call rendering', () => {
         expect(el.textContent).not.toContain('from line');
     });
 
+    it('renders create_file with new_text fenced', async () => {
+        const el = await pushFileToolCallAndCapture({
+            action: 'create_file',
+            path: '/app/foo.py',
+            expected_revision: null,
+            start_line: null,
+            end_line: null,
+            new_text: 'new\nfile',
+        });
+        expect(el.textContent).toContain('Creating');
+        expect(el.textContent).toContain('/app/foo.py');
+        expect(el.textContent).toContain('new');
+        expect(el.textContent).toContain('file');
+    });
+
     it('renders replace_lines with new_text fenced', async () => {
         const el = await pushFileToolCallAndCapture({
             action: 'replace_lines',
@@ -128,7 +135,7 @@ describe('file_tool tool call rendering', () => {
             new_text: 'updated\ncontent',
         });
         expect(el.textContent).toContain('Editing');
-        expect(el.textContent).toContain('lines 5');
+        expect(el.textContent).toContain('lines 5-7');
         expect(el.textContent).toContain('updated');
         expect(el.textContent).toContain('content');
     });
@@ -157,7 +164,7 @@ describe('file_tool tool call rendering', () => {
             new_text: null,
         });
         expect(el.textContent).toContain('Deleting');
-        expect(el.textContent).toContain('lines 5');
+        expect(el.textContent).toContain('lines 5-9');
     });
 
     it('does not render the null-valued strict-mode parameters', async () => {
@@ -172,5 +179,20 @@ describe('file_tool tool call rendering', () => {
         expect(el.textContent).not.toContain('null');
         expect(el.textContent).not.toContain('expected_revision');
         expect(el.textContent).not.toContain('end_line');
+    });
+
+    it('renders unknown file actions without dumping strict-mode null parameters', async () => {
+        const el = await pushFileToolCallAndCapture({
+            action: 'move_lines',
+            path: '/app/foo.py',
+            expected_revision: null,
+            start_line: null,
+            end_line: null,
+            new_text: null,
+        });
+        expect(el.textContent).toContain('Unknown file action');
+        expect(el.textContent).toContain('move_lines');
+        expect(el.textContent).not.toContain('null');
+        expect(el.textContent).not.toContain('expected_revision');
     });
 });

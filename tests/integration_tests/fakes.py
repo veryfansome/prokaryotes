@@ -8,6 +8,7 @@ ordering for tool-call rounds and reproduce every side effect the harness depend
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
@@ -53,6 +54,8 @@ class FakeAnthropicClient:
     def __init__(self) -> None:
         self._round_cursor = 0
         self._script: LLMScript | None = None
+        self.summary_create_calls: list[dict[str, Any]] = []
+        self.stream_context_partitions: list[ContextPartition] = []
         self.async_anthropic = SimpleNamespace(
             messages=SimpleNamespace(create=self._messages_create),
         )
@@ -73,10 +76,11 @@ class FakeAnthropicClient:
     def init_client(self) -> None:
         pass
 
-    async def _messages_create(self, **_: Any) -> Any:
+    async def _messages_create(self, **kwargs: Any) -> Any:
         script = self._script
         if script is None:
             raise AssertionError("FakeAnthropicClient: no script installed")
+        self.summary_create_calls.append(copy.deepcopy(kwargs))
         # Snapshot the active script before awaiting so in-flight compaction keeps using
         # the summary configuration that was installed for that request.
         if script.summary_delay:
@@ -86,6 +90,8 @@ class FakeAnthropicClient:
     def reset(self) -> None:
         self._script = None
         self._round_cursor = 0
+        self.summary_create_calls = []
+        self.stream_context_partitions = []
 
     def set_script(self, script: LLMScript) -> None:
         self._script = script
@@ -103,6 +109,7 @@ class FakeAnthropicClient:
     ) -> AsyncGenerator[str, Any]:
         if self._script is None:
             raise AssertionError("FakeAnthropicClient: no script installed")
+        self.stream_context_partitions.append(context_partition.model_copy(deep=True))
 
         answer_text: list[str] = []
         tool_call_rounds = 0
@@ -129,7 +136,6 @@ class FakeAnthropicClient:
                 yield json.dumps({"progress_message": round_text}) + "\n"
 
             callback_tasks: list[asyncio.Task] = []
-            first = True
             for tc in round_.tool_calls:
                 if stream_ndjson:
                     yield json.dumps({"tool_call": {"name": tc.name, "arguments": tc.arguments}}) + "\n"
@@ -139,10 +145,8 @@ class FakeAnthropicClient:
                     id=tc.call_id,
                     name=tc.name,
                     status="completed",
-                    text_preamble=round_text if first and round_text else None,
                     type="function_call",
                 )
-                first = False
                 context_partition.append(item)
                 if tool_callbacks and tc.name in tool_callbacks:
                     callback_tasks.append(
@@ -171,6 +175,8 @@ class FakeOpenAIClient:
     def __init__(self) -> None:
         self._round_cursor = 0
         self._script: LLMScript | None = None
+        self.summary_create_calls: list[dict[str, Any]] = []
+        self.stream_context_partitions: list[ContextPartition] = []
         self.async_openai = SimpleNamespace(
             responses=SimpleNamespace(create=self._responses_create),
         )
@@ -191,7 +197,7 @@ class FakeOpenAIClient:
     def init_client(self) -> None:
         pass
 
-    async def _responses_create(self, *, stream: bool = False, **_: Any) -> Any:
+    async def _responses_create(self, *, stream: bool = False, **kwargs: Any) -> Any:
         script = self._script
         if script is None:
             raise AssertionError("FakeOpenAIClient: no script installed")
@@ -200,6 +206,7 @@ class FakeOpenAIClient:
                 "FakeOpenAIClient.responses.create(stream=True) is not implemented; "
                 "streaming goes through stream_turn()."
             )
+        self.summary_create_calls.append(copy.deepcopy(kwargs))
         # Snapshot the active script before awaiting so in-flight compaction keeps using
         # the summary configuration that was installed for that request.
         if script.summary_delay:
@@ -209,6 +216,8 @@ class FakeOpenAIClient:
     def reset(self) -> None:
         self._script = None
         self._round_cursor = 0
+        self.summary_create_calls = []
+        self.stream_context_partitions = []
 
     def set_script(self, script: LLMScript) -> None:
         self._script = script
@@ -226,6 +235,7 @@ class FakeOpenAIClient:
     ) -> AsyncGenerator[str, Any]:
         if self._script is None:
             raise AssertionError("FakeOpenAIClient: no script installed")
+        self.stream_context_partitions.append(context_partition.model_copy(deep=True))
 
         answer_text: list[str] = []
         tool_call_rounds = 0
@@ -237,7 +247,6 @@ class FakeOpenAIClient:
             callback_tasks: list[asyncio.Task] = []
 
             if round_.stop_reason == "tool_use":
-                first = True
                 for tc in round_.tool_calls:
                     if stream_ndjson:
                         yield json.dumps(
@@ -249,10 +258,8 @@ class FakeOpenAIClient:
                         id=tc.call_id,
                         name=tc.name,
                         status="completed",
-                        text_preamble=round_text if first and round_text else None,
                         type="function_call",
                     )
-                    first = False
                     context_partition.append(item)
                     if tool_callbacks and tc.name in tool_callbacks:
                         callback_tasks.append(

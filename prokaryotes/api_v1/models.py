@@ -164,13 +164,6 @@ class ContextPartition(BaseModel):
                     raise ValueError("Function call items require a call_id or id")
                 if item.name is None:
                     raise ValueError("Function call items require a name")
-                if item.text_preamble:
-                    # Intermediate text streamed before this tool call must appear as a
-                    # text block in the same assistant turn as the tool_use block.
-                    if current_role != "assistant":
-                        flush()
-                        current_role = "assistant"
-                    current_content.append({"type": "text", "text": item.text_preamble})
                 role, block = "assistant", {
                     "type": "tool_use",
                     "id": call_id,
@@ -203,18 +196,15 @@ class ContextPartition(BaseModel):
     def to_openai_input(self) -> list[dict]:
         """Build the OpenAI Responses API input list.
 
-        When a function_call item carries a text_preamble, a preceding text message
-        dict is injected so the API receives the text output before the function call —
-        mirroring the original model turn without storing a standalone assistant item.
-
         This method does not inject `ancestor_summaries`; callers that construct a
         developer message must place `ancestor_summary_block()` themselves.
         """
         result = []
         for item in self.items:
-            if item.type == "function_call" and item.text_preamble:
-                result.append({"role": "assistant", "content": item.text_preamble, "type": "message"})
-            item_dict = item.model_dump(exclude_none=True, exclude={"text_preamble"})
+            item_dict = item.model_dump(
+                exclude_none=True,
+                exclude={"prokaryotes_annotations"},
+            )
             if item_dict.get("role") == "system":
                 item_dict["role"] = "developer"
             result.append(item_dict)
@@ -256,16 +246,15 @@ class ContextPartitionItem(BaseModel):
        - openai.types.responses.response_input_param.FunctionCallOutput
     """
 
+    prokaryotes_annotations: dict[str, str] | None = None
+    """Internal harness metadata, Kubernetes-style. Keys are dot-namespaced by component
+    (e.g. `file_tool.path`, `file_tool.revision`, `file_tool.status`). Excluded from
+    `to_openai_input()`; included in Redis/ES serialization."""
+
     role: str | None = None
     """Corresponds with:
        - openai.types.responses.response_input_param.Message
     """
-
-    text_preamble: str | None = None
-    """Intermediate text streamed before a tool_use stop; stored on the first function_call
-    item of that round so to_anthropic_messages() can prepend it as a text block in the
-    same assistant turn, and to_openai_input() can reconstruct a preceding text message dict.
-    Excluded from OpenAI input via to_openai_input(); included in Redis/ES serialization."""
 
     type: Literal["function_call", "function_call_output", "message"] = "message"
     """Corresponds with:
@@ -349,6 +338,35 @@ class ToolParameters(BaseModel):
     type: Literal["object"] = "object"
 
 
+def _anthropic_input_schema(schema: object) -> object:
+    """Return an Anthropic-compatible copy of a JSON schema fragment.
+
+    Anthropic's custom tool schema accepts a narrower keyword set than OpenAI's function
+    schema. In particular, integer properties currently reject `minimum`, so strip that
+    keyword anywhere the schema allows integers while leaving the original schema intact
+    for providers that accept it.
+    """
+    if isinstance(schema, dict):
+        sanitized = {
+            key: _anthropic_input_schema(value)
+            for key, value in schema.items()
+        }
+        schema_type = sanitized.get("type")
+        allows_integer = (
+            schema_type == "integer"
+            or (
+                isinstance(schema_type, list)
+                and "integer" in schema_type
+            )
+        )
+        if allows_integer:
+            sanitized.pop("minimum", None)
+        return sanitized
+    if isinstance(schema, list):
+        return [_anthropic_input_schema(item) for item in schema]
+    return schema
+
+
 class ToolSpec(BaseModel):
     name: str
     description: str
@@ -358,7 +376,7 @@ class ToolSpec(BaseModel):
     def to_anthropic_tool_param(self) -> AnthropicToolParam:
         return AnthropicToolParam(
             description=self.description,
-            input_schema=self.parameters.model_dump(),
+            input_schema=_anthropic_input_schema(self.parameters.model_dump()),
             name=self.name,
             strict=self.strict,
             type="custom",

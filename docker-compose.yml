@@ -115,6 +115,28 @@ services:
 
   # Tests
 
+  integration-tests:
+    networks: [prokaryotes]
+    container_name: prokaryotes-integration-tests
+    image: "prokaryotes:latest"
+    pull_policy: build
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./tests:/app/tests:ro
+    command: ["pytest", "-vvv", "tests/integration_tests/tier_b"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      unit-tests:
+        condition: service_completed_successfully
+
   unit-tests:
     container_name: prokaryotes-unit-tests
     image: "prokaryotes:latest"
@@ -125,10 +147,10 @@ services:
     working_dir: /app
     volumes:
       - ./tests:/app/tests:ro
-      - ~/.cache/huggingface:/root/.cache/huggingface:ro
-    environment: &common-model-env
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
+    #  - ~/.cache/huggingface:/root/.cache/huggingface:ro
+    #environment: &common-model-env
+    #  HF_HUB_OFFLINE: "1"
+    #  TRANSFORMERS_OFFLINE: "1"
     command: ["pytest", "-vvv"]
 
   # Apps
@@ -182,6 +204,8 @@ services:
       elasticsearch:
         condition: service_healthy
       elasticsearch-init:
+        condition: service_completed_successfully
+      integration-tests:
         condition: service_completed_successfully
       #neo4j:
       #  condition: service_healthy

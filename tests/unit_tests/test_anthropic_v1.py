@@ -9,6 +9,7 @@ from prokaryotes.api_v1.models import (
     ToolParameters,
     ToolSpec,
 )
+from prokaryotes.tools_v1.file_tool import FileTool
 
 
 class DummyToolCallback:
@@ -214,6 +215,30 @@ async def test_stream_turn_passes_correct_params():
     }
 
 
+def test_anthropic_tool_param_strips_integer_minimum_from_file_tool_schema():
+    tool = FileTool(ContextPartition(conversation_uuid="test", items=[]))
+
+    anthropic_param = tool.tool_spec.to_anthropic_tool_param()
+
+    start_line = anthropic_param["input_schema"]["properties"]["start_line"]
+    end_line = anthropic_param["input_schema"]["properties"]["end_line"]
+    assert start_line["type"] == ["integer", "null"]
+    assert end_line["type"] == ["integer", "null"]
+    assert "minimum" not in start_line
+    assert "minimum" not in end_line
+
+
+def test_openai_tool_param_keeps_integer_minimum_in_file_tool_schema():
+    tool = FileTool(ContextPartition(conversation_uuid="test", items=[]))
+
+    openai_param = tool.tool_spec.to_openai_function_tool_param()
+
+    start_line = openai_param["parameters"]["properties"]["start_line"]
+    end_line = openai_param["parameters"]["properties"]["end_line"]
+    assert start_line["minimum"] == 1
+    assert end_line["minimum"] == 1
+
+
 @pytest.mark.asyncio
 async def test_stream_turn_yields_text_and_continues_after_tool_callback():
     callback = DummyToolCallback()
@@ -245,29 +270,26 @@ async def test_stream_turn_yields_text_and_continues_after_tool_callback():
 
     assert chunks == ["Checking ", "\n", "Done."]
 
-    # Intermediate text is stored as text_preamble on the function_call item, not as a
-    # standalone assistant message. The persisted assistant message contains only the
-    # final answer text; progress preambles stay on the function_call item.
+    # Intermediate tool-round text is streamed to the user, but not persisted in the
+    # partition. The persisted assistant message contains only the final answer text.
     assert context_partition.items == [
         ContextPartitionItem(role="user", content="Tell me about Mars"),
         ContextPartitionItem(
             id="toolu_1", call_id="toolu_1", name="lookup",
             arguments='{"query":"mars"}', type="function_call", status="completed",
-            text_preamble="Checking ",
         ),
         ContextPartitionItem(call_id="toolu_1", output="Mars facts", type="function_call_output"),
         ContextPartitionItem(role="assistant", content="Done."),
     ]
 
     assert len(client.async_anthropic.messages.calls) == 2
-    # The second call must still receive the preamble text as a text block in the same
-    # assistant turn as the tool_use block — as required by the Anthropic Messages API.
+    # The second call receives only persisted conversation items; the transient
+    # progress message is not replayed into provider input.
     assert client.async_anthropic.messages.calls[1]["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "Tell me about Mars"}]},
         {
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "Checking "},
                 {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"query": "mars"}},
             ],
         },

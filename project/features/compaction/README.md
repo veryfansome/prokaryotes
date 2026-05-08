@@ -68,7 +68,9 @@ Every partition is persisted to Elasticsearch. Redis is the hot cache for the cu
 | `partition_uuid` | Document `_id`; enables O(1) lookup by UUID. |
 | `conversation_uuid` | Scopes partitions to a conversation. |
 | `parent_partition_uuid` | Enables ancestor chain walking. |
-| `is_compacted` | Boolean; set `true` when the compaction summary has been finalized. |
+| `compaction_state` | Child-partition commit state. Normal documents are `committed`; a child written before the Redis CAS is `pending` until the CAS succeeds and the child is promoted. Search and tail-hash discovery ignore `pending` docs. |
+| `compaction_attempt_uuid` | Correlation UUID shared by the child partition and the parent update for a single compaction attempt. |
+| `is_compacted` | Boolean on the partition being summarized and sealed. Set `true` on the parent only after the child swap commits and the summary/boundary metadata are finalized. |
 | `summary` | LLM-generated summary of this partition's content. Full-text indexed. |
 | `items_json` | Serialized raw items. Stored but not indexed (excluded from the inverted index). |
 | `message_content` | Extracted user/assistant text. Full-text indexed for future search. |
@@ -92,7 +94,7 @@ Every response stream begins with a `partition_uuid` event and may end with a `c
 
 **`context_pct`** — An integer percentage of the model's context window consumed, emitted after each LLM round using the input token count from that round's usage data. Rendered as a fill indicator in the UI so the user can anticipate an upcoming compaction.
 
-**`compaction_pending`** — Emitted at the end of a response when a background compaction has been scheduled. The UI shows a non-blocking, pulsing indicator. The indicator clears in two ways: (1) when a subsequent stream arrives carrying a different `partition_uuid`, confirming the Redis swap completed and a new active partition is in use; or (2) automatically via background polling — the client issues `GET /compaction-status?conversation_uuid=…&pending_partition_uuid=…` every 5 seconds and clears the indicator as soon as the response returns `{"done": true}`, without requiring the user to send another message.
+**`compaction_pending`** — Emitted at the end of a response when a background compaction has been scheduled. The UI shows a non-blocking, pulsing indicator. The indicator clears in two ways: (1) when a subsequent stream arrives carrying a different `partition_uuid`, confirming the Redis swap completed and a new active partition is in use; or (2) automatically via background polling — the client issues `GET /compaction-status?conversation_uuid=…&pending_partition_uuid=…` every 5 seconds and clears the indicator as soon as the response returns `{"done": true}`. When the swap committed to a direct child of the pending partition, that polling response also carries `partition_uuid` so the client can relabel its stored branch node UUIDs to the child.
 
 On the request side, `ChatConversation` carries an optional `partition_uuid` field. The client sends back the UUID last received for the active branch, or `null` for a fresh conversation.
 
@@ -160,21 +162,25 @@ Before firing `_compact_partition`, the server acquires `compaction_lock:{conver
 
 The background task performs the following steps:
 
-1. **Write the snapshot to ES** with `is_compacted=False`. This crash-recovery marker ensures that an interrupted compaction leaves a recoverable document that will not be treated as a valid compaction anchor: `_walk_partition_chain` collects all reachable docs, but `_rebuild_from_chain` filters to `is_compacted=True` docs before validating ancestry, so an `is_compacted=False` doc is silently passed over during reconstruction.
-2. **Generate the summary** by calling the LLM with the snapshot's content and a structured summarization prompt. Existing `ancestor_summaries` are included so the summary reflects the full accumulated conversation history, not only the current partition's raw turns.
-3. **Update the ES document** with `is_compacted=True`, the generated summary, and the boundary metadata (`boundary_hash`, `boundary_message_count`, `tail_hash`).
-4. **Atomic Redis swap** using `WATCH / MULTI / EXEC`:
+1. **Prepare the summarization input** by deep-copying the snapshot and stripping any live-window file bodies to path-only placeholders. This prevents current tracked-file contents from fossilizing into `ancestor_summaries`.
+2. **Generate the summary** by calling the provider API directly with a structured summarization prompt. Existing `ancestor_summaries` are included so the summary reflects the full accumulated conversation history, not only the current partition's raw turns.
+3. **Compute deterministic boundary metadata** for the parent partition: `boundary_hash`, `boundary_message_count`, `boundary_user_count`, and `tail_hash`. Generate a fresh `compaction_attempt_uuid` and the child `partition_uuid`.
+4. **Enter the Redis `WATCH / MULTI / EXEC` loop**:
    - Watch the Redis key for the conversation.
    - Read the current active partition from Redis.
    - If the current partition's `partition_uuid` differs from the snapshot's, abort: the user switched branches while compaction ran, and the summary should not be applied to a different branch.
-   - Verify that the current partition's prefix still matches the snapshot (same `raw_message_start_index`, `ancestor_summaries`, and leading items). If the prefix changed, abort similarly.
-   - Identify any items appended to the current partition after the snapshot was taken (new exchanges during compaction latency).
-   - Construct the new active partition: `ancestor_summaries` extended with the new summary, items set to the recency tail from the snapshot plus all post-snapshot items, `raw_message_start_index` advanced to the start of the recency tail.
-   - Execute the swap atomically. If `WatchError` fires (contention in the narrow read-build-write window), retry from the top of the WATCH loop.
-5. **Persist the new active partition** to Elasticsearch.
-6. **Release the compaction lock**.
+   - Verify that the current partition's prefix still matches the snapshot. This comparison is live-window-aware: mutable refresh fields on file-tool live windows (`output`, `file_tool.revision`, `file_tool.view_end_line`) do not count as divergence, but true structural changes still do.
+   - Identify any items appended to the current partition after the snapshot was taken.
+   - Construct the child partition. Its `ancestor_summaries` are extended with the new summary; its items are the recency tail plus any post-snapshot items; and, for file-tool-active paths, older live windows are lifted forward into the new tail so the child does not rely only on stale edit-record line numbers.
+5. **Persist the child partition to Elasticsearch as `pending`** using `put_partition(..., compaction_state="pending", compaction_attempt_uuid=...)`. This happens before the CAS so Redis never points at a child Elasticsearch does not know about.
+6. **Execute the Redis CAS swap atomically**. If `WatchError` fires, retry from the top of the WATCH loop.
+7. **Promote the child to `committed` in Elasticsearch** with the same `compaction_attempt_uuid`.
+8. **Mark the parent partition compacted** by setting `is_compacted=True`, attaching the generated summary, and storing the boundary metadata plus the same `compaction_attempt_uuid`.
+9. **Release the compaction lock**.
 
 The WATCH/MULTI/EXEC swap ensures that messages sent during the LLM summary call are never lost. Same-branch new messages accumulate in the Redis partition under the same `partition_uuid` (because the client echoes back the pre-compaction UUID until the swap completes). The compactor carries those items forward into the new partition.
+
+The three Elasticsearch writes in this flow — pending child create, child-commit update, and parent-compacted update — are each wrapped in `_retry_compaction_search_write`, a short retry-with-backoff helper that makes up to four attempts per write. This does not make the flow transactional across Redis and Elasticsearch, but it materially reduces the chance that a transient ES failure leaves the system in a degraded intermediate state.
 
 ---
 
@@ -205,11 +211,14 @@ When the user navigates to a different branch via the ⟨/⟩ controls, the clie
 **Summaries in the system/developer message, not as conversation turns.**
 Injecting ancestor summaries as a leading user/assistant exchange would conflate them with the actual conversation and could confuse attribution. Placing them in the system or developer message keeps them clearly framed as background context.
 
-**`is_compacted=False` written before summarization.**
-Writing the ES document with `is_compacted=False` before the LLM call provides a crash-recovery marker. If the server dies mid-compaction, the document exists in ES but chain walks skip it (they require `is_compacted=True`), so no stale or empty summary is ever applied. Once summarization succeeds the document is updated atomically to `is_compacted=True`.
+**Child partition persisted as `pending` before the Redis CAS.**
+The child partition is written to Elasticsearch before the Redis swap, but only as `compaction_state="pending"`. This guarantees Redis never points at a child ES does not know about, while normal discovery paths still ignore staged children until they are promoted to `committed`.
 
 **Synchronous `finalize()` when compaction is pending.**
 The default path backgrounds `finalize()`. When compaction is about to start, `finalize()` is awaited synchronously before the background task is fired. This eliminates the race where a delayed `finalize()` SET could overwrite the result of the compaction swap and lose the newly compacted partition.
+
+**Short retry-with-backoff around Elasticsearch writes.**
+The compaction write path is split across Redis and Elasticsearch, so there is no true cross-store transaction. `_retry_compaction_search_write` retries the pending-child create and the two post-CAS ES updates to make transient search failures degrade more gracefully.
 
 **Boundary hash over the full prefix, not just the tail.**
 `tail_hash` is stored as a lookup convenience but is not used alone to prove summary applicability. `boundary_hash` covers the entire role/content sequence up to the compaction boundary. This prevents a forked branch from inheriting a summary produced by a different history that happened to share the same recent user messages.
@@ -219,6 +228,9 @@ Redis holds exactly one partition per `conversation_uuid`. Switching branches al
 
 **Compaction lock prevents duplicate concurrent compactions.**
 If two requests arrive near-simultaneously and both see a high `context_pct`, only the first to acquire `compaction_lock:{conversation_uuid}` fires a compaction. The second skips compaction entirely — the in-flight compaction will produce a new partition that incorporates both requests' content (because the atomic swap carries post-snapshot items forward).
+
+**Live-window-aware compaction for tracked files.**
+If the partition contains `file_tool` live windows, compaction strips their current file bodies before summarization, treats benign live-window refreshes as equivalent during prefix validation, and lifts older live windows for file-active paths into the new tail. Without that trio of behaviors, compaction would either summarize stale file contents or leave the child tail relying too heavily on historical edit records whose line numbers have drifted.
 
 **Ancestor summaries cached in Redis alongside raw items.**
 Because summaries are immutable, they can safely travel with the partition through Redis. This means the ES chain walk is paid once per branch reconstruction, not on every request.
@@ -239,6 +251,8 @@ Because summaries are immutable, they can safely travel with the partition throu
 
 **Semantic search over history.** The `message_content` and `summary` fields in Elasticsearch are full-text indexed in preparation for conversational history search. `ContextPartitionSearcher.search_partitions` exists as the hook for this but is not yet wired into any harness endpoint.
 
+**Pending-child cleanup.** If the child partition is written to Elasticsearch as `pending` but the Redis CAS never commits, that staged child can remain in the index. Normal search and tail-hash discovery filter these documents out, but conservative recovery/sweeper work for stale `pending` children is still deferred.
+
 ---
 
 ## Relevant Code Files
@@ -253,16 +267,18 @@ Because summaries are immutable, they can safely travel with the partition throu
 | `prokaryotes/anthropic_v1/__init__.py` | `context_pct` event emission after each LLM round |
 | `prokaryotes/openai_v1/web_harness.py` | Same as Anthropic harness; developer message assembly including `ancestor_summaries` |
 | `prokaryotes/openai_v1/__init__.py` | `context_pct` event emission |
+| `prokaryotes/tools_v1/file_tool.py` | `FileTool` tracked-file model that compaction now integrates with via live-window stripping and lifting |
 | `prokaryotes/utils_v1/llm_utils.py` | `MODEL_CONTEXT_WINDOWS`, `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS` |
 | `scripts/search_init.py` | Creates or updates the `context-partitions` Elasticsearch index |
-| `scripts/static/ui.js` | `getLastPartitionUuid`, `partition_uuid` event handling, `context_pct` fill indicator, compaction indicator show/clear logic, `startCompactionPolling`/`stopCompactionPolling` (5 s poll against `/compaction-status`) |
-| `tests/context_partition_utils.py` | Shared test infrastructure: `FakeRedis`, `FakeSearchClient`, `make_doc`, `make_web_base`, `make_message_items`, `make_chat_messages` |
-| `tests/test_compaction_swap.py` | `_compact_partition` internals: post-snapshot carry-forward, `raw_message_start_index` advancement, UUID/prefix/missing-Redis abort guards, empty-summary and exception lock cleanup, multi-generation summary accumulation, WatchError retry, full-prefix boundary-hash storage |
-| `tests/test_compaction_rebuild.py` | `sync_context_partition` compaction edge cases (retry-before-raw-window, edit-within-tail), `stream_and_finalize` (compaction events, duplicate-lock guard), `_walk_partition_chain` integrity (missing intermediate, UUID mismatch, cycle), `_rebuild_from_chain` single- and multi-generation reconstruction |
-| `tests/test_compaction_status.py` | `get_compaction_status` endpoint: lock-present returns not-done, partition unchanged returns not-done, partition changed returns done, partition evicted from Redis returns done |
-| `tests/test_compaction_provider.py` | `to_anthropic_messages` with ancestor summaries; Anthropic and OpenAI `_summarize_and_compact` ancestor-summary injection; OpenAI `text_preamble` exclusion from compaction payload |
-| `tests/test_api_v1_models.py` | Unit tests for hash functions and `ContextPartition` sync (progress, retry, edit paths) |
-| `tests/test_web_v1.py` | `_recency_tail_items`, `finalize`, basic `sync_context_partition` Redis-path tests |
-| `tests/test_search_v1_context_partitions.py` | Tests for `ContextPartitionSearcher` methods |
-| `tests/test_anthropic_v1.py` | Tests for `context_pct` emission |
-| `tests/test_openai_v1.py` | Tests for `context_pct` emission |
+| `scripts/static/ui.js` | `getLastPartitionUuid`, `partition_uuid` event handling, `context_pct` fill indicator, compaction indicator show/clear logic, `startCompactionPolling`/`stopCompactionPolling` (5 s poll against `/compaction-status`), relabeling stored `partitionUuid` values when compaction returns a child UUID |
+| `tests/unit_tests/context_partition_utils.py` | Shared test infrastructure: `FakeRedis`, `FakeSearchClient`, `make_doc`, `make_web_base`, `make_message_items`, `make_chat_messages` |
+| `tests/unit_tests/test_compaction_swap.py` | `_compact_partition` internals: pending-child/committed-child flow, parent summary finalization, post-snapshot carry-forward, UUID/prefix/missing-Redis abort guards, retry behavior, and lock cleanup |
+| `tests/unit_tests/test_compaction_file_tool_lift.py` | Live-window-aware compaction behaviors: stripping summary input, lifting active live windows, live-window-stable prefix comparison, and compaction-status response-shape edge cases |
+| `tests/unit_tests/test_compaction_rebuild.py` | `sync_context_partition` compaction edge cases (retry-before-raw-window, edit-within-tail), `stream_and_finalize` (compaction events, duplicate-lock guard), `_walk_partition_chain` integrity (missing intermediate, UUID mismatch, cycle), `_rebuild_from_chain` single- and multi-generation reconstruction |
+| `tests/unit_tests/test_compaction_status.py` | `get_compaction_status` endpoint: lock-present returns not-done, no-lock returns done, compacted-child swaps include the new `partition_uuid`, partition evicted from Redis returns done |
+| `tests/unit_tests/test_compaction_provider.py` | `to_anthropic_messages` with ancestor summaries; Anthropic and OpenAI `_summarize_and_compact` ancestor-summary injection |
+| `tests/unit_tests/test_api_v1_models.py` | Unit tests for hash functions and `ContextPartition` sync (progress, retry, edit paths) |
+| `tests/unit_tests/test_web_v1.py` | `_recency_tail_items`, `finalize`, basic `sync_context_partition` Redis-path tests |
+| `tests/unit_tests/test_search_v1_context_partitions.py` | Tests for `ContextPartitionSearcher`, including `compaction_state` / `compaction_attempt_uuid` handling |
+| `tests/unit_tests/test_anthropic_v1.py` | Tests for `context_pct` emission |
+| `tests/unit_tests/test_openai_v1.py` | Tests for `context_pct` emission |

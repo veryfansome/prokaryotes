@@ -119,7 +119,6 @@ class AnthropicClient(LLMClient):
             if stream_ndjson and round_output:
                 yield json.dumps({"progress_message": round_output}) + "\n"
             callback_tasks: list[asyncio.Task] = []
-            first_tool_call = True
             for block in response.content:
                 if block.type != "tool_use":
                     continue
@@ -134,9 +133,7 @@ class AnthropicClient(LLMClient):
                 item = ContextPartitionItem(
                     id=block.id, call_id=block.id, name=block.name,
                     arguments=args, type="function_call", status="completed",
-                    text_preamble=round_output if first_tool_call and round_output else None,
                 )
-                first_tool_call = False
                 logger.info("Invoking callback %s with arguments %s", item.name, item.arguments)
                 context_partition.append(item)
                 if tool_callbacks and block.name in tool_callbacks:

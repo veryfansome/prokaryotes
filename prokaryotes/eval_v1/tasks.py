@@ -425,6 +425,88 @@ TASKS: list[EvalTask] = [
             "PYEOF"
         ),
     ),
+    EvalTask(
+        id="t1_file_ops_change_request",
+        tier=2,
+        description="Apply a structured change request across a Python config file and a Markdown notes file",
+        prompt=(
+            "Read `change_request.json` and apply the requested updates to both `app_config.py` and "
+            "`notes.md`. The request touches multiple non-adjacent parts of each file. Preserve "
+            "unrelated content and formatting where possible. After making the edits, run "
+            "`python verify.py` and write its stdout exactly to `verification.txt`."
+        ),
+        setup_files={
+            "change_request.json": (
+                "{\n"
+                '  "service_name": "Atlas",\n'
+                '  "timeout_seconds": 45,\n'
+                '  "max_retries": 4,\n'
+                '  "enable_cache": true,\n'
+                '  "owners": ["Mina", "Ravi"],\n'
+                '  "next_steps": ["add cache metrics", "publish retry guidance"]\n'
+                "}\n"
+            ),
+            "app_config.py": (
+                'SERVICE_NAME = "Beacon"\n'
+                "TIMEOUT_SECONDS = 15\n"
+                "ENABLE_CACHE = False\n"
+                "LEGACY_MODE = True\n\n"
+                "def build_banner():\n"
+                '    return f"{SERVICE_NAME} timeout={TIMEOUT_SECONDS} cache={ENABLE_CACHE}"\n'
+            ),
+            "notes.md": (
+                "# Beacon Service\n\n"
+                "## Owners\n"
+                "- Alice\n"
+                "- Bob\n\n"
+                "## Summary\n"
+                "Service: Beacon\n"
+                "Timeout: 15\n"
+                "Cache: disabled\n\n"
+                "## Deprecated\n"
+                "- legacy mode still enabled\n\n"
+                "## Next Steps\n"
+                "- audit cache settings\n"
+            ),
+            "verify.py": (
+                "import json\n"
+                "from pathlib import Path\n\n"
+                "request = json.loads(Path('change_request.json').read_text())\n"
+                "config_src = Path('app_config.py').read_text()\n"
+                "notes = Path('notes.md').read_text()\n\n"
+                "namespace = {}\n"
+                "exec(config_src, namespace)\n\n"
+                "assert namespace['SERVICE_NAME'] == request['service_name']\n"
+                "assert namespace['TIMEOUT_SECONDS'] == request['timeout_seconds']\n"
+                "assert namespace['MAX_RETRIES'] == request['max_retries']\n"
+                "assert namespace['ENABLE_CACHE'] is request['enable_cache']\n"
+                "assert 'LEGACY_MODE' not in namespace\n"
+                "assert namespace['build_banner']() == 'Atlas timeout=45 retries=4 cache=True'\n\n"
+                "expected_notes = (\n"
+                "    '# Atlas Service\\n\\n'\n"
+                "    '## Owners\\n'\n"
+                "    '- Mina\\n'\n"
+                "    '- Ravi\\n\\n'\n"
+                "    '## Summary\\n'\n"
+                "    'Service: Atlas\\n'\n"
+                "    'Timeout: 45\\n'\n"
+                "    'Retries: 4\\n'\n"
+                "    'Cache: enabled\\n\\n'\n"
+                "    '## Next Steps\\n'\n"
+                "    '- add cache metrics\\n'\n"
+                "    '- publish retry guidance\\n'\n"
+                ")\n"
+                "assert notes == expected_notes, notes\n"
+                "print('PASS')\n"
+            ),
+        },
+        check_command=(
+            "python verify.py > /tmp/verify.out && "
+            "grep -qx 'PASS' /tmp/verify.out && "
+            "grep -qx 'PASS' verification.txt"
+        ),
+        timeout_seconds=300,
+    ),
 
     # Tier 2: Debugging, multi-file exploration, triggers think, more tool calls, etc.
     EvalTask(

@@ -8,31 +8,12 @@ deferred into fixtures — is the only way to make the override actually take ef
 """
 import os
 
-from dotenv import load_dotenv
+import pytest
+import pytest_asyncio
 
-load_dotenv()
+from tests.integration_tests.env_bootstrap import configure_integration_test_env
 
-# `.env` and `.env.example` use Docker-network service names because the prod app runs
-# inside the compose network. Host-side `uv run pytest` cannot resolve those names, so we
-# rewrite them to localhost-mapped ports. In CI there may be no `.env` at all, so we also
-# provide the compose-default Postgres credentials that the host-side test process needs.
-# Direct assignment overrides any value already loaded from `.env`.
-os.environ["POSTGRES_HOST"] = "localhost"
-os.environ["POSTGRES_USER"] = "postgres"
-os.environ["POSTGRES_PASSWORD"] = "Ma9icMicr0be"
-os.environ["POSTGRES_DB"] = "prokaryotes"
-os.environ["REDIS_HOST"] = "localhost"
-os.environ["ELASTIC_URI"] = "http://localhost:9200"
-
-# Compaction tuning: a single global value satisfies both tiers — Tier B's fake controls
-# scripted input_tokens; Tier A needs `1` to trip in 2–3 normal turns. A per-tier split
-# would silently break a combined run because the harness modules cache the constants
-# in their own namespace at import time.
-os.environ["COMPACTION_TOKEN_THRESHOLD_PCT"] = "1"
-os.environ["COMPACTION_RECENCY_TAIL"] = "2"
-
-import pytest  # noqa: E402
-import pytest_asyncio  # noqa: E402
+configure_integration_test_env()
 
 
 @pytest.fixture(scope="session")

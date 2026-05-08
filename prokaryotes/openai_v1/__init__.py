@@ -62,7 +62,6 @@ class OpenAIClient(LLMClient):
             event: ResponseStreamEvent,
             tool_callbacks: dict[str, FunctionToolCallback] | None,
             round_text: list[str] | None = None,
-            tool_preamble: list[str] | None = None,
             tool_call_seen: list[bool] | None = None,
             model: str = "",
             ndjson: bool = False,
@@ -71,22 +70,15 @@ class OpenAIClient(LLMClient):
         if event.type == "response.output_text.delta":
             if round_text is not None:
                 round_text.append(event.delta)
-            if tool_preamble is not None:
-                tool_preamble.append(event.delta)
             if not ndjson:
                 return event.delta
         elif event.type == "response.output_text.done":
             pass  # assistant item appended after all rounds complete
         elif event.type == "response.output_item.done" and event.item.type == "function_call":
             logger.info(f"Invoking callback {event.item.name} with arguments {event.item.arguments}")
-            preamble = "".join(tool_preamble) if tool_preamble else None
-            if tool_preamble is not None:
-                tool_preamble.clear()
             if tool_call_seen is not None:
                 tool_call_seen[0] = True
             item = ContextPartitionItem(**event.item.__dict__)
-            if preamble:
-                item.text_preamble = preamble
             context_window.append(item)
             if tool_callbacks and event.item.name in tool_callbacks:
                 callback_task: asyncio.Task[ContextPartitionItem | None] = asyncio.create_task(
@@ -143,7 +135,6 @@ class OpenAIClient(LLMClient):
         while True:
             callback_tasks: list[asyncio.Task[ContextPartitionItem | None]] = []
             round_text: list[str] = []
-            tool_preamble: list[str] = []
             tool_call_seen = [False]
             round_input = input_items if tool_call_rounds == 0 else context_partition.to_openai_input()
             async for event in await self.async_openai.responses.create(  # type: ignore
@@ -159,7 +150,6 @@ class OpenAIClient(LLMClient):
                     event,
                     tool_callbacks,
                     round_text=round_text,
-                    tool_preamble=tool_preamble,
                     tool_call_seen=tool_call_seen,
                     model=model,
                     ndjson=stream_ndjson,
