@@ -10,7 +10,7 @@
 
 3. `post_chat()` assembles the system/developer `ContextPartitionItem` (core instructions, personality, tool guidance, runtime context, ancestor summaries per provider — see below) and inserts it at `context_partition.items[0]`.
 
-4. `WebBase.stream_and_finalize()` wraps `stream_turn()`. It first yields `{"partition_uuid": "..."}` as the first NDJSON event so the client can track the active branch. Then it streams NDJSON events from `stream_turn()`: `{"progress_message": "..."}` for buffered tool-round preambles, `{"tool_call": {"name": "...", "arguments": "..."}}` for tool invocations, `{"text_delta": "..."}` for buffered answer text, and `{"context_pct": N}` after each LLM round.
+4. `WebBase.stream_and_finalize()` wraps `stream_turn()`. It first yields `{"partition_uuid": "..."}` as the first NDJSON event so the client can track the active branch. Then it streams NDJSON events from `stream_turn()`: each round emits `{"context_pct": N}`; non-tool rounds then emit buffered `{"text_delta": "..."}` events, while tool-call rounds may also emit `{"progress_message": "..."}` and `{"tool_call": {"name": "...", "arguments": "..."}}` events with provider-specific ordering.
 
 5. Inside `stream_turn()`, tool calls are dispatched to `FunctionToolCallback.call()` after each round. Results are appended to the partition and fed back into the next LLM call. The loop repeats until no tool calls are produced or `max_tool_call_rounds` is reached.
 

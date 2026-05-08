@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from prokaryotes.api_v1.models import ContextPartition
-from tests.context_partition_utils import make_web_base
+from tests.unit_tests.context_partition_utils import make_web_base
 
 
 class MockRequest:

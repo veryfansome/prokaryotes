@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { buildChatQueryParams, createChatApp, parseStreamPayloadLine } from '../scripts/static/ui.js';
+import { buildChatQueryParams, createChatApp, parseStreamPayloadLine } from '../../scripts/static/ui.js';
 
 // 1) DOM fixtures + network stream mocks
 function renderBaseDOM() {

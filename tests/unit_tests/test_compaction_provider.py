@@ -7,7 +7,7 @@ from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
 )
-from tests.context_partition_utils import make_message_items
+from tests.unit_tests.context_partition_utils import make_message_items
 
 
 def make_anthropic_harness(create_fn):
