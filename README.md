@@ -2,15 +2,22 @@
 
 This project is about exploring agentic harnesses. It is set up as a FastAPI-based application backed by multiple data stores. Currently, it has a web-harness that provides a chat UI for human users, a script-harness for running tasks non-interactively, and an eval-harness that can run a small curated evaluation set.
 
+## Running the app
+
+```bash
+# Run full stack including the web and embedding apps
+docker compose up --build
+```
+
 ## Commands
 
-### Python
+### Python unit tests
 
 ```bash
 # Install dependencies (including dev/test extras)
 uv sync --extra dev --extra test
 
-# Run all tests
+# Run the default unit test suite
 uv run pytest
 
 # Lint and format
@@ -18,19 +25,31 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-### JavaScript
+### Python integration tests
+
+The `tests/integration_tests/` tier lives outside the default `testpaths` (`tests/unit_tests/`), so `uv run pytest` does not collect it. Tier B requires the docker-compose data stores; Tier A also requires real LLM API keys.
+
+```bash
+# Bring up the data stores Tier A and B both depend on
+docker compose up -d elasticsearch elasticsearch-init postgres postgres-migrate redis
+
+# Tier B — fake LLM, real Redis/Postgres/Elasticsearch
+uv run --extra test pytest tests/integration_tests/tier_b
+
+# Tier A — live LLM smoke
+# Structural tests skip per-provider when that provider's API key is absent.
+# Judged tests require OPENAI_API_KEY.
+uv run --extra test pytest tests/integration_tests/tier_a
+```
+
+### JavaScript unit tests
 
 ```bash
 # Run JS tests
 npm run test:js
 ```
 
-### Running prokaryotes
-
-```bash
-# Run full stack including the web and embedding apps
-docker compose up --build
-```
+### CLI and harness evals
 
 ```bash
 # Run script-harness via CLI (Anthropic by default)

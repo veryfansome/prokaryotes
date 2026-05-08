@@ -64,7 +64,6 @@ class OpenAIClient(LLMClient):
             round_text: list[str] | None = None,
             tool_preamble: list[str] | None = None,
             tool_call_seen: list[bool] | None = None,
-            emit_text_immediately: bool = False,
             model: str = "",
             ndjson: bool = False,
             on_usage: Callable[[int, int], None] | None = None,
@@ -74,8 +73,8 @@ class OpenAIClient(LLMClient):
                 round_text.append(event.delta)
             if tool_preamble is not None:
                 tool_preamble.append(event.delta)
-            if emit_text_immediately:
-                return (json.dumps({"text_delta": event.delta}) + "\n") if ndjson else event.delta
+            if not ndjson:
+                return event.delta
         elif event.type == "response.output_text.done":
             pass  # assistant item appended after all rounds complete
         elif event.type == "response.output_item.done" and event.item.type == "function_call":
@@ -162,7 +161,6 @@ class OpenAIClient(LLMClient):
                     round_text=round_text,
                     tool_preamble=tool_preamble,
                     tool_call_seen=tool_call_seen,
-                    emit_text_immediately=not stream_ndjson,
                     model=model,
                     ndjson=stream_ndjson,
                     on_usage=on_usage,

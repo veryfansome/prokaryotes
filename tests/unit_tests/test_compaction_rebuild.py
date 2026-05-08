@@ -10,7 +10,7 @@ from prokaryotes.api_v1.models import (
     compute_tail_hash,
 )
 from prokaryotes.web_v1 import WebBase
-from tests.context_partition_utils import (
+from tests.unit_tests.context_partition_utils import (
     FakeRedis,
     FakeSearchClient,
     make_chat_messages,

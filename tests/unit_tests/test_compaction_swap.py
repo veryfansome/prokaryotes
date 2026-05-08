@@ -7,7 +7,7 @@ from prokaryotes.api_v1.models import (
 )
 from prokaryotes.utils_v1.llm_utils import COMPACTION_RECENCY_TAIL
 from prokaryotes.web_v1 import _recency_tail_items
-from tests.context_partition_utils import (
+from tests.unit_tests.context_partition_utils import (
     FakePipeline,
     FakeRedis,
     FakeSearchClient,

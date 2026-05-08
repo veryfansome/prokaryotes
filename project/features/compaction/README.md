@@ -86,7 +86,7 @@ The `items_json` field is intentionally excluded from the ES inverted index to k
 
 ## Stream Protocol
 
-Every response stream begins with a `partition_uuid` event, followed by the normal `text_delta` events and `context_pct` events, and optionally a `compaction_pending` event at the end.
+Every response stream begins with a `partition_uuid` event and may end with a `compaction_pending` event. Between those, each LLM round emits `context_pct`; non-tool rounds then emit buffered `text_delta` events, while tool-call rounds may also emit `progress_message` and `tool_call` events with provider-specific ordering.
 
 **`partition_uuid`** — Emitted first in every response stream. The client records this UUID on the assistant tree node it creates for that response. On the next request, the client sends back the `partition_uuid` of the most recent node on the currently active path. This is how the server knows which branch is active.
 
@@ -142,7 +142,7 @@ Each web harness registers an `on_usage` callback with the LLM client. After eac
 `stream_and_finalize` orchestrates the handoff after the response generator is fully drained:
 
 1. Emit `partition_uuid` at the start of the stream.
-2. Yield all model events (text deltas, context_pct, tool-call rounds).
+2. Yield all model events (`context_pct`, buffered `text_delta`, and any tool-round `progress_message` / `tool_call` events).
 3. If `pending_compaction` is set and the compaction lock can be acquired:
    - Await `finalize()` **synchronously** to ensure the current partition is committed to Redis before the background compactor begins its WATCH loop.
    - Emit `compaction_pending`.

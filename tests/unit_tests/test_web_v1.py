@@ -15,7 +15,7 @@ from prokaryotes.web_v1 import (
     hash_password,
     verify_password,
 )
-from tests.context_partition_utils import (
+from tests.unit_tests.context_partition_utils import (
     FakeSearchClient,
     make_doc,
     make_web_base,

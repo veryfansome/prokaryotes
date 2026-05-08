@@ -14,7 +14,7 @@ from prokaryotes.search_v1.context_partitions import (
     items_from_doc,
     partition_from_doc,
 )
-from tests.context_partition_utils import make_doc
+from tests.unit_tests.context_partition_utils import make_doc
 
 
 class FakeContextPartitionSearcher(ContextPartitionSearcher):

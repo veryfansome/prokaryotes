@@ -14,13 +14,13 @@ Tests should make intended behavior easy to find, easy to extend, and safe to re
 
 **Centralize reused test utilities**: if a fake, builder, fixture, or assertion helper is used in more than one test file, move it to a shared location instead of copying it again.
 
-**Use `tests/conftest.py` for shared pytest fixtures**: put shared fixture wiring and setup/teardown behavior there when multiple test modules need it.
+**Use `tests/unit_tests/conftest.py` for shared pytest fixtures**: put shared fixture wiring and setup/teardown behavior there when multiple test modules need it. The integration tier has its own `tests/integration_tests/conftest.py`.
 
-**Use shared helper modules under `tests/` for reusable fakes, builders, and assertions**: keep non-fixture helpers out of `conftest.py` unless they are part of fixture setup.
+**Use shared helper modules under `tests/unit_tests/` for reusable fakes, builders, and assertions**: keep non-fixture helpers out of `conftest.py` unless they are part of fixture setup.
 
 **Keep helpers local only when they are truly local**: if a fake exists to support one file's very specific assertions, keeping it in that file is fine.
 
-**Apply the same idea to JavaScript tests**: browser-side tests can keep the Vitest-style `*.test.js` naming, but the base name should still reflect whether the file is module-oriented or feature-oriented.
+**Apply the same idea to JavaScript tests**: browser-side tests live under `tests/ui_tests/` and can keep the Vitest-style `*.test.js` naming, but the base name should still reflect whether the file is module-oriented or feature-oriented.
 
 ## Within-file organization
 
@@ -42,4 +42,4 @@ Tests should make intended behavior easy to find, easy to extend, and safe to re
 
 **Async tests should cross real coroutine boundaries**: prefer `pytest.mark.asyncio` and await the production coroutine directly instead of wrapping async logic in sync helpers.
 
-**Isolation**: tests should stay hermetic. Fake or mock network, storage, and provider boundaries so the suites can run without Docker or live external services.
+**Isolation**: unit tests under `tests/unit_tests/` must stay hermetic — fake or mock network, storage, and provider boundaries so the suite runs without Docker or live external services. The integration tier under `tests/integration_tests/` deliberately violates this to exercise real persistence and reconciliation paths (Tier B against the docker-compose stack; Tier A also against a live LLM provider) and is excluded from the default `testpaths` so it never runs alongside the unit suite. Don't add tests there to work around a hermeticity problem in `unit_tests/`; fix the unit test instead.
