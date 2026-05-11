@@ -196,6 +196,7 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - ./project:/app/project:rw
+      - ./tests:/app/tests:ro
     environment:
       #WEB_HARNESS_IMPL: "anthropic"
       WEB_HARNESS_IMPL: "openai"

@@ -31,7 +31,7 @@ def _assistant_message(content: str) -> dict:
 
 def _read_args(path: Path, start_line: int) -> str:
     return json.dumps({
-        "action": "read",
+        "action": "read_lines",
         "path": str(path),
         "expected_revision": None,
         "start_line": start_line,
@@ -1064,4 +1064,10 @@ async def test_compaction_summary_input_strips_live_window_bodies(web_harness, a
         assert "Added (lines 2-3):" in request_text
         assert "2 | TWO" in request_text
         assert "3 | THREE_X" in request_text
-        assert "4 | four" not in request_text
+        # Adjacent post-edit lines now appear inside the frozen edit record's Context blocks.
+        # The live-window-stripped invariant is enforced by the placeholder / Current view /
+        # FILE path= / status=live assertions above.
+        assert "Context before (lines 1-1):" in request_text
+        assert "1 | one" in request_text
+        assert "Context after (lines 4-4):" in request_text
+        assert "4 | four" in request_text

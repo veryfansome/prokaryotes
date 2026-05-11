@@ -302,6 +302,29 @@ describe('createChatApp messageTree flow', () => {
             ]);
             expect(app.getProgressMessagesForNode(assistantNodeId)).toEqual([progressText]);
         });
+
+        it('keeps embedded markdown fences inside shell command code blocks', async () => {
+            const controlledFetch = createControllableFetchMock();
+            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
+            const command = "cat <<'EOF'\n```\necho hi\n```\nEOF";
+            const toolArgs = JSON.stringify({
+                reason: 'Run a fenced heredoc',
+                command,
+            });
+
+            const sendPromise = startSendMessage(app, 'Hi');
+            await controlledFetch.waitForReady();
+
+            controlledFetch.pushToolCall('shell_command', toolArgs);
+            controlledFetch.pushTextDelta('Done.');
+            controlledFetch.close();
+            await sendPromise;
+
+            const toolCallEl = app.elements.chatWrapper.querySelector('.message-activity-tool_call');
+            const codeBlocks = toolCallEl.querySelectorAll('pre code');
+            expect(codeBlocks).toHaveLength(1);
+            expect(codeBlocks[0].textContent).toBe(command);
+        });
     });
 
     describe('scroll behavior', () => {

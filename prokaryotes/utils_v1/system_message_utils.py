@@ -8,6 +8,7 @@ from prokaryotes.utils_v1.personality_utils import OCEAN_PROFILE_DESC, OceanProf
 def get_core_instruction_parts(interactive: bool = True, summaries: bool = True) -> list[str]:
     lines = [
         "# Core instructions",
+        "",
     ]
     if summaries:
         lines.append(
@@ -40,6 +41,7 @@ def get_core_instruction_parts(interactive: bool = True, summaries: bool = True)
 def get_non_interactive_execution_mode_parts() -> list[str]:
     lines = [
         "# Your execution mode",
+        "",
         "- You are running non-interactively. There is no user to ask for clarification or confirmation.",
         "- Complete the task fully and autonomously. Do not ask questions, offer options, or pause for input.",
         "- If the task is ambiguous, make a reasonable assumption and state it in your response.",
@@ -51,33 +53,26 @@ def get_non_interactive_execution_mode_parts() -> list[str]:
 def get_personality_parts(profile: OceanProfile | None = None) -> list[str]:
     if not profile:
         profile = OceanProfile()
-    lines = ["# Personality"]
+    lines = [
+        "# Personality",
+        "",
+    ]
     for trait in ("openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"):
         level = getattr(profile, trait)
         lines.append(f"- {trait.capitalize()}: *{level.value}*, you SHOULD {OCEAN_PROFILE_DESC[trait][level]}")
     return lines
 
 
-def get_script_harness_runtime_context_parts() -> list[str]:
+def get_runtime_context_parts(time_zone: str | None = None) -> list[str]:
     lines = [
         "# Runtime context",
-        f"- Runtime: Python-{os_utils.get_python_version()} / {os_utils.get_platform()}",
-        f"- Working directory: {os_utils.get_cwd()}",
-        f"- Unix user: {os_utils.uid_to_name(os_utils.get_process_uid())}",
-        f"- Process ID: {os_utils.get_pid()}",
-        f"- Time: {time_utils.local_now_str()} {time_utils.tz()}",
-    ]
-    return lines
-
-
-def get_web_harness_runtime_context_parts(time_zone: str) -> list[str]:
-    lines = [
-        "# Runtime context",
-        f"- Runtime: Python-{os_utils.get_python_version()} / {os_utils.get_platform()}",
-        f"- Working directory: {os_utils.get_cwd()}",
-        f"- Unix user: {os_utils.uid_to_name(os_utils.get_process_uid())}",
-        f"- Process ID: {os_utils.get_pid()}",
-        f"- Listening on port(s): {os_utils.get_listening_ports()}",
-        f"- Time: {time_utils.local_now_str(time_zone)} {time_utils.tz(time_zone)}",
+        "",
+        (
+            f"- You are a Python-{os_utils.get_python_version()} process,"
+            f" running as the {os_utils.uid_to_name(os_utils.get_process_uid())} Unix user,"
+            f" on a {os_utils.get_platform()} platform"
+        ),
+        f"- Your working directory is {os_utils.get_cwd()} and all relative paths resolve from here",
+        f"- The current time is {time_utils.local_now_str(time_zone)} {time_utils.tz(time_zone)}",
     ]
     return lines

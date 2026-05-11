@@ -64,12 +64,12 @@ class ShellCommandTool(FunctionToolCallback):
     def system_message_parts(self) -> list[str]:
         lines = [
             f"## Using the `{self.name}` tool",
+            "",
             (
                 "- Don't chain multiple commands with '&&' or ';' unless the intended task can't be accomplished"
                 " without doing so. Whenever possible, use a single, focused `command`, with a distinct `reason`"
                 " per tool call."
             ),
-            "- When reading files, default to previewing the first 200 lines, e.g. `sed -n '1,200p' <path>`.",
             f"- Command output is truncated after {self.max_output_lines} lines so plan around that.",
         ]
         return lines

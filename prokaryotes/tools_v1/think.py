@@ -113,6 +113,7 @@ class ThinkTool(FunctionToolCallback):
     def system_message_parts(self) -> list[str]:
         lines = [
             f"## Using the `{self.name}` tool",
+            "",
             "- Use the think tool to perform focused analysis before acting. It makes targeted LLM calls and returns"
             " structured insights you can act on. Use it when:",
             "  - Choosing between implementation options with meaningful trade-offs.",

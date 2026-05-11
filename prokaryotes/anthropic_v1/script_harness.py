@@ -53,9 +53,10 @@ class ScriptHarness:
             "# Tool usage",
         ]
         for name in sorted(tool_callbacks):
+            system_parts.append("")
             system_parts.extend(tool_callbacks[name].system_message_parts)
         system_parts.append("")
-        system_parts.extend(system_message_utils.get_script_harness_runtime_context_parts())
+        system_parts.extend(system_message_utils.get_runtime_context_parts())
 
         context_partition = ContextPartition(
             conversation_uuid=str(uuid.uuid4()),
