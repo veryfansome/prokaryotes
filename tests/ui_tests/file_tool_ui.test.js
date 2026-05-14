@@ -80,9 +80,9 @@ describe('file_tool tool call rendering', () => {
         renderBaseDOM();
     });
 
-    it('renders read with start_line', async () => {
+    it('renders read_lines with start_line', async () => {
         const el = await pushFileToolCallAndCapture({
-            action: 'read',
+            action: 'read_lines',
             path: '/app/foo.py',
             expected_revision: null,
             start_line: 10,
@@ -96,9 +96,9 @@ describe('file_tool tool call rendering', () => {
         expect(el.textContent).toContain('from line 10');
     });
 
-    it('renders read without start_line', async () => {
+    it('renders read_lines without start_line', async () => {
         const el = await pushFileToolCallAndCapture({
-            action: 'read',
+            action: 'read_lines',
             path: '/app/foo.py',
             expected_revision: null,
             start_line: null,
@@ -123,6 +123,21 @@ describe('file_tool tool call rendering', () => {
         expect(el.textContent).toContain('/app/foo.py');
         expect(el.textContent).toContain('new');
         expect(el.textContent).toContain('file');
+    });
+
+    it('keeps embedded markdown fences inside create_file code block', async () => {
+        const newText = 'before\n```\ninside\n```\nafter';
+        const el = await pushFileToolCallAndCapture({
+            action: 'create_file',
+            path: '/app/foo.py',
+            expected_revision: null,
+            start_line: null,
+            end_line: null,
+            new_text: newText,
+        });
+        const codeBlocks = el.querySelectorAll('pre code');
+        expect(codeBlocks).toHaveLength(1);
+        expect(codeBlocks[0].textContent).toBe(newText);
     });
 
     it('renders replace_lines with new_text fenced', async () => {
@@ -169,7 +184,7 @@ describe('file_tool tool call rendering', () => {
 
     it('does not render the null-valued strict-mode parameters', async () => {
         const el = await pushFileToolCallAndCapture({
-            action: 'read',
+            action: 'read_lines',
             path: '/app/foo.py',
             expected_revision: null,
             start_line: null,

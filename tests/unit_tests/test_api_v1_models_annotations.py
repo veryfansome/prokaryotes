@@ -50,7 +50,7 @@ def test_to_anthropic_messages_excludes_prokaryotes_annotations():
                 call_id="x",
                 id="x",
                 name="file_tool",
-                arguments='{"action":"read","path":"/tmp/x"}',
+                arguments='{"action":"read_lines","path":"/tmp/x"}',
                 type="function_call",
                 status="completed",
             ),

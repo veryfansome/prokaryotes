@@ -106,13 +106,13 @@ def _strip_live_window_bodies(partition: ContextPartition) -> ContextPartition:
 
     Two stripping shapes, depending on the live-window kind (detected by `output` prefix):
 
-    - Ordinary `FILE ... status=live` read results are replaced wholesale with a
+    - Ordinary `FILE ... status=live` `read_lines` results are replaced wholesale with a
       path-only placeholder. The diagnostic value is just the path.
-    - `ALREADY_EXISTS`, `CONFLICT`, and `RANGE_ERROR` results keep their two header
-      lines (which describe what the model tried and the failure mode) and have only
-      the embedded `Current view ...` body — the actual file contents — replaced with
-      the placeholder. That preserves the historical failure signal in the summary
-      while keeping current content out.
+    - `ALREADY_EXISTS`, `CONFLICT`, `RANGE_ERROR`, and `RANGE_TRUNCATED` results keep
+      their header lines (which describe what the model tried and the failure or
+      truncation mode) and have only the embedded `Current view ...` body — the actual
+      file contents — replaced with the placeholder. That preserves the historical
+      diagnostic signal in the summary while keeping current content out.
 
     Edit records, tombstones (`status=stale`), function_call items, and message items
     are not touched: edit records and tombstones already document file activity without
@@ -138,6 +138,7 @@ def _strip_live_window_output(item: ContextPartitionItem) -> str:
             output.startswith("ALREADY_EXISTS ")
             or output.startswith("CONFLICT ")
             or output.startswith("RANGE_ERROR ")
+            or output.startswith("RANGE_TRUNCATED ")
     ):
         diagnostic_lines = []
         for line in output.splitlines():
@@ -153,8 +154,10 @@ def _is_live_window(item: ContextPartitionItem) -> bool:
     """A live-window function_call_output is the one mutable kind of partition item:
     its `output` and the `file_tool.revision` / `file_tool.view_end_line` annotations
     can change in-place when `reconcile_tracked_files` or a `file_tool` write refreshes
-    it. All other item kinds (messages, function_calls, edit records, tombstoned
-    outputs) are append-only and compared with full Pydantic equality."""
+    it. Stable live-window annotations such as `file_tool.view_start_line` and
+    `file_tool.requested_end_line` remain part of the item's identity. All other item
+    kinds (messages, function_calls, edit records, tombstoned outputs) are append-only
+    and compared with full Pydantic equality."""
     ann = item.prokaryotes_annotations
     return (
         item.type == "function_call_output"
@@ -204,6 +207,7 @@ def _live_window_stable_repr(item: ContextPartitionItem) -> tuple:
         ann.get("file_tool.path"),
         ann.get("file_tool.status"),
         ann.get("file_tool.view_start_line"),
+        ann.get("file_tool.requested_end_line"),
     )
 
 

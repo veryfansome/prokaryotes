@@ -25,13 +25,13 @@ def _hash(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
-def _read_args(path: Path, start_line: int | None = None) -> str:
+def _read_args(path: Path, start_line: int | None = None, end_line: int | None = None) -> str:
     return json.dumps({
-        "action": "read",
+        "action": "read_lines",
         "path": str(path),
         "expected_revision": None,
         "start_line": start_line,
-        "end_line": None,
+        "end_line": end_line,
         "new_text": None,
     })
 
@@ -100,6 +100,22 @@ async def test_read_returns_live_window_with_annotations(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_read_with_exact_end_line_returns_requested_span(tmp_path: Path):
+    target = tmp_path / "span.txt"
+    target.write_text("alpha\nbeta\ngamma\ndelta\n", encoding="utf-8")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(_read_args(target, start_line=2, end_line=3), "call_span")
+
+    assert result.prokaryotes_annotations["file_tool.view_start_line"] == "2"
+    assert result.prokaryotes_annotations["file_tool.view_end_line"] == "3"
+    assert result.prokaryotes_annotations["file_tool.requested_end_line"] == "3"
+    assert "2 | beta" in result.output
+    assert "3 | gamma" in result.output
+    assert "4 | delta" not in result.output
+
+
+@pytest.mark.asyncio
 async def test_read_empty_file_yields_zero_line_count(tmp_path: Path):
     target = tmp_path / "empty.txt"
     target.write_text("", encoding="utf-8")
@@ -146,11 +162,132 @@ async def test_read_rejects_non_positive_start_line(tmp_path: Path):
     negative_result = await tool.call(_read_args(target, start_line=-3), "call_neg")
 
     assert zero_result.output.startswith("ERROR ValueError")
-    assert "start_line for read" in zero_result.output
+    assert "start_line for read_lines" in zero_result.output
     assert zero_result.prokaryotes_annotations is None
     assert negative_result.output.startswith("ERROR ValueError")
-    assert "start_line for read" in negative_result.output
+    assert "start_line for read_lines" in negative_result.output
     assert negative_result.prokaryotes_annotations is None
+
+
+@pytest.mark.asyncio
+async def test_read_rejects_invalid_end_line(tmp_path: Path):
+    target = tmp_path / "hello.txt"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    zero_result = await tool.call(_read_args(target, start_line=1, end_line=0), "call_end_zero")
+    reversed_result = await tool.call(_read_args(target, start_line=3, end_line=2), "call_end_rev")
+
+    assert zero_result.output.startswith("ERROR ValueError")
+    assert "end_line for read_lines" in zero_result.output
+    assert reversed_result.output.startswith("ERROR ValueError")
+    assert "end_line for read_lines must be >= start_line" in reversed_result.output
+
+
+@pytest.mark.asyncio
+async def test_read_over_cap_with_truncation_returns_range_truncated_live_view(tmp_path: Path):
+    target = tmp_path / "long.txt"
+    line_count = FileTool.max_lines + 55
+    target.write_text("".join(f"line{i}\n" for i in range(1, line_count + 1)), encoding="utf-8")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(
+        _read_args(target, start_line=1, end_line=line_count),
+        "call_truncated",
+    )
+
+    cap_end = FileTool.max_lines
+    assert result.output.startswith(
+        f"RANGE_TRUNCATED path={target.resolve()} requested_lines=1-{line_count}"
+        f" returned_lines=1-{cap_end} line_count={line_count}"
+    )
+    assert f"Call `read_lines` with `start_line={cap_end + 1}`" in result.output
+    assert f"remaining {line_count - cap_end} lines" in result.output
+    assert "1 | line1" in result.output
+    assert f"{cap_end} | line{cap_end}" in result.output
+    assert f"{cap_end + 1} | line{cap_end + 1}" not in result.output
+    assert result.prokaryotes_annotations["file_tool.status"] == "live"
+    assert result.prokaryotes_annotations["file_tool.view_start_line"] == "1"
+    assert result.prokaryotes_annotations["file_tool.view_end_line"] == str(cap_end)
+    assert result.prokaryotes_annotations["file_tool.requested_end_line"] == str(cap_end)
+
+
+@pytest.mark.asyncio
+async def test_read_over_cap_remaining_count_tracks_requested_span_not_eof(tmp_path: Path):
+    # File is much larger than the requested span; remaining count should describe the
+    # remainder of the *requested* span (requested_end - cap_end), not the rest of the
+    # file. Otherwise the model is nudged into paging past what it actually asked for.
+    target = tmp_path / "much_longer.txt"
+    file_line_count = FileTool.max_lines * 5
+    requested_end = FileTool.max_lines + 50
+    target.write_text("".join(f"line{i}\n" for i in range(1, file_line_count + 1)), encoding="utf-8")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(
+        _read_args(target, start_line=1, end_line=requested_end),
+        "call_remaining",
+    )
+
+    assert result.output.startswith(
+        f"RANGE_TRUNCATED path={target.resolve()} requested_lines=1-{requested_end}"
+        f" returned_lines=1-{FileTool.max_lines} line_count={file_line_count}"
+    )
+    assert f"remaining {requested_end - FileTool.max_lines} lines" in result.output
+    assert f"remaining {file_line_count - FileTool.max_lines} lines" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_read_over_cap_with_eof_inside_cap_returns_plain_live_view(tmp_path: Path):
+    target = tmp_path / "short.txt"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(
+        _read_args(target, start_line=1, end_line=FileTool.max_lines + 1),
+        "call_over_cap_short",
+    )
+
+    # Cap was hit at the request layer but EOF (line 3) is within the cap, so nothing was
+    # truncated and the model gets a plain FILE view — no RANGE_TRUNCATED diagnostic.
+    assert result.output.startswith("FILE ")
+    assert "RANGE_TRUNCATED" not in result.output
+    assert "1 | alpha" in result.output
+    assert "3 | gamma" in result.output
+    assert result.prokaryotes_annotations["file_tool.view_end_line"] == "3"
+    # The annotation is pinned to the cap, not the original over-cap request, so a later
+    # refresh after file growth cannot expand the window past max_lines.
+    assert result.prokaryotes_annotations["file_tool.requested_end_line"] == str(FileTool.max_lines)
+
+
+@pytest.mark.asyncio
+async def test_read_over_cap_pinned_annotation_caps_refresh_after_file_growth(tmp_path: Path):
+    target = tmp_path / "growth.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    initial = await tool.call(
+        _read_args(target, start_line=1, end_line=FileTool.max_lines + 100),
+        "call_over_cap_grow",
+    )
+    partition.append(ContextPartitionItem(
+        call_id="call_over_cap_grow",
+        name="file_tool",
+        arguments=_read_args(target, start_line=1, end_line=FileTool.max_lines + 100),
+        type="function_call",
+    ))
+    partition.append(initial)
+
+    # Grow the file beyond the cap; the pinned annotation must prevent the refreshed
+    # window from extending past max_lines, even though the original request was wider.
+    grown_line_count = FileTool.max_lines + 50
+    target.write_text("".join(f"L{i}\n" for i in range(1, grown_line_count + 1)), encoding="utf-8")
+    await reconcile_tracked_files(partition, workspace_root=tmp_path)
+
+    refreshed = partition.items[1]
+    assert refreshed.prokaryotes_annotations["file_tool.view_end_line"] == str(FileTool.max_lines)
+    assert f"{FileTool.max_lines} | L{FileTool.max_lines}" in refreshed.output
+    assert f"{FileTool.max_lines + 1} | L{FileTool.max_lines + 1}" not in refreshed.output
 
 
 @pytest.mark.asyncio
@@ -251,6 +388,7 @@ async def test_replace_lines_writes_disk_and_refreshes_prior_window(tmp_path: Pa
     assert "Removed (lines 2-3):" in write_result.output
     assert "Added (lines 2-3):" in write_result.output
     assert "line_count: 4 → 4" in write_result.output
+    assert "Live windows refreshed for this path: 1." in write_result.output
 
     refreshed = partition.items[1]
     assert refreshed.prokaryotes_annotations["file_tool.status"] == "live"
@@ -272,6 +410,7 @@ async def test_insert_lines_appends_at_eof(tmp_path: Path):
     assert target.read_text(encoding="utf-8") == "a\nb\nc\nd\n"
     assert "Added (lines 3-4):" in result.output
     assert "Removed" not in result.output
+    assert "Live windows refreshed for this path: 0." in result.output
 
 
 @pytest.mark.asyncio
@@ -289,6 +428,108 @@ async def test_delete_lines_only_emits_removed_block(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_replace_lines_emits_context_blocks_around_edit(tmp_path: Path):
+    target = tmp_path / "code.txt"
+    target.write_text("one\ntwo\nthree\nfour\nfive\nsix\n", encoding="utf-8")
+    rev = _hash("one\ntwo\nthree\nfour\nfive\nsix\n")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(
+        _replace_args(target, rev, 3, 4, "THREE\nFOUR\n"),
+        "call_replace_ctx",
+    )
+
+    assert "Removed (lines 3-4):" in result.output
+    assert "Added (lines 3-4):" in result.output
+    assert "Context before (lines 1-2):" in result.output
+    assert "1 | one" in result.output
+    assert "2 | two" in result.output
+    assert "Context after (lines 5-6):" in result.output
+    assert "5 | five" in result.output
+    assert "6 | six" in result.output
+
+
+@pytest.mark.asyncio
+async def test_insert_lines_at_eof_emits_only_context_before(tmp_path: Path):
+    target = tmp_path / "log.txt"
+    target.write_text("a\nb\n", encoding="utf-8")
+    rev = _hash("a\nb\n")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(_insert_args(target, rev, 3, "c\nd\n"), "call_ins_eof")
+
+    assert "Added (lines 3-4):" in result.output
+    assert "Context before (lines 1-2):" in result.output
+    assert "1 | a" in result.output
+    assert "2 | b" in result.output
+    assert "Context after" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_delete_lines_emits_context_blocks_at_boundary(tmp_path: Path):
+    target = tmp_path / "data.txt"
+    target.write_text("a\nb\nc\nd\nE\nF\n", encoding="utf-8")
+    rev = _hash("a\nb\nc\nd\nE\nF\n")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(_delete_args(target, rev, 3, 4), "call_del_ctx")
+
+    assert target.read_text(encoding="utf-8") == "a\nb\nE\nF\n"
+    assert "Removed (lines 3-4):" in result.output
+    assert "Context before (lines 1-2):" in result.output
+    assert "1 | a" in result.output
+    assert "2 | b" in result.output
+    assert "Context after (lines 3-4):" in result.output
+    assert "3 | E" in result.output
+    assert "4 | F" in result.output
+
+
+@pytest.mark.asyncio
+async def test_replace_at_line_1_omits_context_before(tmp_path: Path):
+    target = tmp_path / "code.txt"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    rev = _hash("alpha\nbeta\ngamma\n")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    result = await tool.call(
+        _replace_args(target, rev, 1, 1, "ALPHA\n"),
+        "call_replace_top",
+    )
+
+    assert "Added (lines 1-1):" in result.output
+    assert "Context before" not in result.output
+    assert "Context after (lines 2-3):" in result.output
+    assert "2 | beta" in result.output
+    assert "3 | gamma" in result.output
+
+
+@pytest.mark.asyncio
+async def test_replace_with_duplicate_trailing_line_shows_collision_in_context(tmp_path: Path):
+    # Captures the partition pathology: model rewrites a fenced block and closes its
+    # new_text with `` ``` `` while leaving the original closing fence one line past
+    # end_line. The post-edit file then has two consecutive `` ``` `` lines, which the
+    # Context after block now surfaces inline.
+    target = tmp_path / "doc.md"
+    target.write_text("intro\n```\nbody\n```\noutro\n", encoding="utf-8")
+    rev = _hash("intro\n```\nbody\n```\noutro\n")
+    tool = FileTool(_empty_partition(), workspace_root=tmp_path)
+
+    # Replace lines 2-3 (opening fence + body) with a new fenced block that also closes
+    # the fence at its last line — leaving the original closing fence on line 4.
+    result = await tool.call(
+        _replace_args(target, rev, 2, 3, "```\nNEW_BODY\n```\n"),
+        "call_dup_fence",
+    )
+
+    assert "Added (lines 2-4):" in result.output
+    assert "Context after (lines 5-6):" in result.output
+    # The duplicate fence is now visible: Added ends at line 4 with ``` and the next
+    # line of the post-edit file (shown by Context after) is also ```.
+    assert "4 | ```" in result.output
+    assert "5 | ```" in result.output
+
+
+@pytest.mark.asyncio
 async def test_write_with_stale_revision_returns_conflict_carrying_live_view(tmp_path: Path):
     target = tmp_path / "f.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
@@ -300,7 +541,7 @@ async def test_write_with_stale_revision_returns_conflict_carrying_live_view(tmp
     )
 
     assert result.output.startswith("CONFLICT ")
-    assert "Re-read before retrying" in result.output
+    assert "Use the current view before retrying" in result.output
     assert result.prokaryotes_annotations["file_tool.status"] == "live"
     assert result.prokaryotes_annotations["file_tool.revision"] == _hash("alpha\nbeta\n")
     assert target.read_text(encoding="utf-8") == "alpha\nbeta\n"
@@ -600,6 +841,38 @@ async def test_reconcile_tracked_files_normalizes_conflict_window_without_revisi
 
 
 @pytest.mark.asyncio
+async def test_reconcile_tracked_files_normalizes_range_truncated_window_without_revision_change(tmp_path: Path):
+    target = tmp_path / "truncated.txt"
+    line_count = FileTool.max_lines + 10
+    target.write_text("".join(f"line{i}\n" for i in range(1, line_count + 1)), encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    truncated_result = await tool.call(
+        _read_args(target, start_line=1, end_line=line_count),
+        "call_trunc",
+    )
+    partition.append(ContextPartitionItem(
+        call_id="call_trunc",
+        name="file_tool",
+        arguments=_read_args(target, start_line=1, end_line=line_count),
+        type="function_call",
+    ))
+    partition.append(truncated_result)
+    assert truncated_result.output.startswith("RANGE_TRUNCATED ")
+
+    await reconcile_tracked_files(partition, workspace_root=tmp_path)
+
+    normalized = partition.items[1]
+    assert normalized.output.startswith("FILE ")
+    assert "RANGE_TRUNCATED " not in normalized.output
+    assert "1 | line1" in normalized.output
+    assert f"{FileTool.max_lines} | line{FileTool.max_lines}" in normalized.output
+    assert normalized.prokaryotes_annotations["file_tool.view_end_line"] == str(FileTool.max_lines)
+    assert normalized.prokaryotes_annotations["file_tool.requested_end_line"] == str(FileTool.max_lines)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_tracked_files_normalizes_already_exists_window_without_revision_change(tmp_path: Path):
     target = tmp_path / "exists_again.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
@@ -627,54 +900,305 @@ async def test_reconcile_tracked_files_normalizes_already_exists_window_without_
 
 @pytest.mark.asyncio
 async def test_read_refreshes_prior_live_windows_for_same_path(tmp_path: Path):
+    # The second read must escape the prior window's intended coverage so it actually hits disk
+    # and refreshes — a covered re-read short-circuits to REDUNDANT_READ and does not refresh.
     target = tmp_path / "read_refresh.txt"
-    target.write_text("old\n", encoding="utf-8")
+    target.write_text("old1\nold2\n", encoding="utf-8")
     partition = _empty_partition()
     tool = FileTool(partition, workspace_root=tmp_path)
 
-    first_read = await tool.call(_read_args(target), "call_first")
+    first_args = _read_args(target, 1, 1)
+    first_read = await tool.call(first_args, "call_first")
     partition.append(ContextPartitionItem(
         call_id="call_first",
         name="file_tool",
-        arguments=_read_args(target),
+        arguments=first_args,
         type="function_call",
     ))
     partition.append(first_read)
 
-    target.write_text("new\n", encoding="utf-8")
-    second_read = await tool.call(_read_args(target), "call_second")
+    target.write_text("new1\nnew2\n", encoding="utf-8")
+    second_read = await tool.call(_read_args(target, 2, 2), "call_second")
 
     refreshed = partition.items[1]
-    assert refreshed.prokaryotes_annotations["file_tool.revision"] == _hash("new\n")
-    assert "1 | new" in refreshed.output
-    assert "1 | old" not in refreshed.output
-    assert second_read.prokaryotes_annotations["file_tool.revision"] == _hash("new\n")
+    new_rev = _hash("new1\nnew2\n")
+    assert refreshed.prokaryotes_annotations["file_tool.revision"] == new_rev
+    assert "1 | new1" in refreshed.output
+    assert "1 | old1" not in refreshed.output
+    assert second_read.prokaryotes_annotations["file_tool.revision"] == new_rev
 
 
 @pytest.mark.asyncio
 async def test_failed_read_tombstones_prior_live_windows_for_same_path(tmp_path: Path):
+    # The follow-up read must escape the prior window's intended coverage so it reaches disk
+    # and discovers the missing file — a covered re-read would short-circuit to REDUNDANT_READ
+    # without observing the deletion. Tombstone discovery for the covered case shifts to the
+    # per-turn reconcile pass; that path is covered separately.
     target = tmp_path / "read_missing.txt"
-    target.write_text("gone soon\n", encoding="utf-8")
+    target.write_text("gone1\ngone2\n", encoding="utf-8")
     partition = _empty_partition()
     tool = FileTool(partition, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_read")
+    first_args = _read_args(target, 1, 1)
+    read_result = await tool.call(first_args, "call_read")
     partition.append(ContextPartitionItem(
         call_id="call_read",
         name="file_tool",
-        arguments=_read_args(target),
+        arguments=first_args,
         type="function_call",
     ))
     partition.append(read_result)
 
     target.unlink()
-    missing_result = await tool.call(_read_args(target), "call_missing")
+    missing_result = await tool.call(_read_args(target, 2, 2), "call_missing")
 
     tombstoned = partition.items[1]
     assert missing_result.output.startswith("ERROR FileNotFoundError")
     assert tombstoned.prokaryotes_annotations["file_tool.status"] == "stale"
     assert "no longer accessible" in tombstoned.output
     assert "FileNotFoundError" in tombstoned.output
+
+
+@pytest.mark.asyncio
+async def test_covered_exact_span_reread_returns_redundant_read(tmp_path: Path):
+    target = tmp_path / "covered.txt"
+    target.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    first_args = _read_args(target, 1, 3)
+    first_read = await tool.call(first_args, "call_first")
+    partition.append(ContextPartitionItem(
+        call_id="call_first",
+        name="file_tool",
+        arguments=first_args,
+        type="function_call",
+    ))
+    partition.append(first_read)
+    items_before = len(partition.items)
+
+    second_read = await tool.call(_read_args(target, 2, 3), "call_second")
+
+    assert second_read.output.startswith("REDUNDANT_READ ")
+    assert "rendered lines 1-3" in second_read.output
+    assert "intended coverage 1-3" in second_read.output
+    assert "page forward from start_line=4" in second_read.output
+    assert second_read.prokaryotes_annotations == {"file_tool.path": str(target)}
+    # The short-circuit must not append a new live window to the partition.
+    assert len(partition.items) == items_before
+
+
+@pytest.mark.asyncio
+async def test_covered_open_ended_reread_of_short_file_returns_redundant_read(tmp_path: Path):
+    # File shorter than max_lines: the first window's view_end_line is clipped at EOF (3) but
+    # the harness's intended coverage is still [1, start_line + max_lines - 1] = [1, 200]. A
+    # follow-up open-ended re-read of start=1 must still short-circuit, even though
+    # view_end_line (3) does not reach intended_coverage_end (200).
+    target = tmp_path / "short_open_ended.txt"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    first_args = _read_args(target)
+    first_read = await tool.call(first_args, "call_first")
+    partition.append(ContextPartitionItem(
+        call_id="call_first",
+        name="file_tool",
+        arguments=first_args,
+        type="function_call",
+    ))
+    partition.append(first_read)
+    assert first_read.prokaryotes_annotations["file_tool.view_end_line"] == "3"
+    assert "file_tool.requested_end_line" not in first_read.prokaryotes_annotations
+
+    second_read = await tool.call(_read_args(target), "call_second")
+
+    assert second_read.output.startswith("REDUNDANT_READ ")
+    assert "rendered lines 1-3" in second_read.output
+    assert "intended coverage 1-200" in second_read.output
+    assert "page forward from start_line=201" in second_read.output
+
+
+@pytest.mark.asyncio
+async def test_next_page_uses_intended_coverage_end_not_view_end(tmp_path: Path):
+    # Verifies the diagnostic's paging boundary is intended_coverage_end + 1, not
+    # view_end_line + 1. After an open-ended read of a 3-line file the window has
+    # view_end_line=3 but intended coverage [1, 200]. A small exact-span read at
+    # view_end_line + 1 (=4) is still inside intended coverage and must short-circuit; only a
+    # read past intended_coverage_end + 1 (=201) escapes.
+    target = tmp_path / "next_page.txt"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    first_args = _read_args(target)
+    first_read = await tool.call(first_args, "call_first")
+    partition.append(ContextPartitionItem(
+        call_id="call_first",
+        name="file_tool",
+        arguments=first_args,
+        type="function_call",
+    ))
+    partition.append(first_read)
+
+    # view_end_line + 1 = 4, small exact span inside intended coverage [1, 200].
+    covered_exact = await tool.call(_read_args(target, 4, 4), "call_view_end_plus_one")
+    assert covered_exact.output.startswith("REDUNDANT_READ ")
+    assert "page forward from start_line=201" in covered_exact.output
+
+    # intended_coverage_end + 1 = 201, escapes coverage.
+    next_page = await tool.call(_read_args(target, 201), "call_intended_end_plus_one")
+    assert not next_page.output.startswith("REDUNDANT_READ ")
+    assert next_page.prokaryotes_annotations.get("file_tool.status") == "live"
+
+
+@pytest.mark.asyncio
+async def test_range_truncated_window_counts_as_stable_coverage(tmp_path: Path):
+    # RANGE_TRUNCATED's embedded view is a real live window over [view_start_line,
+    # view_end_line] with requested_end_line=cap_end_line set. After the model has seen one
+    # RANGE_TRUNCATED view, an immediate re-read of the truncated span is exactly the misuse
+    # the fix targets, so RANGE_TRUNCATED must count as stable coverage.
+    long_text = "".join(f"line{n}\n" for n in range(1, 301))
+    target = tmp_path / "range_truncated.txt"
+    target.write_text(long_text, encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    first_args = _read_args(target, 1, 250)
+    first_read = await tool.call(first_args, "call_first")
+    partition.append(ContextPartitionItem(
+        call_id="call_first",
+        name="file_tool",
+        arguments=first_args,
+        type="function_call",
+    ))
+    partition.append(first_read)
+    assert first_read.output.startswith("RANGE_TRUNCATED ")
+    assert first_read.prokaryotes_annotations["file_tool.status"] == "live"
+
+    second_read = await tool.call(_read_args(target, 1, 200), "call_second")
+    assert second_read.output.startswith("REDUNDANT_READ ")
+
+
+@pytest.mark.asyncio
+async def test_already_exists_window_is_not_stable_coverage(tmp_path: Path):
+    target = tmp_path / "already_exists.txt"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    create_args = _create_args(target, "ignored\n")
+    create_result = await tool.call(create_args, "call_create")
+    partition.append(ContextPartitionItem(
+        call_id="call_create",
+        name="file_tool",
+        arguments=create_args,
+        type="function_call",
+    ))
+    partition.append(create_result)
+    assert create_result.output.startswith("ALREADY_EXISTS ")
+    assert create_result.prokaryotes_annotations["file_tool.status"] == "live"
+
+    follow_up = await tool.call(_read_args(target, 1, 3), "call_follow")
+    assert not follow_up.output.startswith("REDUNDANT_READ ")
+    assert follow_up.prokaryotes_annotations["file_tool.status"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_conflict_window_is_not_stable_coverage(tmp_path: Path):
+    target = tmp_path / "conflict.txt"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    stale_rev = _hash("not-the-real-content\n")
+    conflict_args = _replace_args(target, stale_rev, 1, 1, "x\n")
+    conflict_result = await tool.call(conflict_args, "call_conflict")
+    partition.append(ContextPartitionItem(
+        call_id="call_conflict",
+        name="file_tool",
+        arguments=conflict_args,
+        type="function_call",
+    ))
+    partition.append(conflict_result)
+    assert conflict_result.output.startswith("CONFLICT ")
+    assert conflict_result.prokaryotes_annotations["file_tool.status"] == "live"
+
+    follow_up = await tool.call(_read_args(target, 1, 3), "call_follow")
+    assert not follow_up.output.startswith("REDUNDANT_READ ")
+    assert follow_up.prokaryotes_annotations["file_tool.status"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_range_error_window_is_not_stable_coverage(tmp_path: Path):
+    target = tmp_path / "range_error.txt"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    rev = _hash("a\nb\nc\n")
+    range_error_args = _replace_args(target, rev, 50, 60, "x\n")
+    range_error_result = await tool.call(range_error_args, "call_range_error")
+    partition.append(ContextPartitionItem(
+        call_id="call_range_error",
+        name="file_tool",
+        arguments=range_error_args,
+        type="function_call",
+    ))
+    partition.append(range_error_result)
+    assert range_error_result.output.startswith("RANGE_ERROR ")
+    assert range_error_result.prokaryotes_annotations["file_tool.status"] == "live"
+    assert range_error_result.prokaryotes_annotations["file_tool.view_start_line"] == "50"
+
+    # If RANGE_ERROR were stable coverage, this read of [50, 60] would short-circuit (its
+    # intended_coverage_end is view_start_line + max_lines - 1 = 249). It must not.
+    follow_up = await tool.call(_read_args(target, 50, 60), "call_follow")
+    assert not follow_up.output.startswith("REDUNDANT_READ ")
+
+
+@pytest.mark.asyncio
+async def test_redundant_read_item_skipped_by_refresh_and_tombstone(tmp_path: Path):
+    target = tmp_path / "redundant_annotations.txt"
+    target.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    partition = _empty_partition()
+    tool = FileTool(partition, workspace_root=tmp_path)
+
+    first_args = _read_args(target, 1, 4)
+    first_read = await tool.call(first_args, "call_first")
+    partition.append(ContextPartitionItem(
+        call_id="call_first",
+        name="file_tool",
+        arguments=first_args,
+        type="function_call",
+    ))
+    partition.append(first_read)
+
+    second_args = _read_args(target, 2, 3)
+    redundant = await tool.call(second_args, "call_redundant")
+    partition.append(ContextPartitionItem(
+        call_id="call_redundant",
+        name="file_tool",
+        arguments=second_args,
+        type="function_call",
+    ))
+    partition.append(redundant)
+    assert redundant.output.startswith("REDUNDANT_READ ")
+    assert redundant.prokaryotes_annotations == {"file_tool.path": str(target)}
+
+    # A follow-up edit must refresh exactly one live window — the original first_read. The
+    # REDUNDANT_READ carries no status=live and must be skipped by _refresh_live_windows.
+    rev = first_read.prokaryotes_annotations["file_tool.revision"]
+    edit_result = await tool.call(_replace_args(target, rev, 1, 1, "A\n"), "call_edit")
+    assert edit_result.output.startswith("EDITED ")
+    assert "Live windows refreshed for this path: 1" in edit_result.output
+
+    # Deleting the file and triggering a non-covered failing read must tombstone the live
+    # window but leave the REDUNDANT_READ item untouched (status absent → tombstone skip).
+    target.unlink()
+    await tool.call(_read_args(target, 50, 60), "call_missing")
+    assert partition.items[1].prokaryotes_annotations["file_tool.status"] == "stale"
+    assert partition.items[3].prokaryotes_annotations == {"file_tool.path": str(target)}
+    assert partition.items[3].output.startswith("REDUNDANT_READ ")
 
 
 @pytest.mark.asyncio
@@ -855,8 +1379,9 @@ def test_refresh_live_windows_handles_multiple_views_into_same_path():
         },
     )
 
-    _refresh_live_windows([item_first, item_second], "/tmp/x", text_v2, rev_v2)
+    refreshed_count = _refresh_live_windows([item_first, item_second], "/tmp/x", text_v2, rev_v2)
 
+    assert refreshed_count == 2
     assert item_first.prokaryotes_annotations["file_tool.revision"] == rev_v2
     assert "1 | A" in item_first.output
     assert item_second.prokaryotes_annotations["file_tool.revision"] == rev_v2
@@ -869,6 +1394,70 @@ def test_render_view_returns_empty_view_past_eof():
     assert line_count == 2
     assert view_lines == []
     assert end_line == 9
+
+
+def test_render_view_honors_requested_end_line():
+    end_line, line_count, view_lines = render_view(
+        "a\nb\nc\nd\n",
+        start_line=2,
+        max_lines=5,
+        requested_end_line=3,
+    )
+
+    assert line_count == 4
+    assert view_lines == ["b", "c"]
+    assert end_line == 3
+
+
+def test_refresh_live_windows_preserves_exact_requested_range():
+    text_v1 = "a\nb\nc\nd\ne\n"
+    text_v2 = "A\nB\nC\nD\nE\nF\n"
+    rev_v1 = _hash(text_v1)
+    rev_v2 = _hash(text_v2)
+    item = ContextPartitionItem(
+        call_id="c1",
+        type="function_call_output",
+        output="placeholder",
+        prokaryotes_annotations={
+            "file_tool.path": "/tmp/x",
+            "file_tool.revision": rev_v1,
+            "file_tool.status": "live",
+            "file_tool.view_start_line": "2",
+            "file_tool.view_end_line": "3",
+            "file_tool.requested_end_line": "3",
+        },
+    )
+
+    refreshed_count = _refresh_live_windows([item], "/tmp/x", text_v2, rev_v2)
+
+    assert refreshed_count == 1
+    assert item.prokaryotes_annotations["file_tool.revision"] == rev_v2
+    assert item.prokaryotes_annotations["file_tool.view_end_line"] == "3"
+    assert "2 | B" in item.output
+    assert "3 | C" in item.output
+    assert "4 | D" not in item.output
+
+
+def test_refresh_live_windows_returns_zero_for_already_current_items():
+    text = "a\nb\n"
+    rev = _hash(text)
+    item = ContextPartitionItem(
+        call_id="c1",
+        type="function_call_output",
+        output="original",
+        prokaryotes_annotations={
+            "file_tool.path": "/tmp/x",
+            "file_tool.revision": rev,
+            "file_tool.status": "live",
+            "file_tool.view_start_line": "1",
+            "file_tool.view_end_line": "2",
+        },
+    )
+
+    refreshed_count = _refresh_live_windows([item], "/tmp/x", text, rev)
+
+    assert refreshed_count == 0
+    assert item.output == "original"
 
 
 @pytest.mark.asyncio

@@ -505,166 +505,274 @@ export function createChatApp({
         });
     }
 
-    function formatCodeBlock(text, language = '') {
-        return `\`\`\`${language}\n${text}\n\`\`\``;
+    function appendInlineCode(parent, text) {
+        const code = doc.createElement('code');
+        code.textContent = String(text);
+        parent.appendChild(code);
+        return code;
     }
 
-    function formatGenericToolValueMarkdown(label, value) {
-        if (value === null || value === undefined) {
-            return null;
+    function appendStrong(parent, text) {
+        const strong = doc.createElement('strong');
+        strong.textContent = text;
+        parent.appendChild(strong);
+        return strong;
+    }
+
+    function appendTextWithLineBreaks(parent, text) {
+        String(text).split('\n').forEach((line, index) => {
+            if (index > 0) {
+                parent.appendChild(doc.createElement('br'));
+            }
+            parent.appendChild(doc.createTextNode(line));
+        });
+    }
+
+    function appendParagraph(container, populate) {
+        const paragraph = doc.createElement('p');
+        populate(paragraph);
+        container.appendChild(paragraph);
+        return paragraph;
+    }
+
+    function appendTextParagraph(container, text) {
+        appendParagraph(container, paragraph => {
+            appendTextWithLineBreaks(paragraph, text);
+        });
+    }
+
+    function appendLabelParagraph(container, label) {
+        appendParagraph(container, paragraph => {
+            appendStrong(paragraph, label);
+        });
+    }
+
+    function appendLabelValueParagraph(container, label, value, { inlineCode = false } = {}) {
+        appendParagraph(container, paragraph => {
+            appendStrong(paragraph, label);
+            paragraph.appendChild(doc.createTextNode(': '));
+            if (inlineCode) {
+                appendInlineCode(paragraph, value);
+            } else {
+                appendTextWithLineBreaks(paragraph, value);
+            }
+        });
+    }
+
+    function appendCodeBlock(container, text, language = '') {
+        const pre = doc.createElement('pre');
+        const code = doc.createElement('code');
+        code.classList.add('hljs');
+        if (language && hljs.getLanguage(language)) {
+            code.classList.add(`language-${language}`);
         }
+        code.textContent = text;
+        pre.appendChild(code);
+        container.appendChild(pre);
+
+        try {
+            hljs.highlightElement(code);
+        } catch {
+            code.textContent = text;
+        }
+
+        return pre;
+    }
+
+    function appendToolCallHeading(container, name) {
+        appendParagraph(container, paragraph => {
+            paragraph.appendChild(doc.createTextNode('Tool call: '));
+            appendInlineCode(paragraph, name);
+        });
+    }
+
+    function appendGenericToolValue(container, label, value) {
+        if (value === null || value === undefined) {
+            return false;
+        }
+        const displayLabel = humanizeLabel(label);
         if (typeof value === 'string') {
             if (!value.trim()) {
-                return null;
+                return false;
             }
             if (value.includes('\n')) {
-                return `**${humanizeLabel(label)}**\n\n${formatCodeBlock(value)}`;
+                appendLabelParagraph(container, displayLabel);
+                appendCodeBlock(container, value);
+                return true;
             }
-            return `**${humanizeLabel(label)}**: ${value}`;
+            appendLabelValueParagraph(container, displayLabel, value);
+            return true;
         }
         if (Array.isArray(value)) {
             if (value.length === 0) {
-                return null;
+                return false;
             }
             if (value.every(item => ['string', 'number', 'boolean'].includes(typeof item))) {
-                return `**${humanizeLabel(label)}**\n${value.map(item => `- ${item}`).join('\n')}`;
+                appendLabelParagraph(container, displayLabel);
+                const list = doc.createElement('ul');
+                value.forEach(item => {
+                    const listItem = doc.createElement('li');
+                    listItem.textContent = String(item);
+                    list.appendChild(listItem);
+                });
+                container.appendChild(list);
+                return true;
             }
-            return `**${humanizeLabel(label)}**\n\n${formatCodeBlock(JSON.stringify(value, null, 2), 'json')}`;
+            appendLabelParagraph(container, displayLabel);
+            appendCodeBlock(container, JSON.stringify(value, null, 2), 'json');
+            return true;
         }
         if (typeof value === 'object') {
             if (Object.keys(value).length === 0) {
-                return null;
+                return false;
             }
-            return `**${humanizeLabel(label)}**\n\n${formatCodeBlock(JSON.stringify(value, null, 2), 'json')}`;
+            appendLabelParagraph(container, displayLabel);
+            appendCodeBlock(container, JSON.stringify(value, null, 2), 'json');
+            return true;
         }
-        return `**${humanizeLabel(label)}**: \`${String(value)}\``;
+        appendLabelValueParagraph(container, displayLabel, String(value), { inlineCode: true });
+        return true;
     }
 
-    function formatGenericToolCallMarkdown(name, parsedArgs) {
-        const parts = [`Tool call: \`${name}\``];
+    function appendSortedGenericToolValues(container, parsedArgs, excludedKeys = []) {
+        const excluded = new Set(excludedKeys);
         Object.entries(parsedArgs)
+            .filter(([key]) => !excluded.has(key))
             .sort(([left], [right]) => left.localeCompare(right))
             .forEach(([key, value]) => {
-                const section = formatGenericToolValueMarkdown(key, value);
-                if (section) {
-                    parts.push(section);
-                }
+                appendGenericToolValue(container, key, value);
             });
-        return parts.join('\n\n');
     }
 
-    function formatThinkToolCallMarkdown(parsedArgs) {
-        const parts = ['Tool call: `think`'];
+    function appendGenericToolCallContent(container, name, parsedArgs) {
+        appendToolCallHeading(container, name);
+        appendSortedGenericToolValues(container, parsedArgs);
+    }
+
+    function appendThinkToolCallContent(container, parsedArgs) {
+        appendToolCallHeading(container, 'think');
         if (typeof parsedArgs.goal === 'string' && parsedArgs.goal.trim()) {
-            parts.push(`**Goal**\n\n${parsedArgs.goal}`);
+            appendLabelParagraph(container, 'Goal');
+            appendTextParagraph(container, parsedArgs.goal);
         }
         if (typeof parsedArgs.context === 'string' && parsedArgs.context.trim()) {
-            parts.push(`**Context**\n\n${parsedArgs.context}`);
+            appendLabelParagraph(container, 'Context');
+            appendTextParagraph(container, parsedArgs.context);
         }
         if (Array.isArray(parsedArgs.perspectives) && parsedArgs.perspectives.length > 0) {
-            parts.push(`**Perspectives**\n${parsedArgs.perspectives.map(item => `- ${item}`).join('\n')}`);
-        }
-        Object.entries(parsedArgs)
-            .filter(([key]) => !['goal', 'context', 'perspectives'].includes(key))
-            .sort(([left], [right]) => left.localeCompare(right))
-            .forEach(([key, value]) => {
-                const section = formatGenericToolValueMarkdown(key, value);
-                if (section) {
-                    parts.push(section);
-                }
+            appendLabelParagraph(container, 'Perspectives');
+            const list = doc.createElement('ul');
+            parsedArgs.perspectives.forEach(item => {
+                const listItem = doc.createElement('li');
+                listItem.textContent = String(item);
+                list.appendChild(listItem);
             });
-        return parts.join('\n\n');
+            container.appendChild(list);
+        }
+        appendSortedGenericToolValues(container, parsedArgs, ['goal', 'context', 'perspectives']);
     }
 
-    function formatShellCommandToolCallMarkdown(parsedArgs) {
-        const parts = ['Tool call: `shell_command`'];
+    function appendShellCommandToolCallContent(container, name, parsedArgs) {
+        appendToolCallHeading(container, name);
         if (typeof parsedArgs.reason === 'string' && parsedArgs.reason.trim()) {
-            parts.push(`**Reason**: ${parsedArgs.reason}`);
+            appendLabelValueParagraph(container, 'Reason', parsedArgs.reason);
         }
         if (typeof parsedArgs.command === 'string' && parsedArgs.command.trim()) {
-            parts.push(`**Command**\n\n${formatCodeBlock(parsedArgs.command, 'sh')}`);
+            appendLabelParagraph(container, 'Command');
+            appendCodeBlock(container, parsedArgs.command, 'sh');
         }
-        Object.entries(parsedArgs)
-            .filter(([key]) => !['command', 'reason'].includes(key))
-            .sort(([left], [right]) => left.localeCompare(right))
-            .forEach(([key, value]) => {
-                const section = formatGenericToolValueMarkdown(key, value);
-                if (section) {
-                    parts.push(section);
-                }
-            });
-        return parts.join('\n\n');
+        appendSortedGenericToolValues(container, parsedArgs, ['command', 'reason']);
     }
 
-    function formatFileToolCallMarkdown(parsedArgs) {
+    function appendFileToolCallContent(container, parsedArgs) {
         const action = parsedArgs.action;
         const path = typeof parsedArgs.path === 'string' ? parsedArgs.path : '';
         const startLine = parsedArgs.start_line;
         const endLine = parsedArgs.end_line;
         const newText = parsedArgs.new_text;
-        const parts = ['Tool call: `file_tool`'];
-        if (action === 'read') {
-            if (typeof startLine === 'number') {
-                parts.push(`Reading \`${path}\` from line ${startLine}`);
-            } else {
-                parts.push(`Reading \`${path}\``);
-            }
+        appendToolCallHeading(container, 'file_tool');
+        if (action === 'read_lines') {
+            appendParagraph(container, paragraph => {
+                paragraph.appendChild(doc.createTextNode('Reading '));
+                appendInlineCode(paragraph, path);
+                if (typeof startLine === 'number') {
+                    paragraph.appendChild(doc.createTextNode(` from line ${startLine}`));
+                }
+            });
         } else if (action === 'create_file') {
-            parts.push(`Creating \`${path}\``);
+            appendParagraph(container, paragraph => {
+                paragraph.appendChild(doc.createTextNode('Creating '));
+                appendInlineCode(paragraph, path);
+            });
             if (typeof newText === 'string' && newText.length > 0) {
-                parts.push(formatCodeBlock(newText));
+                appendCodeBlock(container, newText);
             }
         } else if (action === 'replace_lines') {
-            parts.push(`Editing \`${path}\` lines ${startLine}-${endLine}`);
+            appendParagraph(container, paragraph => {
+                paragraph.appendChild(doc.createTextNode('Editing '));
+                appendInlineCode(paragraph, path);
+                paragraph.appendChild(doc.createTextNode(` lines ${startLine}-${endLine}`));
+            });
             if (typeof newText === 'string' && newText.length > 0) {
-                parts.push(formatCodeBlock(newText));
+                appendCodeBlock(container, newText);
             }
         } else if (action === 'insert_lines') {
-            parts.push(`Inserting at \`${path}\` line ${startLine}`);
+            appendParagraph(container, paragraph => {
+                paragraph.appendChild(doc.createTextNode('Inserting at '));
+                appendInlineCode(paragraph, path);
+                paragraph.appendChild(doc.createTextNode(` line ${startLine}`));
+            });
             if (typeof newText === 'string' && newText.length > 0) {
-                parts.push(formatCodeBlock(newText));
+                appendCodeBlock(container, newText);
             }
         } else if (action === 'delete_lines') {
-            parts.push(`Deleting \`${path}\` lines ${startLine}-${endLine}`);
+            appendParagraph(container, paragraph => {
+                paragraph.appendChild(doc.createTextNode('Deleting '));
+                appendInlineCode(paragraph, path);
+                paragraph.appendChild(doc.createTextNode(` lines ${startLine}-${endLine}`));
+            });
         } else {
             const actionLabel = typeof action === 'string' && action ? action : 'unknown';
-            parts.push(`Unknown file action: \`${actionLabel}\``);
+            appendParagraph(container, paragraph => {
+                paragraph.appendChild(doc.createTextNode('Unknown file action: '));
+                appendInlineCode(paragraph, actionLabel);
+            });
         }
-        return parts.join('\n\n');
     }
 
-    function formatToolCallMarkdown(name, rawArguments) {
+    function appendToolArgumentsFallback(container, name, argumentsText) {
+        appendToolCallHeading(container, name);
+        appendLabelParagraph(container, 'Arguments');
+        appendCodeBlock(container, argumentsText, 'json');
+    }
+
+    function appendToolCallContent(container, name, rawArguments) {
         let parsedArgs;
         try {
             parsedArgs = JSON.parse(rawArguments || '{}');
         } catch {
-            return [
-                `Tool call: \`${name}\``,
-                '**Arguments**',
-                '',
-                formatCodeBlock(rawArguments || '{}', 'json'),
-            ].join('\n');
+            appendToolArgumentsFallback(container, name, rawArguments || '{}');
+            return;
         }
 
         if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
-            return [
-                `Tool call: \`${name}\``,
-                '**Arguments**',
-                '',
-                formatCodeBlock(JSON.stringify(parsedArgs, null, 2), 'json'),
-            ].join('\n');
+            appendToolArgumentsFallback(container, name, JSON.stringify(parsedArgs, null, 2));
+            return;
         }
 
         if (name === 'file_tool') {
-            return formatFileToolCallMarkdown(parsedArgs);
+            appendFileToolCallContent(container, parsedArgs);
+            return;
         }
-        if (name === 'shell_command') {
-            return formatShellCommandToolCallMarkdown(parsedArgs);
+        if (name === 'shell_command' || name === 'shell_tool') {
+            appendShellCommandToolCallContent(container, name, parsedArgs);
+            return;
         }
         if (name === 'think') {
-            return formatThinkToolCallMarkdown(parsedArgs);
+            appendThinkToolCallContent(container, parsedArgs);
+            return;
         }
-        return formatGenericToolCallMarkdown(name, parsedArgs);
+        appendGenericToolCallContent(container, name, parsedArgs);
     }
 
     function renderActivityEntry(entry) {
@@ -673,9 +781,7 @@ export function createChatApp({
         if (entry.type === 'progress') {
             activityDiv.innerHTML = renderMarkdown(entry.text);
         } else if (entry.type === 'tool_call') {
-            activityDiv.innerHTML = renderMarkdown(
-                formatToolCallMarkdown(entry.name, entry.arguments),
-            );
+            appendToolCallContent(activityDiv, entry.name, entry.arguments);
             attachCopyButtons(activityDiv);
         }
         return activityDiv;

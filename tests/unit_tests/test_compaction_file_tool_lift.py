@@ -19,22 +19,31 @@ from tests.unit_tests.context_partition_utils import (
 )
 
 
-def _live_window(call_id: str, path: str, view_start: int = 1, view_end: int = 5) -> ContextPartitionItem:
+def _live_window(
+        call_id: str,
+        path: str,
+        view_start: int = 1,
+        view_end: int = 5,
+        requested_end_line: int | None = None,
+) -> ContextPartitionItem:
+    annotations = {
+        "file_tool.path": path,
+        "file_tool.revision": "rev1",
+        "file_tool.status": "live",
+        "file_tool.view_start_line": str(view_start),
+        "file_tool.view_end_line": str(view_end),
+    }
+    if requested_end_line is not None:
+        annotations["file_tool.requested_end_line"] = str(requested_end_line)
     return ContextPartitionItem(
         call_id=call_id,
         output=f"FILE path={path} revision=rev1 status=live lines={view_start}-{view_end} line_count={view_end}",
         type="function_call_output",
-        prokaryotes_annotations={
-            "file_tool.path": path,
-            "file_tool.revision": "rev1",
-            "file_tool.status": "live",
-            "file_tool.view_start_line": str(view_start),
-            "file_tool.view_end_line": str(view_end),
-        },
+        prokaryotes_annotations=annotations,
     )
 
 
-def _function_call(call_id: str, path: str, action: str = "read") -> ContextPartitionItem:
+def _function_call(call_id: str, path: str, action: str = "read_lines") -> ContextPartitionItem:
     return ContextPartitionItem(
         call_id=call_id,
         id=call_id,
@@ -381,6 +390,13 @@ def test_items_equal_mod_live_windows_detects_path_change_within_live_window():
     assert _items_equal_mod_live_windows([a], [b]) is False
 
 
+def test_items_equal_mod_live_windows_detects_requested_end_line_change():
+    a = _live_window("c1", "/app/foo.py", view_start=1, view_end=3, requested_end_line=3)
+    b = _live_window("c1", "/app/foo.py", view_start=1, view_end=3, requested_end_line=5)
+
+    assert _items_equal_mod_live_windows([a], [b]) is False
+
+
 def test_items_equal_mod_live_windows_falls_back_to_full_equality_for_non_live_items():
     msg_a = ContextPartitionItem(role="user", content="hi")
     msg_b = ContextPartitionItem(role="user", content="hi")
@@ -446,7 +462,7 @@ def _conflict_live_window(call_id: str, path: str) -> ContextPartitionItem:
         call_id=call_id,
         output=(
             f"CONFLICT path={path} expected_revision=oldrev current_revision=newrev\n"
-            "The file changed since the revision you read. Re-read before retrying.\n"
+            "The file changed since the revision returned by read_lines. Use the current view before retrying.\n"
             "Current view (lines 1-3 of 3):\n"
             "1 | actual\n"
             "2 | file\n"
@@ -505,12 +521,36 @@ def _range_error_live_window(call_id: str, path: str) -> ContextPartitionItem:
     )
 
 
+def _range_truncated_live_window(call_id: str, path: str) -> ContextPartitionItem:
+    return ContextPartitionItem(
+        call_id=call_id,
+        output=(
+            f"RANGE_TRUNCATED path={path} requested_lines=1-255 returned_lines=1-200 line_count=255\n"
+            "Your requested span exceeded the 200-line per-call cap."
+            " The window below covers lines 1-200."
+            " Call `read_lines` with `start_line=201` to page through the remaining 55 lines.\n"
+            "Current view (lines 1-200 of 255):\n"
+            "1 | first\n"
+            "2 | second"
+        ),
+        type="function_call_output",
+        prokaryotes_annotations={
+            "file_tool.path": path,
+            "file_tool.revision": "rev1",
+            "file_tool.status": "live",
+            "file_tool.view_start_line": "1",
+            "file_tool.view_end_line": "200",
+            "file_tool.requested_end_line": "200",
+        },
+    )
+
+
 def _empty_conflict_live_window(call_id: str, path: str) -> ContextPartitionItem:
     return ContextPartitionItem(
         call_id=call_id,
         output=(
             f"CONFLICT path={path} expected_revision=oldrev current_revision=emptyrev\n"
-            "The file changed since the revision you read. Re-read before retrying.\n"
+            "The file changed since the revision returned by read_lines. Use the current view before retrying.\n"
             "Current view: empty file (line_count=0)"
         ),
         type="function_call_output",
@@ -553,7 +593,7 @@ def test_strip_live_window_bodies_preserves_conflict_diagnostic_header():
     assert output.startswith(
         "CONFLICT path=/app/foo.py expected_revision=oldrev current_revision=newrev"
     )
-    assert "The file changed since the revision you read." in output
+    assert "The file changed since the revision returned by read_lines." in output
     assert "[Live tracked file: /app/foo.py" in output
     assert "1 | actual" not in output
     assert "Current view" not in output
@@ -598,6 +638,28 @@ def test_strip_live_window_bodies_preserves_range_error_diagnostic_header():
     assert "1 | first" not in output
 
 
+def test_strip_live_window_bodies_preserves_range_truncated_diagnostic_header():
+    partition = ContextPartition(
+        conversation_uuid="conv",
+        items=[
+            _function_call("c1", "/app/foo.py", action="read_lines"),
+            _range_truncated_live_window("c1", "/app/foo.py"),
+        ],
+    )
+
+    stripped = _strip_live_window_bodies(partition)
+    output = stripped.items[1].output
+
+    assert output.startswith(
+        "RANGE_TRUNCATED path=/app/foo.py requested_lines=1-255 returned_lines=1-200 line_count=255"
+    )
+    assert "Your requested span exceeded the 200-line per-call cap." in output
+    assert "Call `read_lines` with `start_line=201`" in output
+    assert "[Live tracked file: /app/foo.py" in output
+    assert "1 | first" not in output
+    assert "Current view" not in output
+
+
 def test_strip_live_window_bodies_handles_empty_current_view_marker():
     partition = ContextPartition(
         conversation_uuid="conv",
@@ -613,7 +675,7 @@ def test_strip_live_window_bodies_handles_empty_current_view_marker():
     assert output.startswith(
         "CONFLICT path=/app/empty.py expected_revision=oldrev current_revision=emptyrev"
     )
-    assert "The file changed since the revision you read." in output
+    assert "The file changed since the revision returned by read_lines." in output
     assert "[Live tracked file: /app/empty.py" in output
     assert "Current view" not in output
     assert "line_count=0" not in output
