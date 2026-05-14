@@ -3,13 +3,11 @@ import os
 from elasticsearch import AsyncElasticsearch
 
 from prokaryotes.search_v1.context_partitions import ContextPartitionSearcher
-from prokaryotes.search_v1.named_entities import NamedEntitySearcher
 from prokaryotes.search_v1.topics import TopicSearcher
 
 
 class SearchClient(
     ContextPartitionSearcher,
-    NamedEntitySearcher,
     TopicSearcher,
 ):
     def __init__(self):

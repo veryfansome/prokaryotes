@@ -543,11 +543,16 @@ Tier A passes with FileTool enabled in both the Anthropic and OpenAI web harness
 
 | File | Role |
 |---|---|
-| `prokaryotes/tools_v1/file_tool.py` | FileTool implementation, path sandboxing, read/write helpers, reconciliation, rendering |
+| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` class, the public `reconcile_tracked_files` entry, and back-compat wrappers (`_locked_read_text`, `_read_text_under_file_tool_lock`, `_refresh_live_windows`) that read `FileTool.max_*` and forward to the parameterized sibling impls |
+| `prokaryotes/tools_v1/file_tool/live_windows.py` | Helpers operating on `file_tool.*` annotations: live-window detection, refresh, tombstoning, identity-tuple equality, recency-tail extraction, summary-input stripping, pre-tail lifting |
+| `prokaryotes/tools_v1/file_tool/paths.py` | Workspace sandboxing — `_resolve_path`, `_open_text_file_no_follow`, `_raise_if_file_too_large`, `FileToolFileTooLargeError` |
+| `prokaryotes/tools_v1/file_tool/reads.py` | Locked-read primitives (`_locked_read_text`, `_read_text_under_file_tool_lock`) and the shared per-path `asyncio.Lock` registry |
+| `prokaryotes/tools_v1/file_tool/reconciliation.py` | `_reconcile_one_tracked_path` — per-path reconcile helper invoked by `reconcile_tracked_files` |
+| `prokaryotes/tools_v1/file_tool/rendering.py` | `render_create_record`, `render_edit_record`, `render_live_window`, `render_tombstone`, `render_view`, line-edit text mutation, and the `CURRENT_VIEW_MARKER_PREFIX` constant |
+| `prokaryotes/tools_v1/file_tool/validation.py` | Payload field validation for `read_lines`, `create_file`, and the write actions |
 | `prokaryotes/api_v1/models.py` | `ContextPartitionItem.prokaryotes_annotations`, provider serialization |
-| `prokaryotes/openai_v1/web_harness.py` | OpenAI web-harness registration and per-turn reconciliation |
-| `prokaryotes/anthropic_v1/web_harness.py` | Anthropic web-harness registration and per-turn reconciliation |
-| `prokaryotes/web_v1/__init__.py` | Compaction helpers for stripping, lifting, and live-window-aware prefix comparison |
+| `prokaryotes/harness_v1/web.py` | Web-harness `FileTool` registration and per-turn reconciliation |
+| `prokaryotes/web_v1/compaction.py` | `_compact_partition` — the consumer that calls into `live_windows.py` to strip, lift, and live-window-aware-compare partitions |
 | `scripts/static/ui.js` | Client-side rendering of `file_tool` activity entries |
 | `tests/unit_tests/test_file_tool.py` | Core unit coverage |
 | `tests/integration_tests/tier_b/test_file_tool_flow.py` | End-to-end Tier B regression coverage |

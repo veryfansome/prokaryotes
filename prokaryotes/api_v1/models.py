@@ -8,7 +8,6 @@ from collections.abc import (
     Callable,
     Iterable,
 )
-from enum import Enum
 from typing import (
     Any,
     Literal,
@@ -212,39 +211,19 @@ class ContextPartition(BaseModel):
 
 
 class ContextPartitionItem(BaseModel):
-    """An all-in-one class that can represent a message, function call, or function call output."""
+    """Normalized envelope for a message, function call, or function call output.
+
+    Field shape mirrors the OpenAI Responses API union of `Message`, `ResponseFunctionToolCall`, and
+    `FunctionCallOutput`; only the subset of fields relevant to the item's `type` is populated on construction. See
+    `ContextPartition.to_openai_input()` and `to_anthropic_messages()` for the mapping into each provider's format.
+    """
 
     arguments: str | None = None
-    """Corresponds with:
-       - openai.types.responses.ResponseFunctionToolCall
-    """
-
     call_id: str | None = None
-    """Corresponds with:
-       - openai.types.responses.ResponseFunctionToolCall
-       - openai.types.responses.response_input_param.FunctionCallOutput
-    """
-
     content: str | None = None
-    """Corresponds with:
-       - openai.types.responses.response_input_param.Message
-    """
-
     id: str | None = None
-    """Corresponds with:
-       - openai.types.responses.ResponseFunctionToolCall
-       - openai.types.responses.response_input_param.FunctionCallOutput
-    """
-
     name: str | None = None
-    """Corresponds with:
-       - openai.types.responses.ResponseFunctionToolCall
-    """
-
     output: str | None = None
-    """Corresponds with:
-       - openai.types.responses.response_input_param.FunctionCallOutput
-    """
 
     prokaryotes_annotations: dict[str, str] | None = None
     """Internal harness metadata, Kubernetes-style. Keys are dot-namespaced by component
@@ -252,23 +231,8 @@ class ContextPartitionItem(BaseModel):
     `to_openai_input()`; included in Redis/ES serialization."""
 
     role: str | None = None
-    """Corresponds with:
-       - openai.types.responses.response_input_param.Message
-    """
-
     type: Literal["function_call", "function_call_output", "message"] = "message"
-    """Corresponds with:
-       - openai.types.responses.ResponseFunctionToolCall
-       - openai.types.responses.response_input_param.FunctionCallOutput
-       - openai.types.responses.response_input_param.Message
-    """
-
     status: Literal["in_progress", "completed", "incomplete"] | None = None
-    """Corresponds with:
-       - openai.types.responses.ResponseFunctionToolCall
-       - openai.types.responses.response_input_param.FunctionCallOutput
-       - openai.types.responses.response_input_param.Message
-    """
 
 
 class ConversationMatchesPartitionError(Exception):
@@ -313,22 +277,6 @@ class LLMClient(Protocol):
         tool_callbacks: dict[str, FunctionToolCallback] | None = None,
     ) -> AsyncGenerator[str, Any]:
         ...
-
-
-class TextEmbeddingPrompt(Enum):
-    DOCUMENT = "document"
-    QUERY = "query"
-
-
-class TextEmbeddingRequest(BaseModel):
-    batch_size: int = 1
-    prompt: TextEmbeddingPrompt
-    texts: tuple[str, ...]
-    truncate_to: int | None = None
-
-
-class TextEmbeddingResponse(BaseModel):
-    embs: list[list[float]]
 
 
 class ToolParameters(BaseModel):

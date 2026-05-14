@@ -70,6 +70,44 @@ async def test_search_topics_excludes_seed_topics_from_lexical_and_knn(es_mock: 
 
 
 @pytest.mark.asyncio
+async def test_index_topics_tags_named_entities(monkeypatch: pytest.MonkeyPatch, es_mock: AsyncMock):
+    searcher = DummyTopicSearcher(es_mock)
+    captured_actions = []
+
+    async def _fake_async_bulk(_es, actions, raise_on_error=False):
+        captured_actions.extend(actions)
+        return len(actions), []
+
+    monkeypatch.setattr("prokaryotes.search_v1.topics.helpers.async_bulk", _fake_async_bulk)
+
+    await searcher.index_topics(
+        topics=["New York Times"],
+        topic_embs=[[0.1, 0.2]],
+        is_named_entity=True,
+    )
+
+    assert captured_actions[0]["_source"]["is_named_entity"] is True
+    assert captured_actions[0]["_source"]["name"] == "New York Times"
+
+
+@pytest.mark.asyncio
+async def test_search_topics_filters_by_named_entity_flag(es_mock: AsyncMock):
+    searcher = DummyTopicSearcher(es_mock)
+    es_mock.search.return_value = {"hits": {"hits": []}}
+
+    await searcher.search_topics(
+        match="reading",
+        match_emb=[0.1, 0.2],
+        is_named_entity=True,
+        min_lexical_score=0.0,
+    )
+
+    kwargs = es_mock.search.await_args.kwargs
+    assert kwargs["query"]["bool"]["filter"] == [{"term": {"is_named_entity": True}}]
+    assert kwargs["knn"]["filter"]["bool"]["filter"] == [{"term": {"is_named_entity": True}}]
+
+
+@pytest.mark.asyncio
 async def test_search_topics_preserves_query_and_dedupes_exact_results(es_mock: AsyncMock):
     searcher = DummyTopicSearcher(es_mock)
     es_mock.search.return_value = {

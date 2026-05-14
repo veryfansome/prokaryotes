@@ -5,7 +5,7 @@ This project is about exploring agentic harnesses. It is set up as a FastAPI-bas
 ## Running the app
 
 ```bash
-# Run full stack including the web and embedding apps
+# Run the full web stack
 docker compose up --build
 ```
 
@@ -77,12 +77,20 @@ docker run --env-file .env prokaryotes:latest -- python -m scripts.eval --tier 1
 docker run --env-file .env prokaryotes:latest -- python -m scripts.eval --task-id t1_implement_function
 ```
 
-## Agents
+## Documentation
 
-- Every `README.md` must also have a symlinked `CLAUDE.md` and `AGENTS.md` in the same directory, except those under `project/features/*/`, `project/issues/*/`, `project/wip/*/`.
+Be concise, not didactic. Maximize relevance per token.
+
+**Directory READMEs** sit at the root of each top-level tree (`prokaryotes/`, `scripts/`, `tests/`, `database/`, `project/`) and at deeper levels only when a subdirectory has contracts the parent README cannot summarize. Common triggers: multi-inheritance where ordering matters (e.g. `web_v1/`), a shared protocol with surprising failure modes (e.g. `tools_v1/`'s `FunctionToolCallback`), or a versioned data layer with invariants. Each has `CLAUDE.md` and `AGENTS.md` symlinked to it.
+
+**Project docs** under `project/` describe specific features, designs, issues, or topics.
+
+Place each doc where its source of truth lives so it only goes stale when that source changes. Directory READMEs link to feature docs but never duplicate them. They should also not duplicate context already provided by parent READMEs. Full strategy: [project/features/context_architecture/README.md](project/features/context_architecture/README.md).
 
 ## Navigation
 
 - [database/](database/) — Postgres and Neo4j migration scripts
-- [project/](project/) — bugs, features, ideas, and in-progress design docs
+- [project/](project/) — features, in-progress designs, issues, and ideas
 - [prokaryotes/](prokaryotes/README.md) — codebase overview: module layout, key design patterns, and dependencies
+- [scripts/](scripts/) — entry-point scripts (`cli.py`, `eval.py`, `web.py`, `search_init.py`)
+- [tests/](tests/README.md) — test organization and design principles

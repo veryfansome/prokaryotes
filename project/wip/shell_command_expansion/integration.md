@@ -32,16 +32,14 @@ That means background-job polling only works if the same Python object handles:
 ### Current state observed in repository
 
 The current harnesses create a fresh `ShellCommandTool()` inside each request/run method:
-- `prokaryotes/openai_v1/web_harness.py`
-- `prokaryotes/openai_v1/script_harness.py`
-- `prokaryotes/anthropic_v1/web_harness.py`
-- `prokaryotes/anthropic_v1/script_harness.py`
+- `prokaryotes/harness_v1/web.py`
+- `prokaryotes/harness_v1/script.py`
 
 Because of that, background jobs would be lost after the current request/run ends.
 
 ## Required code changes
 
-### A. Web harnesses
+### A. Web harness
 
 Move `ShellCommandTool()` construction out of `post_chat()` and onto the harness instance.
 
@@ -64,9 +62,10 @@ Create it once, for example in `__init__`:
 
 ```python
 class WebHarness(WebBase):
-    def __init__(self, static_dir: str):
+    def __init__(self, impl: str, static_dir: str):
         super().__init__(static_dir)
-        self.llm_client = OpenAIClient()
+        self.impl = impl
+        self.llm_client, self.instruction_role = _build_llm_client(impl)
         self.shell_command_tool = ShellCommandTool()
 ```
 
@@ -76,9 +75,8 @@ Then use the persistent instance in `post_chat()`:
 shell_command_tool = self.shell_command_tool
 ```
 
-Apply the same change to:
-- `prokaryotes/openai_v1/web_harness.py`
-- `prokaryotes/anthropic_v1/web_harness.py`
+Apply the change to:
+- `prokaryotes/harness_v1/web.py`
 
 ### B. Script harnesses
 
@@ -100,8 +98,7 @@ shell_command_tool = self.shell_command_tool
 ```
 
 Apply as desired to:
-- `prokaryotes/openai_v1/script_harness.py`
-- `prokaryotes/anthropic_v1/script_harness.py`
+- `prokaryotes/harness_v1/script.py`
 
 ## 2. Replace the current implementation file
 

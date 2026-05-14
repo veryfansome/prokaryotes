@@ -14,9 +14,9 @@ from httpx import ASGITransport
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _web_harness_anthropic(live_keys_anthropic):
-    from prokaryotes.anthropic_v1.web_harness import WebHarness
+    from prokaryotes.harness_v1.web import WebHarness
 
-    harness = WebHarness(static_dir="scripts/static")
+    harness = WebHarness(impl="anthropic", static_dir="scripts/static")
     harness.init()
     async with LifespanManager(harness.app):
         yield harness
@@ -24,9 +24,9 @@ async def _web_harness_anthropic(live_keys_anthropic):
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _web_harness_openai(live_keys_openai):
-    from prokaryotes.openai_v1.web_harness import WebHarness
+    from prokaryotes.harness_v1.web import WebHarness
 
-    harness = WebHarness(static_dir="scripts/static")
+    harness = WebHarness(impl="openai", static_dir="scripts/static")
     harness.init()
     async with LifespanManager(harness.app):
         yield harness

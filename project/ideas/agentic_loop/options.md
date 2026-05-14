@@ -16,7 +16,7 @@ Relevant facts from the current implementation:
   - `WebBase.on_start()`
   - `WebBase.on_stop()`
 - The current chat flow is request-scoped:
-  - `openai_v1/web_harness.py` and `anthropic_v1/web_harness.py` both create a `StreamingResponse` around `stream_and_finalize(...)`
+  - `prokaryotes/harness_v1/web.py` creates a `StreamingResponse` around `stream_and_finalize(...)`, with `impl` selecting the provider-specific client and instruction role
   - `stream_and_finalize(...)` runs the LLM response loop and then only does finalize/compaction housekeeping
 - The repo already has durable backing services:
   - Postgres
@@ -24,8 +24,7 @@ Relevant facts from the current implementation:
   - Elasticsearch
   - Neo4j
 - There is already a non-web headless execution primitive:
-  - `prokaryotes/openai_v1/script_harness.py`
-  - `prokaryotes/anthropic_v1/script_harness.py`
+  - `prokaryotes/harness_v1/script.py` (`ScriptHarness`, provider selected by `impl`)
 - `docker-compose.yml` already models multiple long-lived services, so adding a worker process would fit the existing deployment shape.
 
 Important limitation:

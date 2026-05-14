@@ -3,12 +3,12 @@ import os
 import uuid
 from collections.abc import Callable
 
-from prokaryotes.anthropic_v1 import AnthropicClient
 from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
     FunctionToolCallback,
 )
+from prokaryotes.harness_v1 import build_llm_client
 from prokaryotes.tools_v1.shell_command import ShellCommandTool
 from prokaryotes.tools_v1.think import ThinkTool
 from prokaryotes.utils_v1 import system_message_utils
@@ -17,8 +17,20 @@ logger = logging.getLogger(__name__)
 
 
 class ScriptHarness:
-    def __init__(self, model: str, reasoning_effort: str = None, think_reasoning_effort: str = None):
-        self.llm_client = AnthropicClient()
+    """Provider-agnostic non-interactive harness.
+
+    `instruction_role` is `"system"` for Anthropic and `"developer"` for OpenAI; the rest of
+    the run loop is identical across providers.
+    """
+
+    def __init__(
+            self,
+            impl: str,
+            model: str,
+            reasoning_effort: str | None = None,
+            think_reasoning_effort: str | None = None,
+    ):
+        self.llm_client, self.instruction_role = build_llm_client(impl)
         self.llm_client.init_client()
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -28,12 +40,12 @@ class ScriptHarness:
         await self.llm_client.close()
 
     async def run(
-        self,
-        task: str,
-        cwd: str = None,
-        max_tool_call_rounds: int = None,
-        on_usage: Callable[[int, int], None] | None = None,
-        verbose: bool = True,
+            self,
+            task: str,
+            cwd: str | None = None,
+            max_tool_call_rounds: int | None = None,
+            on_usage: Callable[[int, int], None] | None = None,
+            verbose: bool = True,
     ) -> ContextPartition:
         if cwd:
             os.chdir(cwd)
@@ -61,18 +73,18 @@ class ScriptHarness:
         context_partition = ContextPartition(
             conversation_uuid=str(uuid.uuid4()),
             items=[
-                ContextPartitionItem(role="system", content="\n".join(system_parts)),
+                ContextPartitionItem(role=self.instruction_role, content="\n".join(system_parts)),
                 ContextPartitionItem(role="user", content=task),
             ],
         )
 
         async for chunk in self.llm_client.stream_turn(
-            context_partition=context_partition,
-            model=self.model,
-            max_tool_call_rounds=max_tool_call_rounds,
-            on_usage=on_usage,
-            reasoning_effort=self.reasoning_effort,
-            tool_callbacks=tool_callbacks,
+                context_partition=context_partition,
+                model=self.model,
+                max_tool_call_rounds=max_tool_call_rounds,
+                on_usage=on_usage,
+                reasoning_effort=self.reasoning_effort,
+                tool_callbacks=tool_callbacks,
         ):
             if verbose:
                 print(chunk, end="", flush=True)
@@ -81,3 +93,5 @@ class ScriptHarness:
             print()
 
         return context_partition
+
+

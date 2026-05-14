@@ -14,10 +14,10 @@ from httpx import ASGITransport
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _web_harness_anthropic():
-    from prokaryotes.anthropic_v1.web_harness import WebHarness
+    from prokaryotes.harness_v1.web import WebHarness
     from tests.integration_tests.fakes import FakeAnthropicClient
 
-    harness = WebHarness(static_dir="scripts/static")
+    harness = WebHarness(impl="anthropic", static_dir="scripts/static")
     harness.llm_client = FakeAnthropicClient()  # replace BEFORE init()
     harness.init()
     async with LifespanManager(harness.app):
@@ -26,10 +26,10 @@ async def _web_harness_anthropic():
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _web_harness_openai():
-    from prokaryotes.openai_v1.web_harness import WebHarness
+    from prokaryotes.harness_v1.web import WebHarness
     from tests.integration_tests.fakes import FakeOpenAIClient
 
-    harness = WebHarness(static_dir="scripts/static")
+    harness = WebHarness(impl="openai", static_dir="scripts/static")
     harness.llm_client = FakeOpenAIClient()
     harness.init()
     async with LifespanManager(harness.app):

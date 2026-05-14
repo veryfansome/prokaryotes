@@ -46,9 +46,9 @@ def make_compacted_doc(
 def make_tracking_web_base(redis_data: dict | None = None, search_client=None) -> TrackingWebBase:
     wb = object.__new__(TrackingWebBase)
     wb.background_tasks = set()
-    wb.conversation_cache_ex = 3600
-    wb.redis_client = FakeRedis(redis_data)
-    wb.search_client = search_client or FakeSearchClient()
+    wb._conversation_cache_ex = 3600
+    wb._redis_client = FakeRedis(redis_data)
+    wb._search_client = search_client or FakeSearchClient()
     return wb
 
 

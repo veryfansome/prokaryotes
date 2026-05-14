@@ -5,28 +5,10 @@ from functools import (
     cache,
 )
 
-import psutil
-
 
 @cache
 def get_cwd() -> str:
     return os.getcwd()
-
-
-@cache
-def get_listening_ports() -> list[int]:
-    proc = psutil.Process(get_pid())
-    listening = [
-        conn.laddr.port 
-        for conn in proc.net_connections() 
-        if conn.status == 'LISTEN'
-    ]
-    return listening
-
-
-@cache
-def get_pid() -> int:
-    return os.getpid()
 
 
 @cache

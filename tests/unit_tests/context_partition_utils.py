@@ -162,7 +162,7 @@ def make_message_items(*role_contents: tuple[str, str]) -> list[ContextPartition
 def make_web_base(redis_data: dict | None = None, search_client=None) -> WebBase:
     wb = object.__new__(WebBase)
     wb.background_tasks = set()
-    wb.conversation_cache_ex = 3600
-    wb.redis_client = FakeRedis(redis_data)
-    wb.search_client = search_client or FakeSearchClient()
+    wb._conversation_cache_ex = 3600
+    wb._redis_client = FakeRedis(redis_data)
+    wb._search_client = search_client or FakeSearchClient()
     return wb

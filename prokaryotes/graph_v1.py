@@ -16,7 +16,8 @@ class GraphClient:
         self.driver: AsyncDriver | None = None
 
     async def close(self):
-        await self.driver.close()
+        if self.driver:
+            await self.driver.close()
 
     async def create_similar_topic_edges(self, topic_pairs: list[tuple[str, str]]):
         cypher = """
@@ -27,6 +28,7 @@ class GraphClient:
         WHERE t1.text <> t2.text
         MERGE (t1)-[:SIMILAR_TO]->(t2)
         """
+
         async def _edge(tx):
             seen_pairs = set()
             input_structs = []
@@ -40,14 +42,19 @@ class GraphClient:
                 if pair in seen_pairs:
                     continue
                 seen_pairs.add(pair)
-                input_structs.append({
-                    'topic_1': topic_1,
-                    'topic_2': topic_2,
-                })
+                input_structs.append(
+                    {
+                        "topic_1": topic_1,
+                        "topic_2": topic_2,
+                    }
+                )
             if not input_structs:
                 return
             await tx.run(cypher, input_structs=input_structs)
+
         try:
+            if not self.driver:
+                raise RuntimeError("Neo4j driver has not been initialized")
             async with self.driver.session() as session:
                 return await session.execute_write(_edge)
         except Exception:

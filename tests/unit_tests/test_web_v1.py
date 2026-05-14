@@ -6,10 +6,13 @@ from prokaryotes.api_v1.models import (
     ContextPartition,
     ContextPartitionItem,
 )
-from prokaryotes.web_v1 import (
+from prokaryotes.tools_v1.file_tool.live_windows import (
     _message_count_before_item_index,
+    recency_tail_items,
+)
+from prokaryotes.web_v1 import (
+    WebBase,
     _partition_can_follow_client,
-    _recency_tail_items,
     get_postgres_pool,
     get_redis_client,
     hash_password,
@@ -108,7 +111,7 @@ def test_partition_can_follow_client_when_uuid_matches():
     assert _partition_can_follow_client(partition, "p1") is True
 
 
-# _recency_tail_items
+# recency_tail_items
 
 def test_recency_tail_items_advances_past_assistant_leading_boundary():
     items = [
@@ -125,7 +128,7 @@ def test_recency_tail_items_advances_past_assistant_leading_boundary():
     ]
     # 8 message items; with tail_count=6 the first candidate is assistant "A1 cont"
     # at item index 4 — must advance to user "U2" at item index 5.
-    tail, offset = _recency_tail_items(items, 6)
+    tail, offset = recency_tail_items(items, 6)
 
     assert tail[0] == ContextPartitionItem(role="user", content="U2")
     # items before the tail: U1, A1 preamble, A1 cont = 3 message items
@@ -139,7 +142,7 @@ def test_recency_tail_items_returns_empty_when_no_user_message_in_tail():
         ContextPartitionItem(role="assistant", content="A2"),
     ]
     # tail_count=2 → candidate starts at A1, no user found → empty tail
-    tail, offset = _recency_tail_items(items, 2)
+    tail, offset = recency_tail_items(items, 2)
 
     assert tail == []
     assert offset == 0
@@ -240,3 +243,16 @@ async def test_sync_context_partition_uses_redis_cache_when_uuid_matches():
 def test_verify_password_returns_false_for_wrong_password():
     hashed = hash_password("secret")
     assert verify_password("wrong", hashed) is False
+
+
+# WebBase contract
+
+
+def test_webbase_abstract_property_contracts_satisfied():
+    """Every @abstractmethod declared by AuthHandler, PartitionSyncer, and PartitionCompactor
+    must be overridden on WebBase. A regression here means a mixin grew a new abstract
+    property that WebBase forgot to implement — would otherwise surface as a noisy TypeError
+    deep inside the first request handler.
+    """
+    assert WebBase.__abstractmethods__ == frozenset()
+    WebBase("scripts/static")  # raises TypeError if any contract is unsatisfied

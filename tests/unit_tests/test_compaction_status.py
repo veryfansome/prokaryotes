@@ -14,7 +14,7 @@ class MockRequest:
 @pytest.mark.asyncio
 async def test_get_compaction_status_lock_present():
     wb = make_web_base(redis_data={"compaction_lock:conv-1": "1"})
-    with patch("prokaryotes.web_v1.load_session", new_callable=AsyncMock):
+    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
     assert result == {"done": False}
 
@@ -22,7 +22,7 @@ async def test_get_compaction_status_lock_present():
 @pytest.mark.asyncio
 async def test_get_compaction_status_partition_evicted():
     wb = make_web_base()
-    with patch("prokaryotes.web_v1.load_session", new_callable=AsyncMock):
+    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
     assert result == {"done": True}
 
@@ -36,7 +36,7 @@ async def test_get_compaction_status_partition_changed():
         items=[],
     )
     wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
-    with patch("prokaryotes.web_v1.load_session", new_callable=AsyncMock):
+    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
     assert result == {"done": True, "partition_uuid": "new-uuid"}
 
@@ -49,7 +49,7 @@ async def test_get_compaction_status_partition_unchanged():
         items=[],
     )
     wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
-    with patch("prokaryotes.web_v1.load_session", new_callable=AsyncMock):
+    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
     assert result == {"done": True}
 
@@ -63,6 +63,6 @@ async def test_get_compaction_status_partition_changed_without_child_uuid():
         items=[],
     )
     wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
-    with patch("prokaryotes.web_v1.load_session", new_callable=AsyncMock):
+    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
     assert result == {"done": True}

@@ -2,15 +2,15 @@ from types import SimpleNamespace
 
 import pytest
 
-import prokaryotes.web_v1 as web_v1_module
+import prokaryotes.web_v1.compaction as web_v1_module
 from prokaryotes.api_v1.models import ContextPartition, ContextPartitionItem
-from prokaryotes.utils_v1.llm_utils import COMPACTION_RECENCY_TAIL
-from prokaryotes.web_v1 import (
-    _is_live_window,
-    _items_equal_mod_live_windows,
-    _lift_active_live_windows,
-    _strip_live_window_bodies,
+from prokaryotes.tools_v1.file_tool.live_windows import (
+    is_live_window,
+    items_equal_mod_live_windows,
+    lift_active_live_windows,
+    strip_live_window_bodies,
 )
+from prokaryotes.utils_v1.llm_utils import COMPACTION_RECENCY_TAIL
 from tests.unit_tests.context_partition_utils import (
     FakeSearchClient,
     make_doc,
@@ -77,7 +77,7 @@ def test_lift_skips_when_no_active_paths_in_tail():
     ]
     recency_tail = make_message_items(("user", "next request"), ("assistant", "ok"))
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert augmented == recency_tail
 
@@ -92,7 +92,7 @@ def test_lift_inserts_pair_before_first_annotated_tail_item():
     edit_output = _edit_record("c2", "/app/foo.py")
     recency_tail = [user_msg, assistant_msg, edit_call, edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert augmented == [user_msg, assistant_msg] + pre_tail + [edit_call, edit_output]
 
@@ -120,7 +120,7 @@ def test_lift_inserts_before_start_of_multitool_tail_round():
     edit_output = _edit_record("c2", "/app/foo.py")
     recency_tail = [user_msg, shell_call, edit_call, shell_output, edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert augmented == [user_msg] + pre_tail + [shell_call, edit_call, shell_output, edit_output]
     _system, messages = ContextPartition(conversation_uuid="conv", items=augmented).to_anthropic_messages()
@@ -143,7 +143,7 @@ def test_lift_handles_multiple_paths_and_preserves_chronological_order():
     bar_edit_output = _edit_record("c4", "/app/bar.py")
     recency_tail = [user_msg, foo_edit_call, foo_edit_output, bar_edit_call, bar_edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert augmented == [
         user_msg,
@@ -166,7 +166,7 @@ def test_lift_ignores_pre_tail_live_windows_for_inactive_paths():
     foo_edit_output = _edit_record("c3", "/app/foo.py")
     recency_tail = [user_msg, foo_edit_call, foo_edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert bar_call not in augmented
     assert bar_window not in augmented
@@ -184,7 +184,7 @@ def test_lift_skips_pre_tail_edit_records_even_when_path_is_active():
     edit_output = _edit_record("c2", "/app/foo.py")
     recency_tail = [user_msg, edit_call, edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert augmented == recency_tail
 
@@ -201,7 +201,7 @@ def test_lift_skips_stale_live_windows():
     edit_output = _edit_record("c2", "/app/gone.py")
     recency_tail = [user_msg, edit_call, edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert stale_call not in augmented
     assert stale_window not in augmented
@@ -216,7 +216,7 @@ def test_lift_does_not_treat_tail_tombstone_as_active_path():
     tail_tombstone = _stale_window("c2", "/app/gone.py")
     recency_tail = [user_msg, _function_call("c2", "/app/gone.py"), tail_tombstone]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert augmented == recency_tail
 
@@ -230,7 +230,7 @@ def test_lift_skips_orphan_function_call_output_without_matching_function_call()
     edit_output = _edit_record("c2", "/app/foo.py")
     recency_tail = [user_msg, edit_call, edit_output]
 
-    augmented = _lift_active_live_windows(pre_tail, recency_tail)
+    augmented = lift_active_live_windows(pre_tail, recency_tail)
 
     assert orphan_window not in augmented
 
@@ -357,12 +357,12 @@ async def test_compact_partition_lifts_windows_for_paths_active_only_after_snaps
 
 
 def test_items_equal_mod_live_windows_handles_empty_lists():
-    assert _items_equal_mod_live_windows([], []) is True
+    assert items_equal_mod_live_windows([], []) is True
 
 
 def test_items_equal_mod_live_windows_returns_false_on_length_mismatch():
     item = _live_window("c1", "/app/foo.py")
-    assert _items_equal_mod_live_windows([item], []) is False
+    assert items_equal_mod_live_windows([item], []) is False
 
 
 def test_items_equal_mod_live_windows_treats_refreshed_window_as_equal():
@@ -371,7 +371,7 @@ def test_items_equal_mod_live_windows_treats_refreshed_window_as_equal():
     b.prokaryotes_annotations["file_tool.revision"] = "rev2"
     b.output = "FILE path=/app/foo.py revision=rev2 status=live lines=1-8 line_count=8"
 
-    assert _items_equal_mod_live_windows([a], [b]) is True
+    assert items_equal_mod_live_windows([a], [b]) is True
 
 
 def test_items_equal_mod_live_windows_detects_tombstone_transition():
@@ -380,21 +380,21 @@ def test_items_equal_mod_live_windows_detects_tombstone_transition():
     stale.prokaryotes_annotations["file_tool.status"] = "stale"
     stale.output = "FILE path=/app/gone.py status=stale [no longer accessible: FileNotFoundError]"
 
-    assert _items_equal_mod_live_windows([live], [stale]) is False
+    assert items_equal_mod_live_windows([live], [stale]) is False
 
 
 def test_items_equal_mod_live_windows_detects_path_change_within_live_window():
     a = _live_window("c1", "/app/foo.py")
     b = _live_window("c1", "/app/bar.py")
 
-    assert _items_equal_mod_live_windows([a], [b]) is False
+    assert items_equal_mod_live_windows([a], [b]) is False
 
 
 def test_items_equal_mod_live_windows_detects_requested_end_line_change():
     a = _live_window("c1", "/app/foo.py", view_start=1, view_end=3, requested_end_line=3)
     b = _live_window("c1", "/app/foo.py", view_start=1, view_end=3, requested_end_line=5)
 
-    assert _items_equal_mod_live_windows([a], [b]) is False
+    assert items_equal_mod_live_windows([a], [b]) is False
 
 
 def test_items_equal_mod_live_windows_falls_back_to_full_equality_for_non_live_items():
@@ -404,15 +404,15 @@ def test_items_equal_mod_live_windows_falls_back_to_full_equality_for_non_live_i
     edit_a = _edit_record("c1", "/app/foo.py")
     edit_b = _edit_record("c1", "/app/foo.py")
 
-    assert _items_equal_mod_live_windows([msg_a, edit_a], [msg_b, edit_b]) is True
-    assert _items_equal_mod_live_windows([msg_a], [msg_c]) is False
+    assert items_equal_mod_live_windows([msg_a, edit_a], [msg_b, edit_b]) is True
+    assert items_equal_mod_live_windows([msg_a], [msg_c]) is False
 
 
 def test_items_equal_mod_live_windows_one_side_live_other_side_not_equal():
     live = _live_window("c1", "/app/foo.py")
     edit = _edit_record("c1", "/app/foo.py")
 
-    assert _items_equal_mod_live_windows([live], [edit]) is False
+    assert items_equal_mod_live_windows([live], [edit]) is False
 
 
 @pytest.mark.asyncio
@@ -426,7 +426,7 @@ async def test_compact_partition_swap_proceeds_after_concurrent_live_window_refr
     current = ContextPartition.model_validate_json(snapshot.model_dump_json())
     refreshed_count = 0
     for item in current.items:
-        if _is_live_window(item):
+        if is_live_window(item):
             item.prokaryotes_annotations["file_tool.revision"] = "rev2"
             item.prokaryotes_annotations["file_tool.view_end_line"] = "9"
             item.output = "FILE path=/app/foo.py revision=rev2 status=live lines=1-9 line_count=9"
@@ -570,7 +570,7 @@ def test_strip_live_window_bodies_replaces_ordinary_live_window_wholesale():
         items=[_function_call("c1", "/app/foo.py"), _live_window("c1", "/app/foo.py")],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
 
     placeholder = stripped.items[1].output
     assert placeholder.startswith("[Live tracked file: /app/foo.py")
@@ -587,7 +587,7 @@ def test_strip_live_window_bodies_preserves_conflict_diagnostic_header():
         ],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
     output = stripped.items[1].output
 
     assert output.startswith(
@@ -608,7 +608,7 @@ def test_strip_live_window_bodies_preserves_already_exists_diagnostic_header():
         ],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
     output = stripped.items[1].output
 
     assert output.startswith("ALREADY_EXISTS path=/app/foo.py current_revision=rev1")
@@ -627,7 +627,7 @@ def test_strip_live_window_bodies_preserves_range_error_diagnostic_header():
         ],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
     output = stripped.items[1].output
 
     assert output.startswith(
@@ -647,7 +647,7 @@ def test_strip_live_window_bodies_preserves_range_truncated_diagnostic_header():
         ],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
     output = stripped.items[1].output
 
     assert output.startswith(
@@ -669,7 +669,7 @@ def test_strip_live_window_bodies_handles_empty_current_view_marker():
         ],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
     output = stripped.items[1].output
 
     assert output.startswith(
@@ -692,7 +692,7 @@ def test_strip_live_window_bodies_preserves_edit_records_and_tombstones_and_mess
         items=[msg, edit_call, edit, stale_call, stale],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
 
     assert stripped.items[0].content == "please edit foo"
     assert stripped.items[2].output == edit.output
@@ -710,7 +710,7 @@ def test_strip_live_window_bodies_does_not_mutate_input_partition():
         items=[_function_call("c1", "/app/foo.py"), live],
     )
 
-    _strip_live_window_bodies(partition)
+    strip_live_window_bodies(partition)
 
     assert partition.items[1].output == original_output
     assert partition.items[1].prokaryotes_annotations["file_tool.revision"] == original_revision
@@ -731,7 +731,7 @@ def test_strip_live_window_bodies_strips_inactive_paths_too():
         ],
     )
 
-    stripped = _strip_live_window_bodies(partition)
+    stripped = strip_live_window_bodies(partition)
 
     assert stripped.items[1].output.startswith(f"[Live tracked file: {inactive_path}")
     assert stripped.items[3].output.startswith(f"[Live tracked file: {active_path}")
@@ -747,7 +747,7 @@ async def test_compact_partition_skips_swap_when_live_window_was_tombstoned():
 
     current = ContextPartition.model_validate_json(snapshot.model_dump_json())
     for item in current.items:
-        if _is_live_window(item):
+        if is_live_window(item):
             item.prokaryotes_annotations["file_tool.status"] = "stale"
             item.output = "FILE path=/app/gone.py status=stale [no longer accessible: FileNotFoundError]"
 

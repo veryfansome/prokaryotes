@@ -5,6 +5,7 @@ import traceback
 from pathlib import Path
 
 from prokaryotes.eval_v1.models import EvalResult, EvalRun, EvalTask
+from prokaryotes.harness_v1.script import ScriptHarness
 from prokaryotes.utils_v1.llm_utils import ANTHROPIC_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -50,11 +51,7 @@ class EvalHarness:
         return turns
 
     def make_script_harness(self):
-        if self.impl == "anthropic":
-            from prokaryotes.anthropic_v1.script_harness import ScriptHarness
-        else:
-            from prokaryotes.openai_v1.script_harness import ScriptHarness
-        return ScriptHarness(model=self.model, reasoning_effort=self.reasoning_effort)
+        return ScriptHarness(impl=self.impl, model=self.model, reasoning_effort=self.reasoning_effort)
 
     async def run(
         self,

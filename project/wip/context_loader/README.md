@@ -21,9 +21,8 @@ This design intentionally does **not** add a new tool for reading context files.
 Observed in the current repository:
 - `project/features/file_tool/README.md` defines `file_tool` as the structured way for the model to read files, with live-window refresh semantics and compaction-aware behavior.
 - `prokaryotes/tools_v1/README.md` documents reusable `FunctionToolCallback` tools. Existing tools are `FileTool`, `ThinkTool`, and `ShellCommandTool`.
-- `prokaryotes/openai_v1/web_harness.py` builds a per-turn developer message after `sync_context_partition(...)` and `reconcile_tracked_files(...)`.
-- `prokaryotes/anthropic_v1/web_harness.py` builds a per-turn system message using the same overall pattern.
-- Both web harnesses currently register `FileTool`, `ThinkTool`, and `ShellCommandTool`; neither exposes a context-loader tool.
+- `prokaryotes/harness_v1/web.py` builds a per-turn instruction message after `sync_context_partition(...)` and `reconcile_tracked_files(...)`; `impl="openai"` uses a developer message and `impl="anthropic"` uses a system message.
+- The web harness currently registers `FileTool`, `ThinkTool`, and `ShellCommandTool`; it does not expose a context-loader tool.
 - `prokaryotes/api_v1/models.py` provides `ContextPartition`, `ContextPartitionItem`, and internal `prokaryotes_annotations` metadata.
 - Symlink aliases already exist in the repo, including:
   - `/app/project/wip/CLAUDE.md -> README.md`
@@ -155,7 +154,7 @@ There is no new:
 
 ### Prompt injection behavior
 
-Instead, each web harness appends a compact context-discovery section to the per-turn system/developer prompt.
+Instead, the web harness appends a compact context-discovery section to the per-turn system/developer prompt.
 
 That section should:
 - state that relevant local context files were detected near paths in the conversation
@@ -342,8 +341,7 @@ def render_context_discovery_prompt(result: DiscoveryResult, max_groups: int = 1
 ## Infrastructure changes
 
 Initial implementation files are likely to include:
-- `prokaryotes/openai_v1/web_harness.py`
-- `prokaryotes/anthropic_v1/web_harness.py`
+- `prokaryotes/harness_v1/web.py`
 - a new shared helper module for path extraction, upward discovery, grouping, ranking, and prompt rendering
 
 Possible review targets before implementation:
@@ -393,7 +391,7 @@ Primary scenarios:
 - path mentions outside the workspace or malformed path-like strings are ignored conservatively
 - when more than 10 ranked groups exist, only the top 10 groups are expanded and the omitted count is shown
 - when no files are discovered, no extra context-discovery prompt section is injected
-- behavior is consistent across `prokaryotes/openai_v1/web_harness.py` and `prokaryotes/anthropic_v1/web_harness.py`
+- behavior is consistent across `WebHarness(impl="openai")` and `WebHarness(impl="anthropic")`
 
 Likely files:
 - `tests/integration_tests/tier_b/test_chat_flow.py`
