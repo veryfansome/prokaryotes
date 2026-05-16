@@ -1,0 +1,1 @@
+Read `change_request.json` and apply the requested updates to both `app_config.py` and `notes.md`. The request touches multiple non-adjacent parts of each file. Preserve unrelated content and formatting where possible. After making the edits, run `python verify.py` and write its stdout exactly to `verification.txt`.

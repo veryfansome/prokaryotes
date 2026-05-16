@@ -1,0 +1,8 @@
+id,customer,amount,currency,discount_code
+1,alice,150,GBP,
+2,alice,150,GBP,
+3,bob,200,USD,VIP20
+4,bob,200,USD,VIP20
+5,bob,200,USD,VIP20
+6,carol,200,USD,
+7,carol,200,USD,

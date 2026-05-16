@@ -74,14 +74,14 @@ docker run --env-file .env prokaryotes:latest -- python -m scripts.eval
 
 # Run a single tier or task
 docker run --env-file .env prokaryotes:latest -- python -m scripts.eval --tier 1
-docker run --env-file .env prokaryotes:latest -- python -m scripts.eval --task-id t1_implement_function
+docker run --env-file .env prokaryotes:latest -- python -m scripts.eval --task-id t1_wildcard_match
 ```
 
 ## Documentation
 
 Be concise, not didactic. Maximize relevance per token.
 
-**Directory READMEs** sit at the root of each top-level tree (`prokaryotes/`, `scripts/`, `tests/`, `database/`, `project/`) and at deeper levels only when a subdirectory has contracts the parent README cannot summarize. Common triggers: multi-inheritance where ordering matters (e.g. `web_v1/`), a shared protocol with surprising failure modes (e.g. `tools_v1/`'s `FunctionToolCallback`), or a versioned data layer with invariants. Each has `CLAUDE.md` and `AGENTS.md` symlinked to it.
+**Directory READMEs** sit at the root of each top-level tree (`prokaryotes/`, `scripts/`, `tests/`, `database/`, `project/`, `evals/`) and at deeper levels only when a subdirectory has contracts the parent README cannot summarize. Common triggers: multi-inheritance where ordering matters (e.g. `web_v1/`), a shared protocol with surprising failure modes (e.g. `tools_v1/`'s `FunctionToolCallback`), or a versioned data layer with invariants. Each has `CLAUDE.md` and `AGENTS.md` symlinked to it.
 
 **Project docs** under `project/` describe specific features, designs, issues, or topics.
 
@@ -90,6 +90,7 @@ Place each doc where its source of truth lives so it only goes stale when that s
 ## Navigation
 
 - [database/](database/) — Postgres and Neo4j migration scripts
+- [evals/](evals/README.md) — eval task fixtures (one directory per `EvalTask`)
 - [project/](project/) — features, in-progress designs, issues, and ideas
 - [prokaryotes/](prokaryotes/README.md) — codebase overview: module layout, key design patterns, and dependencies
 - [scripts/](scripts/) — entry-point scripts (`cli.py`, `eval.py`, `web.py`, `search_init.py`)

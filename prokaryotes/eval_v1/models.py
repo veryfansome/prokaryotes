@@ -48,6 +48,7 @@ class EvalRun(BaseModel):
 
 class EvalTask(BaseModel):
     check_command: str
+    check_files: dict[str, str] = {}
     description: str
     id: str
     prompt: str
