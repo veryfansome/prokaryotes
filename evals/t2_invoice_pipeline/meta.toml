@@ -1,0 +1,2 @@
+description = "Fix two interacting bugs (one in data, one in logic) in an invoice pipeline"
+timeout_seconds = 300

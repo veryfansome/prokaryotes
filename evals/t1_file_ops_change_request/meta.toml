@@ -1,0 +1,2 @@
+description = "Apply a structured change request across a Python config file and a Markdown notes file"
+timeout_seconds = 300

@@ -139,14 +139,17 @@ class EvalHarness:
             finally:
                 await harness.close()
             if partition is not None:
-                tool_call_count = sum(
-                    1 for item in partition.items if item.type == "function_call"
-                )
+                tool_call_count = sum(1 for item in partition.items if item.type == "function_call")
                 think_call_count = sum(
                     1 for item in partition.items if item.type == "function_call" and item.name == "think"
                 )
                 turn_count = self.count_turns(partition.items)
                 (workspace / "context_partition.json").write_text(partition.model_dump_json(indent=2))
+
+            for rel_path, content in task.check_files.items():
+                dest = workspace / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
 
             proc = await asyncio.create_subprocess_shell(
                 task.check_command,

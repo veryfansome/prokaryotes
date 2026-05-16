@@ -34,6 +34,7 @@ def make_harness(fake: FakeScriptHarness) -> EvalHarness:
 def make_partition(*specs: str) -> ContextPartition:
     return ContextPartition(conversation_uuid="test", items=make_partition_items(*specs))
 
+
 def make_partition_items(*specs) -> list[ContextPartitionItem]:
     """Build a list of ContextPartitionItems from (role_or_type, ...) shorthand."""
     result = []
@@ -102,6 +103,23 @@ async def test_check_fail_recorded(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_check_files_invisible_to_agent_but_present_at_check_time(tmp_path):
+    seen_during_agent: list[bool] = []
+
+    def side_effect(cwd):
+        seen_during_agent.append((tmp_path / "check.py").exists())
+
+    task = simple_task(
+        check_command="test -f check.py && grep -qx 'secret' check.py",
+        check_files={"check.py": "secret\n"},
+    )
+    result = await make_harness(FakeScriptHarness(side_effect=side_effect)).run_task(task, tmp_path)
+
+    assert seen_during_agent == [False], "check_files must NOT be visible while the agent runs"
+    assert result.passed is True, "check_files must be present when check_command runs"
+
+
+@pytest.mark.asyncio
 async def test_check_pass_recorded(tmp_path):
     result = await make_harness(FakeScriptHarness()).run_task(simple_task(check_command="true"), tmp_path)
 
@@ -138,31 +156,37 @@ def test_count_turns_text_only():
 
 def test_count_turns_text_then_tool():
     # turn 1: assistant + function_call; turn 2: assistant
-    assert EvalHarness.count_turns(
-        make_partition_items(
-            "user",
-            "assistant",
-            "function_call",
-            "function_call_output",
-            "assistant",
+    assert (
+        EvalHarness.count_turns(
+            make_partition_items(
+                "user",
+                "assistant",
+                "function_call",
+                "function_call_output",
+                "assistant",
+            )
         )
-    ) == 2
+        == 2
+    )
 
 
 def test_count_turns_tool_only_turns():
     # turn 1: function_call+function_call; turn 2: function_call; turn 3: assistant
-    assert EvalHarness.count_turns(
-        make_partition_items(
-            "user",
-            "function_call",
-            "function_call",
-            "function_call_output",
-            "function_call_output",
-            "function_call",
-            "function_call_output",
-            "assistant",
+    assert (
+        EvalHarness.count_turns(
+            make_partition_items(
+                "user",
+                "function_call",
+                "function_call",
+                "function_call_output",
+                "function_call_output",
+                "function_call",
+                "function_call_output",
+                "assistant",
+            )
         )
-    ) == 3
+        == 3
+    )
 
 
 @pytest.mark.asyncio
@@ -194,13 +218,16 @@ async def test_setup_files_written_before_agent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_think_call_count(tmp_path):
-    partition = ContextPartition(conversation_uuid="test", items=[
-        ContextPartitionItem(role="user", content="go"),
-        ContextPartitionItem(type="function_call", name="shell_command", arguments="{}", call_id="c1"),
-        ContextPartitionItem(type="function_call", name="think", arguments="{}", call_id="c2"),
-        ContextPartitionItem(type="function_call_output", call_id="c1", output="ok"),
-        ContextPartitionItem(type="function_call_output", call_id="c2", output="ok"),
-    ])
+    partition = ContextPartition(
+        conversation_uuid="test",
+        items=[
+            ContextPartitionItem(role="user", content="go"),
+            ContextPartitionItem(type="function_call", name="shell_command", arguments="{}", call_id="c1"),
+            ContextPartitionItem(type="function_call", name="think", arguments="{}", call_id="c2"),
+            ContextPartitionItem(type="function_call_output", call_id="c1", output="ok"),
+            ContextPartitionItem(type="function_call_output", call_id="c2", output="ok"),
+        ],
+    )
     result = await make_harness(FakeScriptHarness(partition=partition)).run_task(simple_task(), tmp_path)
 
     assert result.tool_call_count == 2

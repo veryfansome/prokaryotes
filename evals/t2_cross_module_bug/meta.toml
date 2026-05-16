@@ -1,0 +1,2 @@
+description = "Diagnose and fix a cross-module bug in a multi-file scoring pipeline"
+timeout_seconds = 300

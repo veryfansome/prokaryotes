@@ -1,0 +1,2 @@
+description = "Diagnose a root-cause bug in a multi-stage pipeline where intermediate state misleads"
+timeout_seconds = 300

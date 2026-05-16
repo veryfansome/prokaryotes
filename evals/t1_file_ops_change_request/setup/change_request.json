@@ -1,0 +1,8 @@
+{
+  "service_name": "Atlas",
+  "timeout_seconds": 45,
+  "max_retries": 4,
+  "enable_cache": true,
+  "owners": ["Mina", "Ravi"],
+  "next_steps": ["add cache metrics", "publish retry guidance"]
+}
