@@ -1,6 +1,6 @@
 # prokaryotes
 
-This project is about exploring agentic harnesses. It is set up as a FastAPI-based application backed by multiple data stores. Currently, it has a web-harness that provides a chat UI for human users, a script-harness for running tasks non-interactively, and an eval-harness that can run a small curated evaluation set.
+This project is about exploring agentic harnesses. It is set up as a locally running, multi-user, FastAPI-based application backed by multiple data stores. Currently, it has a web-harness that provides a chat UI for human users, a script-harness for running tasks non-interactively, and an eval-harness that can run a small curated evaluation set.
 
 ## Running the app
 
