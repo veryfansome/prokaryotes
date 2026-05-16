@@ -4,8 +4,7 @@
 
 - `prokaryotes/anthropic_v1/__init__.py:85-95` — computed in `stream_turn`
 - `prokaryotes/openai_v1/__init__.py:98-104` — computed in `handle_response_stream_event`
-- `prokaryotes/anthropic_v1/web_harness.py:93-97` — recomputed in `on_usage`
-- `prokaryotes/openai_v1/web_harness.py:93-97` — recomputed in `on_usage`
+- `prokaryotes/harness_v1/web.py` — recomputed in the consolidated web harness `on_usage`
 
 ## Problem
 
@@ -22,7 +21,7 @@ if stream_ndjson:
 
 **In the harness's `on_usage` callback** (for the compaction threshold):
 ```python
-# anthropic_v1/web_harness.py
+# harness_v1/web.py
 def on_usage(input_tokens: int, output_tokens: int) -> None:
     context_window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
     context_pct = int(input_tokens / context_window * 100)
@@ -47,13 +46,13 @@ if on_usage is not None:
 The harness callback becomes:
 
 ```python
-# anthropic_v1/web_harness.py and openai_v1/web_harness.py
+# harness_v1/web.py
 def on_usage(input_tokens: int, output_tokens: int, context_pct: int) -> None:
     if context_pct >= COMPACTION_TOKEN_THRESHOLD_PCT:
         pending_compaction[0] = True
 ```
 
-The `Callable[[int, int], None]` type on the `on_usage` parameter in both LLM clients changes to `Callable[[int, int, int], None]`. The harnesses can then remove their imports of `MODEL_CONTEXT_WINDOWS` and `DEFAULT_CONTEXT_WINDOW` (assuming those constants aren't needed elsewhere in those files).
+The `Callable[[int, int], None]` type on the `on_usage` parameter in both LLM clients changes to `Callable[[int, int, int], None]`. The web harness can then remove its imports of `MODEL_CONTEXT_WINDOWS` and `DEFAULT_CONTEXT_WINDOW` (assuming those constants are not needed elsewhere in that file).
 
 ### Tradeoff
 
@@ -69,7 +68,7 @@ The reviewer agreed the double computation is factually accurate, then dismissed
 
 **The proposed fix worsens separation of concerns.** Embedding `context_pct` into the `on_usage` callback signature permanently couples a transport-layer interface to a compaction policy concept. The LLM client's context-window lookup table is already a concern that arguably doesn't belong there — making `context_pct` part of the callback contract makes this coupling explicit and permanent. The tradeoff section above acknowledges the coupling but incorrectly concludes in favour of the fix.
 
-**The fix also has wider blast radius than stated.** Four additional call sites would need updating beyond the two harnesses: `anthropic_v1/script_harness.py:31`, `openai_v1/script_harness.py:31`, `eval_v1/harness.py:86`, and both LLM client `__init__.py` type annotations. The issue omits these entirely.
+**The fix also has wider blast radius than stated.** Additional call sites would need updating beyond the web harness: `prokaryotes/harness_v1/script.py`, `prokaryotes/harness_v1/eval.py`, the fake integration clients, and both LLM client `__init__.py` type annotations. The issue omits these entirely.
 
 **The real bug is a provider token-count asymmetry the issue missed.** The Anthropic client assembles `total_input` by summing `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (lines 85-89) before calling `on_usage`. The OpenAI client passes only `usage.input_tokens` with no cache-token accumulation (line 101). Whether OpenAI returns cache tokens in a separate field is worth investigating. This asymmetry could cause the compaction threshold to fire at different effective usage levels across providers on cached requests — an actual correctness concern.
 

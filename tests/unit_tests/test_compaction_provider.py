@@ -11,9 +11,10 @@ from tests.unit_tests.context_partition_utils import make_message_items
 
 
 def make_anthropic_harness(create_fn):
-    from prokaryotes.anthropic_v1.web_harness import WebHarness
+    from prokaryotes.harness_v1.web import WebHarness
 
     harness = WebHarness.__new__(WebHarness)
+    harness.impl = "anthropic"
     harness.llm_client = SimpleNamespace(
         async_anthropic=SimpleNamespace(
             messages=SimpleNamespace(create=create_fn)
@@ -23,9 +24,10 @@ def make_anthropic_harness(create_fn):
 
 
 def make_openai_harness(create_fn):
-    from prokaryotes.openai_v1.web_harness import WebHarness
+    from prokaryotes.harness_v1.web import WebHarness
 
     harness = WebHarness.__new__(WebHarness)
+    harness.impl = "openai"
     harness.llm_client = SimpleNamespace(
         async_openai=SimpleNamespace(
             responses=SimpleNamespace(create=create_fn)

@@ -260,14 +260,16 @@ Because summaries are immutable, they can safely travel with the partition throu
 | File | Role |
 |---|---|
 | `prokaryotes/api_v1/models.py` | `ContextPartition` (with new compaction fields), `ChatConversation`, `ContextPartitionItem`, `compute_boundary_hash`, `compute_tail_hash`, `conversation_message_items`, exception classes |
-| `prokaryotes/web_v1/__init__.py` | `WebBase.sync_context_partition`, `_compact_partition`, `_rebuild_from_chain`, `_boundary_message_items_for_partition`, `stream_and_finalize`, `finalize`, `_load_exact_partition`, `_walk_partition_chain`, `_recency_tail_items`, `get_compaction_status` |
+| `prokaryotes/web_v1/__init__.py` | `WebBase` class composing `AuthHandler` and `PartitionCompactor`; lifecycle (`init`, `lifespan`, `on_start`, `on_stop`), `finalize`, `stream_and_finalize` (triggers `_compact_partition` after streaming) |
+| `prokaryotes/web_v1/partition_sync.py` | `PartitionSyncer` mixin: `sync_context_partition`, `_rebuild_from_chain`, `_walk_partition_chain`, `_load_exact_partition`, `_boundary_message_items_for_partition`, `_boundary_message_items_for_doc`, `_cache_and_persist_partition`, `_try_sync_partition` |
+| `prokaryotes/web_v1/compaction.py` | `PartitionCompactor(PartitionSyncer)` mixin: `_compact_partition`, `get_compaction_status`; module-level `_retry_compaction_search_write` |
 | `prokaryotes/search_v1/context_partitions.py` | `ContextPartitionSearcher` mixin: `get_partition`, `put_partition`, `update_partition`, `find_partition_by_tail_hash`, `search_partitions`; Elasticsearch index mapping |
 | `prokaryotes/search_v1/__init__.py` | `SearchClient` inheriting `ContextPartitionSearcher` |
-| `prokaryotes/anthropic_v1/web_harness.py` | `on_usage` closure, `pending_compaction` flag, `compact` closure, `_summarize_and_compact` |
+| `prokaryotes/harness_v1/web.py` | `WebHarness` chat route, provider-specific instruction role and ancestor-summary injection, `on_usage` closure, `pending_compaction` flag, `compact` closure, `_summarize_and_compact` |
 | `prokaryotes/anthropic_v1/__init__.py` | `context_pct` event emission after each LLM round |
-| `prokaryotes/openai_v1/web_harness.py` | Same as Anthropic harness; developer message assembly including `ancestor_summaries` |
 | `prokaryotes/openai_v1/__init__.py` | `context_pct` event emission |
-| `prokaryotes/tools_v1/file_tool.py` | `FileTool` tracked-file model that compaction now integrates with via live-window stripping and lifting |
+| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` tracked-file model that compaction integrates with via live-window stripping and lifting |
+| `prokaryotes/tools_v1/file_tool/live_windows.py` | Pure annotation-manipulation helpers (`strip_live_window_bodies`, `lift_active_live_windows`, `items_equal_mod_live_windows`, `recency_tail_items`) used during compaction |
 | `prokaryotes/utils_v1/llm_utils.py` | `MODEL_CONTEXT_WINDOWS`, `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS` |
 | `scripts/search_init.py` | Creates or updates the `context-partitions` Elasticsearch index |
 | `scripts/static/ui.js` | `getLastPartitionUuid`, `partition_uuid` event handling, `context_pct` fill indicator, compaction indicator show/clear logic, `startCompactionPolling`/`stopCompactionPolling` (5 s poll against `/compaction-status`), relabeling stored `partitionUuid` values when compaction returns a child UUID |
@@ -278,7 +280,7 @@ Because summaries are immutable, they can safely travel with the partition throu
 | `tests/unit_tests/test_compaction_status.py` | `get_compaction_status` endpoint: lock-present returns not-done, no-lock returns done, compacted-child swaps include the new `partition_uuid`, partition evicted from Redis returns done |
 | `tests/unit_tests/test_compaction_provider.py` | `to_anthropic_messages` with ancestor summaries; Anthropic and OpenAI `_summarize_and_compact` ancestor-summary injection |
 | `tests/unit_tests/test_api_v1_models.py` | Unit tests for hash functions and `ContextPartition` sync (progress, retry, edit paths) |
-| `tests/unit_tests/test_web_v1.py` | `_recency_tail_items`, `finalize`, basic `sync_context_partition` Redis-path tests |
+| `tests/unit_tests/test_web_v1.py` | `recency_tail_items`, `finalize`, basic `sync_context_partition` Redis-path tests |
 | `tests/unit_tests/test_search_v1_context_partitions.py` | Tests for `ContextPartitionSearcher`, including `compaction_state` / `compaction_attempt_uuid` handling |
 | `tests/unit_tests/test_anthropic_v1.py` | Tests for `context_pct` emission |
 | `tests/unit_tests/test_openai_v1.py` | Tests for `context_pct` emission |

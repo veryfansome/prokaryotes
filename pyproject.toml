@@ -6,27 +6,18 @@ requires-python = ">=3.12"
 dependencies = [
     "aiofiles",
     "anthropic",
-    "async-lru",
     "asyncpg",
     "bcrypt",
-    "beautifulsoup4",
     "certifi",
     "elasticsearch[async]",
     "fastapi",
-    "imapclient",
     "itsdangerous",
-    "lxml",
-    "mistune",
     "neo4j",
     "openai",
-    "psutil",
     "python-dotenv",
     "python-multipart",
     "redis[hiredis]",
-    "sentence-transformers",
     "starsessions[redis]",
-    "torch==2.10.0+cpu; sys_platform == 'linux'",
-    "torch==2.10.0; sys_platform == 'darwin'",
     "uvicorn",
 ]
 
@@ -86,10 +77,3 @@ known-first-party = ["prokaryotes"]
 [tool.setuptools.packages.find]
 include = ["prokaryotes*"]
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-"torch" = { index = "pytorch-cpu" }

@@ -22,6 +22,7 @@ topic_mappings = {
             "index":      True,
             "similarity": "cosine",
         },
+        "is_named_entity": {"type": "boolean"},
         "name": {
             "type":            "text",
             "analyzer":        "standard",
@@ -38,12 +39,26 @@ topic_mappings = {
 
 
 class TopicSearcher(ABC):
+    """ES-backed search for normalized name + embedding records.
+
+    Records are tagged with `is_named_entity` so queries can scope to topics (generic
+    concepts) or to named entities (specific people/places/things) or both. Pass
+    `is_named_entity=True/False` to `search_topics()` to filter; leave it as `None` (the
+    default) for an un-scoped query.
+    """
+
     @property
     @abstractmethod
     def es(self) -> AsyncElasticsearch:
         pass
 
-    async def index_topics(self, topics: list[str], topic_embs: list[list[float]]):
+    async def index_topics(
+            self,
+            topics: list[str],
+            topic_embs: list[list[float]],
+            *,
+            is_named_entity: bool = False,
+    ):
         seen_topic_ids = set()
         actions = []
         for idx, topic in enumerate(topics):
@@ -58,7 +73,11 @@ class TopicSearcher(ABC):
                 "_index": "topics",
                 "_id": topic_id,
                 "_op_type": "create",
-                "_source": {"emb": topic_embs[idx], "name": topic}
+                "_source": {
+                    "emb": topic_embs[idx],
+                    "is_named_entity": is_named_entity,
+                    "name": topic,
+                }
             })
         if not actions:
             return
@@ -66,7 +85,7 @@ class TopicSearcher(ABC):
         if success_cnt:
             logger.info(f"Indexed {success_cnt} topic(s)")
         if errors:
-            skipped_cnt = len([e for e in errors if e.get("create", {}).get("status") == 409])  # type: ignore 
+            skipped_cnt = len([e for e in errors if e.get("create", {}).get("status") == 409])  # type: ignore
             if skipped_cnt:
                 logger.error(f"Skipped indexing {skipped_cnt} topic(s)")
             error_cnt = len(errors) - skipped_cnt
@@ -78,6 +97,7 @@ class TopicSearcher(ABC):
             match: str,
             match_emb: list[float],
             excluded_topics: list[str] | None = None,
+            is_named_entity: bool | None = None,
             keyword_match_boost: float = 2.0,
             knn_boost: float = 1.0,
             knn_num_candidates: int = 100,
@@ -94,7 +114,7 @@ class TopicSearcher(ABC):
                 continue
             seen_excluded_topics.add(topic)
             deduped_excluded_topics.append(topic)
-        query = {
+        query: dict = {
             "should": [
                 {
                     "match": {
@@ -116,9 +136,11 @@ class TopicSearcher(ABC):
                 }
             ]
         }
+        if is_named_entity is not None:
+            query["filter"] = [{"term": {"is_named_entity": is_named_entity}}]
         if deduped_excluded_topics:
             query["must_not"] = [{"terms": {"name.keyword": deduped_excluded_topics}}]
-        search_kwargs = {
+        search_kwargs: dict = {
             "index": "topics",
             "include_named_queries_score": True,
             "query": {
@@ -135,12 +157,13 @@ class TopicSearcher(ABC):
                 "num_candidates": knn_num_candidates,
                 "k": knn_top_k,
             }
+            knn_filter_bool: dict[str, list[dict]] = {}
             if deduped_excluded_topics:
-                search_kwargs["knn"]["filter"] = {
-                    "bool": {
-                        "must_not": [{"terms": {"name.keyword": deduped_excluded_topics}}],
-                    }
-                }
+                knn_filter_bool["must_not"] = [{"terms": {"name.keyword": deduped_excluded_topics}}]
+            if is_named_entity is not None:
+                knn_filter_bool["filter"] = [{"term": {"is_named_entity": is_named_entity}}]
+            if knn_filter_bool:
+                search_kwargs["knn"]["filter"] = {"bool": knn_filter_bool}
         response = await self.es.search(**search_kwargs)
         hits = response["hits"]["hits"]
         for h in hits:

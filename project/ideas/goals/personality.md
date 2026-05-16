@@ -1,6 +1,6 @@
 # Personality And Agent-Internal Goals
 
-This note describes how the OCEAN personality profile (defined in `prokaryotes/utils_v1/personality_utils.py`) could have mechanical effect on an agent-internal goals system, not just on how the model sounds.
+This note describes how the OCEAN personality profile (defined in `prokaryotes/utils_v1/system_message_utils.py`) could have mechanical effect on an agent-internal goals system, not just on how the model sounds.
 
 The key distinction is that some traits belong in the **prompt/rendering layer** because they shape wording, while others belong in the **scoring/control layer** because they change what surfaces, what stays dormant, and when the agent shifts from measuring to acting.
 

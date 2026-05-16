@@ -1,5 +1,4 @@
 import asyncio
-import errno
 import fcntl
 import json
 import logging
@@ -14,34 +13,52 @@ from prokaryotes.api_v1.models import (
     ToolParameters,
     ToolSpec,
 )
+from prokaryotes.tools_v1.file_tool import live_windows, reads, reconciliation
+from prokaryotes.tools_v1.file_tool.live_windows import (
+    _annotation_requested_end_line,
+    _is_unstable_coverage,
+)
+from prokaryotes.tools_v1.file_tool.paths import (
+    FileToolFileTooLargeError,
+    _open_text_file_no_follow,
+    _raise_if_file_too_large,
+    _resolve_path,
+)
+from prokaryotes.tools_v1.file_tool.rendering import (
+    CURRENT_VIEW_MARKER_PREFIX,
+    _append_live_window_refresh_note,
+    _apply_line_edit,
+    _count_lines,
+    render_create_record,
+    render_edit_record,
+    render_live_window,
+    render_view,
+)
+from prokaryotes.tools_v1.file_tool.validation import (
+    _range_is_valid,
+    _read_end_line,
+    _read_start_line,
+    _validate_create_payload,
+    _validate_write_payload,
+)
 
 logger = logging.getLogger(__name__)
 
-
-class FileToolFileTooLargeError(ValueError):
-    """Raised when a file exceeds FileTool's in-memory text processing limit."""
+__all__ = ["FileTool", "reconcile_tracked_files"]
 
 
 class FileTool(FunctionToolCallback):
     """Tool to let the model read, create, and edit files with tracked context."""
 
-    current_view_marker_prefix = "Current view"
+    current_view_marker_prefix = CURRENT_VIEW_MARKER_PREFIX
     max_concurrent_reconcile_paths = 8
     max_file_bytes = 1_000_000
     max_lines = 200
 
-    # Class-level per-path locks shared across all FileTool instances in this process.
-    # Requests touching the same resolved path acquire the same asyncio.Lock and queue
-    # before entering asyncio.to_thread; the OS-level fcntl.flock inside threaded
-    # read/write transactions is the durable layer that survives multi-process worker
-    # setups. The map grows monotonically with unique touched paths; acceptable because
-    # the workspace path set is bounded and Lock objects are tiny.
-    _path_locks: dict[str, asyncio.Lock] = {}
-
     def __init__(
-            self,
-            context_partition: ContextPartition,
-            workspace_root: Path | None = None,
+        self,
+        context_partition: ContextPartition,
+        workspace_root: Path | None = None,
     ):
         # context_partition is held by reference so write-side refresh and the harness's
         # reconciliation pass mutate the same items the LLM client will serialize next round.
@@ -84,10 +101,10 @@ class FileTool(FunctionToolCallback):
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
     async def _do_read_lines(
-            self,
-            call_id: str,
-            path: Path,
-            payload: dict,
+        self,
+        call_id: str,
+        path: Path,
+        payload: dict,
     ) -> ContextPartitionItem:
         try:
             start_line = _read_start_line(payload)
@@ -103,7 +120,9 @@ class FileTool(FunctionToolCallback):
         else:
             effective_requested_end_for_check = requested_end_line
         covering_window = self._find_covering_window(
-            str(path), start_line, effective_requested_end_for_check,
+            str(path),
+            start_line,
+            effective_requested_end_for_check,
         )
         if covering_window is not None:
             return self._build_redundant_read_item(
@@ -114,18 +133,18 @@ class FileTool(FunctionToolCallback):
                 requested_start_line=start_line,
             )
         try:
-            text = await _read_text_under_file_tool_lock(path)
+            text = await reads._read_text_under_file_tool_lock(path, self.max_file_bytes)
         except (
-                FileNotFoundError,
-                FileToolFileTooLargeError,
-                IsADirectoryError,
-                PermissionError,
-                UnicodeDecodeError,
+            FileNotFoundError,
+            FileToolFileTooLargeError,
+            IsADirectoryError,
+            PermissionError,
+            UnicodeDecodeError,
         ) as exc:
-            _tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
+            live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
             return _error_item(call_id, f"{type(exc).__name__}: {exc}")
         revision = sha256(text.encode("utf-8")).hexdigest()
-        _refresh_live_windows(self._refreshable_items(), str(path), text, revision)
+        live_windows._refresh_live_windows(self._refreshable_items(), str(path), text, revision, self.max_lines)
         # Cap the effective end so live windows can never grow past max_lines on refresh,
         # even if the user-supplied span was wider. The original `requested_end_line` is
         # preserved separately so the RANGE_TRUNCATED diagnostic can echo what was asked.
@@ -135,11 +154,7 @@ class FileTool(FunctionToolCallback):
         else:
             effective_requested_end_line = requested_end_line
         line_count = _count_lines(text)
-        if (
-                requested_end_line is not None
-                and requested_end_line > cap_end_line
-                and line_count > cap_end_line
-        ):
+        if requested_end_line is not None and requested_end_line > cap_end_line and line_count > cap_end_line:
             # Cap actually clips live content. Return a RANGE_TRUNCATED view-carrying item
             # so the model gets a usable partial window plus an explicit paging instruction
             # for the remainder, instead of a content-less hard ERROR. The remainder is the
@@ -198,11 +213,11 @@ class FileTool(FunctionToolCallback):
         )
 
     async def _do_write(
-            self,
-            call_id: str,
-            path: Path,
-            action: str,
-            payload: dict,
+        self,
+        call_id: str,
+        path: Path,
+        action: str,
+        payload: dict,
     ) -> ContextPartitionItem:
         expected_revision = payload.get("expected_revision")
         if not expected_revision:
@@ -233,13 +248,13 @@ class FileTool(FunctionToolCallback):
                     expected_revision,
                 )
             except (
-                    FileNotFoundError,
-                    FileToolFileTooLargeError,
-                    IsADirectoryError,
-                    PermissionError,
-                    UnicodeDecodeError,
+                FileNotFoundError,
+                FileToolFileTooLargeError,
+                IsADirectoryError,
+                PermissionError,
+                UnicodeDecodeError,
             ) as exc:
-                _tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
+                live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
         # Refresh runs after the path lock releases: it touches only this request's
@@ -249,11 +264,12 @@ class FileTool(FunctionToolCallback):
         # reports. On conflict that revision is the on-disk state the model just discovered;
         # on range-error and successful edits it is the post-transaction state. The
         # refresh is a no-op for windows already at this revision, so always-refresh is safe.
-        refreshed_live_window_count = _refresh_live_windows(
+        refreshed_live_window_count = live_windows._refresh_live_windows(
             self._refreshable_items(),
             str(path),
             current_text,
             current_revision,
+            self.max_lines,
         )
         if result_item.output and result_item.output.startswith("EDITED "):
             result_item.output = _append_live_window_refresh_note(
@@ -263,10 +279,10 @@ class FileTool(FunctionToolCallback):
         return result_item
 
     async def _do_create_file(
-            self,
-            call_id: str,
-            path: Path,
-            payload: dict,
+        self,
+        call_id: str,
+        path: Path,
+        payload: dict,
     ) -> ContextPartitionItem:
         validation_error = _validate_create_payload(payload)
         if validation_error:
@@ -293,23 +309,29 @@ class FileTool(FunctionToolCallback):
                     new_text,
                 )
             except (
-                    FileNotFoundError,
-                    FileToolFileTooLargeError,
-                    IsADirectoryError,
-                    PermissionError,
-                    UnicodeDecodeError,
+                FileNotFoundError,
+                FileToolFileTooLargeError,
+                IsADirectoryError,
+                PermissionError,
+                UnicodeDecodeError,
             ) as exc:
-                _tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
+                live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
-        _refresh_live_windows(self._refreshable_items(), str(path), current_text, current_revision)
+        live_windows._refresh_live_windows(
+            self._refreshable_items(),
+            str(path),
+            current_text,
+            current_revision,
+            self.max_lines,
+        )
         return result_item
 
     def _find_covering_window(
-            self,
-            path: str,
-            requested_start_line: int,
-            requested_end_line: int,
+        self,
+        path: str,
+        requested_start_line: int,
+        requested_end_line: int,
     ) -> ContextPartitionItem | None:
         """Return an existing live window whose intended coverage fully covers
         [requested_start_line, requested_end_line], or None.
@@ -334,28 +356,22 @@ class FileTool(FunctionToolCallback):
             intended_coverage_end = _annotation_requested_end_line(ann)
             if intended_coverage_end is None:
                 intended_coverage_end = view_start_line + self.max_lines - 1
-            if (
-                    view_start_line <= requested_start_line
-                    and intended_coverage_end >= requested_end_line
-            ):
+            if view_start_line <= requested_start_line and intended_coverage_end >= requested_end_line:
                 return item
         return None
 
     def _refreshable_items(self) -> list[ContextPartitionItem]:
         partition_item_ids = {id(item) for item in self._partition.items}
-        self._pending_result_items = [
-            item for item in self._pending_result_items
-            if id(item) not in partition_item_ids
-        ]
+        self._pending_result_items = [item for item in self._pending_result_items if id(item) not in partition_item_ids]
         return [*self._partition.items, *self._pending_result_items]
 
     def _locked_write_transaction(
-            self,
-            call_id: str,
-            path: Path,
-            action: str,
-            payload: dict,
-            expected_revision: str,
+        self,
+        call_id: str,
+        path: Path,
+        action: str,
+        payload: dict,
+        expected_revision: str,
     ) -> tuple[ContextPartitionItem, str, str]:
         """Run the read → revision-check → write critical section under fcntl.flock(LOCK_EX).
 
@@ -452,10 +468,10 @@ class FileTool(FunctionToolCallback):
         return item, updated_text, new_revision
 
     def _locked_create_transaction(
-            self,
-            call_id: str,
-            path: Path,
-            new_text: str,
+        self,
+        call_id: str,
+        path: Path,
+        new_text: str,
     ) -> tuple[ContextPartitionItem, str, str]:
         try:
             # `create_file` is allowed to materialize a missing directory tree as long as
@@ -501,13 +517,13 @@ class FileTool(FunctionToolCallback):
         return item, new_text, current_revision
 
     def _build_redundant_read_item(
-            self,
-            *,
-            call_id: str,
-            covering_window: ContextPartitionItem,
-            path: Path,
-            requested_end_line: int,
-            requested_start_line: int,
+        self,
+        *,
+        call_id: str,
+        covering_window: ContextPartitionItem,
+        path: Path,
+        requested_end_line: int,
+        requested_start_line: int,
     ) -> ContextPartitionItem:
         """Build a REDUNDANT_READ diagnostic that points the model at an existing covering window.
 
@@ -522,20 +538,19 @@ class FileTool(FunctionToolCallback):
         if intended_coverage_end is None:
             intended_coverage_end = view_start_line + self.max_lines - 1
         revision = ann.get("file_tool.revision", "")
-        output = "\n".join([
-            (
-                f"REDUNDANT_READ path={path}"
-                f" requested_lines={requested_start_line}-{requested_end_line}"
-            ),
-            (
-                "An existing live window already covers this span"
-                f" (rendered lines {view_start_line}-{view_end_line},"
-                f" intended coverage {view_start_line}-{intended_coverage_end},"
-                f" revision {revision})."
-                " Use that window. To extend coverage, page forward from"
-                f" start_line={intended_coverage_end + 1}."
-            ),
-        ])
+        output = "\n".join(
+            [
+                (f"REDUNDANT_READ path={path} requested_lines={requested_start_line}-{requested_end_line}"),
+                (
+                    "An existing live window already covers this span"
+                    f" (rendered lines {view_start_line}-{view_end_line},"
+                    f" intended coverage {view_start_line}-{intended_coverage_end},"
+                    f" revision {revision})."
+                    " Use that window. To extend coverage, page forward from"
+                    f" start_line={intended_coverage_end + 1}."
+                ),
+            ]
+        )
         return ContextPartitionItem(
             call_id=call_id,
             output=output,
@@ -544,16 +559,16 @@ class FileTool(FunctionToolCallback):
         )
 
     def _build_view_carrying_item(
-            self,
-            *,
-            call_id: str,
-            path: Path,
-            current_text: str,
-            current_revision: str,
-            line_count: int,
-            view_start_line: int,
-            header_lines: list[str],
-            requested_end_line: int | None = None,
+        self,
+        *,
+        call_id: str,
+        path: Path,
+        current_text: str,
+        current_revision: str,
+        line_count: int,
+        view_start_line: int,
+        header_lines: list[str],
+        requested_end_line: int | None = None,
     ) -> ContextPartitionItem:
         """Build a function_call_output that carries arbitrary header lines plus a fresh live-window
         view of the current file. Used for ALREADY_EXISTS, CONFLICT, RANGE_ERROR, and
@@ -569,13 +584,8 @@ class FileTool(FunctionToolCallback):
         if line_count == 0:
             body = f"{self.current_view_marker_prefix}: empty file (line_count=0)"
         else:
-            body_header = (
-                f"{self.current_view_marker_prefix} "
-                f"(lines {view_start_line}-{end_line} of {line_count}):"
-            )
-            numbered = "\n".join(
-                f"{i} | {line}" for i, line in enumerate(view_lines, start=view_start_line)
-            )
+            body_header = f"{self.current_view_marker_prefix} (lines {view_start_line}-{end_line} of {line_count}):"
+            numbered = "\n".join(f"{i} | {line}" for i, line in enumerate(view_lines, start=view_start_line))
             body = body_header + ("\n" + numbered if numbered else "")
         output = "\n".join(header_lines + [body])
         annotations = {
@@ -596,15 +606,10 @@ class FileTool(FunctionToolCallback):
 
     @classmethod
     def _get_path_lock(cls, path: str) -> asyncio.Lock:
-        """Return the shared per-path asyncio.Lock for `path`, creating it on first use.
-
-        get + setdefault is the right pattern here: dict.setdefault is atomic in CPython,
-        so a lost create-race resolves to the same Lock instance for both callers.
-        """
-        lock = cls._path_locks.get(path)
-        if lock is None:
-            lock = cls._path_locks.setdefault(path, asyncio.Lock())
-        return lock
+        """Back-compat delegator to the per-path lock registry in `reads.py`. The canonical
+        location is module-level state in `reads`; this classmethod is preserved because tests
+        and any external callers still reach in via the FileTool class surface."""
+        return reads._get_path_lock(path)
 
     @property
     def name(self) -> str:
@@ -764,9 +769,43 @@ class FileTool(FunctionToolCallback):
         )
 
 
+def _error_item(call_id: str, message: str) -> ContextPartitionItem:
+    return ContextPartitionItem(
+        call_id=call_id,
+        output=f"ERROR {message}",
+        type="function_call_output",
+    )
+
+
+def _locked_read_text(path: Path) -> str:
+    """Back-compat wrapper preserving the original 1-arg signature for tests. Reads
+    `FileTool.max_file_bytes` at call time so monkeypatched values propagate.
+    """
+    return reads._locked_read_text(path, FileTool.max_file_bytes)
+
+
+async def _read_text_under_file_tool_lock(path: Path) -> str:
+    """Back-compat wrapper preserving the original 1-arg signature. Reads
+    `FileTool.max_file_bytes` at call time so monkeypatched values propagate.
+    """
+    return await reads._read_text_under_file_tool_lock(path, FileTool.max_file_bytes)
+
+
+def _refresh_live_windows(
+    items: list[ContextPartitionItem],
+    path: str,
+    text: str,
+    revision: str,
+) -> int:
+    """Back-compat wrapper preserving the original 4-arg signature for tests. Reads
+    `FileTool.max_lines` at call time so monkeypatched values propagate.
+    """
+    return live_windows._refresh_live_windows(items, path, text, revision, FileTool.max_lines)
+
+
 async def reconcile_tracked_files(
-        context_partition: ContextPartition,
-        workspace_root: Path | None = None,
+    context_partition: ContextPartition,
+    workspace_root: Path | None = None,
 ) -> None:
     """Refresh live windows in `context_partition.items` against current on-disk content.
 
@@ -787,470 +826,12 @@ async def reconcile_tracked_files(
 
     async def reconcile_with_limit(path_str: str) -> None:
         async with semaphore:
-            await _reconcile_one_tracked_path(
+            await reconciliation._reconcile_one_tracked_path(
                 context_partition.items,
                 path_str,
                 workspace_root,
+                max_file_bytes=FileTool.max_file_bytes,
+                max_lines=FileTool.max_lines,
             )
 
     await asyncio.gather(*(reconcile_with_limit(path_str) for path_str in paths_with_live_items))
-
-
-async def _reconcile_one_tracked_path(
-        items: list[ContextPartitionItem],
-        path_str: str,
-        workspace_root: Path,
-) -> None:
-    try:
-        path = _resolve_path(path_str, workspace_root)
-        current_text = await _read_text_under_file_tool_lock(path)
-    except (
-            FileNotFoundError,
-            FileToolFileTooLargeError,
-            IsADirectoryError,
-            PermissionError,
-            UnicodeDecodeError,
-            ValueError,
-    ) as exc:
-        _tombstone_live_windows(items, path_str, type(exc).__name__)
-        return
-
-    current_revision = sha256(current_text.encode("utf-8")).hexdigest()
-    _refresh_live_windows(items, path_str, current_text, current_revision)
-
-
-async def _read_text_under_file_tool_lock(path: Path) -> str:
-    """Read `path` while participating in FileTool's same-path coordination.
-
-    The asyncio lock prevents same-process readers from entering the thread pool while a
-    FileTool writer for the same path is in its read-check-write critical section. The
-    shared flock prevents cooperating readers in other processes from observing a file
-    while a writer holds its exclusive lock.
-    """
-    path_lock = FileTool._get_path_lock(str(path))
-    async with path_lock:
-        return await asyncio.to_thread(_locked_read_text, path)
-
-
-def _locked_read_text(path: Path) -> str:
-    """Synchronously read a text file under a shared advisory lock."""
-    with _open_text_file_no_follow(path, os.O_RDONLY, "r") as fp:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_SH)
-        _raise_if_file_too_large(fp.fileno(), path, FileTool.max_file_bytes)
-        return fp.read()
-
-
-def _open_text_file_no_follow(path: Path, flags: int, mode: str):
-    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags | nofollow_flag)
-    except OSError as exc:
-        if nofollow_flag and exc.errno == errno.ELOOP:
-            raise PermissionError(f"Refusing to follow symlink for {path}") from exc
-        raise
-    try:
-        return os.fdopen(fd, mode, encoding="utf-8")
-    except Exception:
-        os.close(fd)
-        raise
-
-
-def _raise_if_file_too_large(fd: int, path: Path, max_file_bytes: int) -> None:
-    size = os.fstat(fd).st_size
-    if size > max_file_bytes:
-        raise FileToolFileTooLargeError(
-            f"{path} is {size} bytes; limit is {max_file_bytes} bytes."
-        )
-
-
-def render_edit_record(
-        *,
-        action: str,
-        path: str,
-        old_revision: str,
-        new_revision: str,
-        old_text: str,
-        new_text: str,
-        payload: dict,
-        max_lines: int,
-) -> str:
-    """Render a frozen edit record describing an applied write.
-
-    `Removed` line numbers reference the file before the edit; `Added` line numbers
-    reference the file after.
-    """
-    old_lines = _split_into_lines(old_text)
-    new_lines = _split_into_lines(new_text)
-    parts = [
-        f"EDITED path={path} action={action}",
-        f"revision: {old_revision} → {new_revision}",
-        f"line_count: {len(old_lines)} → {len(new_lines)}",
-    ]
-    inserted_text = payload.get("new_text") or ""
-    inserted_lines = _split_into_lines(inserted_text)
-
-    if action in ("replace_lines", "delete_lines"):
-        rs = payload["start_line"]
-        re = payload["end_line"]
-        removed = old_lines[rs - 1:re]
-        parts.append("")
-        parts.append(_render_diff_block("Removed", rs, re, removed, max_lines))
-
-    if action in ("replace_lines", "insert_lines") and inserted_lines:
-        added_start = payload["start_line"]
-        added_end = added_start + len(inserted_lines) - 1
-        parts.append("")
-        parts.append(_render_diff_block("Added", added_start, added_end, inserted_lines, max_lines))
-
-    # Show a small window of unchanged adjacent lines from the post-edit file so the model
-    # can see boundary artifacts (duplicate fences, stray braces) that a Removed/Added pair
-    # in isolation cannot reveal.
-    context_window = 3
-    context_before_end = payload["start_line"] - 1
-    context_after_start = payload["start_line"] + len(inserted_lines)
-    if context_before_end >= 1:
-        context_before_start = max(1, context_before_end - context_window + 1)
-        before_lines = new_lines[context_before_start - 1:context_before_end]
-        if before_lines:
-            parts.append("")
-            parts.append(_render_diff_block(
-                "Context before",
-                context_before_start,
-                context_before_end,
-                before_lines,
-                max_lines,
-            ))
-    if context_after_start <= len(new_lines):
-        context_after_end = min(len(new_lines), context_after_start + context_window - 1)
-        after_lines = new_lines[context_after_start - 1:context_after_end]
-        if after_lines:
-            parts.append("")
-            parts.append(_render_diff_block(
-                "Context after",
-                context_after_start,
-                context_after_end,
-                after_lines,
-                max_lines,
-            ))
-
-    return "\n".join(parts)
-
-
-def _append_live_window_refresh_note(output: str, refreshed_live_window_count: int) -> str:
-    return (
-        f"{output}\n\n"
-        f"Live windows refreshed for this path: {refreshed_live_window_count}. "
-        "Use current live windows for follow-up line numbers; this edit record is historical."
-    )
-
-
-def render_create_record(
-        *,
-        path: str,
-        new_revision: str,
-        new_text: str,
-        max_lines: int,
-) -> str:
-    lines = _split_into_lines(new_text)
-    parts = [
-        f"CREATED path={path}",
-        f"revision: {new_revision}",
-        f"line_count: 0 → {len(lines)}",
-    ]
-    if lines:
-        parts.append("")
-        parts.append(_render_diff_block("Added", 1, len(lines), lines, max_lines))
-    return "\n".join(parts)
-
-
-def render_live_window(
-        *,
-        path: str,
-        revision: str,
-        start_line: int,
-        end_line: int,
-        line_count: int,
-        view_lines: list[str],
-) -> str:
-    """Render the canonical live-window output for a (path, revision, view) triple."""
-    if line_count == 0:
-        return f"FILE path={path} revision={revision} status=live line_count=0"
-    header = (
-        f"FILE path={path} revision={revision} status=live"
-        f" lines={start_line}-{end_line} line_count={line_count}"
-    )
-    if not view_lines:
-        return header
-    body = "\n".join(f"{i} | {line}" for i, line in enumerate(view_lines, start=start_line))
-    return f"{header}\n{body}"
-
-
-def render_tombstone(path: str, reason: str) -> str:
-    return f"FILE path={path} status=stale [no longer accessible: {reason}]"
-
-
-def _read_start_line(payload: dict) -> int:
-    start_line = payload.get("start_line")
-    if start_line is None:
-        return 1
-    if isinstance(start_line, bool) or not isinstance(start_line, int) or start_line < 1:
-        raise ValueError("start_line for read_lines must be null or an integer >= 1")
-    return start_line
-
-
-def _read_end_line(payload: dict, start_line: int) -> int | None:
-    end_line = payload.get("end_line")
-    if end_line is None:
-        return None
-    if isinstance(end_line, bool) or not isinstance(end_line, int) or end_line < 1:
-        raise ValueError("end_line for read_lines must be null or an integer >= 1")
-    if end_line < start_line:
-        raise ValueError("end_line for read_lines must be >= start_line")
-    return end_line
-
-
-def render_view(
-        text: str,
-        start_line: int,
-        max_lines: int,
-        requested_end_line: int | None = None,
-) -> tuple[int, int, list[str]]:
-    """Return (end_line, line_count, view_lines) for a 1-based inclusive view from
-    `start_line`, either up to `max_lines` lines or through `requested_end_line`,
-    capped at the file's line count.
-
-    `end_line` is the inclusive last line in the view, or `start_line - 1` if the view is
-    empty (e.g. start_line is past EOF or the file is empty)."""
-    lines = _split_into_lines(text)
-    line_count = len(lines)
-    if line_count == 0:
-        return 0, 0, []
-    start_idx = max(0, start_line - 1)
-    if requested_end_line is None:
-        end_idx = min(line_count, start_idx + max_lines)
-    else:
-        end_idx = min(line_count, requested_end_line)
-    if start_idx >= end_idx:
-        return start_line - 1, line_count, []
-    return end_idx, line_count, lines[start_idx:end_idx]
-
-
-def _apply_line_edit(text: str, action: str, payload: dict) -> str:
-    lines = _split_into_lines(text)
-    inserted = _split_into_lines(payload.get("new_text") or "")
-    start = payload["start_line"]
-    if action == "replace_lines":
-        end = payload["end_line"]
-        result = lines[:start - 1] + inserted + lines[end:]
-    elif action == "insert_lines":
-        result = lines[:start - 1] + inserted + lines[start - 1:]
-    elif action == "delete_lines":
-        end = payload["end_line"]
-        result = lines[:start - 1] + lines[end:]
-    else:
-        raise ValueError(f"Unsupported write action: {action!r}")
-    trailing_newline = text.endswith("\n") or (text == "" and len(result) > 0)
-    return "\n".join(result) + ("\n" if trailing_newline and result else "")
-
-
-def _count_lines(text: str) -> int:
-    return len(_split_into_lines(text))
-
-
-def _error_item(call_id: str, message: str) -> ContextPartitionItem:
-    return ContextPartitionItem(
-        call_id=call_id,
-        output=f"ERROR {message}",
-        type="function_call_output",
-    )
-
-
-def _validate_write_payload(action: str, payload: dict) -> str | None:
-    start_line = payload.get("start_line")
-    if not _is_positive_int(start_line):
-        return f"start_line is required for {action} and must be an integer >= 1."
-    if action in ("replace_lines", "delete_lines"):
-        end_line = payload.get("end_line")
-        if not _is_positive_int(end_line):
-            return f"end_line is required for {action} and must be an integer >= 1."
-        if start_line > end_line:
-            return f"start_line must be <= end_line for {action}."
-    if action in ("replace_lines", "insert_lines"):
-        new_text = payload.get("new_text")
-        if not isinstance(new_text, str) or new_text == "":
-            return f"new_text is required for {action} and must be a non-empty string."
-    return None
-
-
-def _validate_create_payload(payload: dict) -> str | None:
-    if payload.get("expected_revision") is not None:
-        return "expected_revision must be null for create_file."
-    if payload.get("start_line") is not None:
-        return "start_line must be null for create_file."
-    if payload.get("end_line") is not None:
-        return "end_line must be null for create_file."
-    new_text = payload.get("new_text")
-    if not isinstance(new_text, str):
-        return "new_text is required for create_file and must be a string."
-    return None
-
-
-def _is_positive_int(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
-
-
-def _range_is_valid(action: str, payload: dict, line_count: int) -> bool:
-    start = payload.get("start_line")
-    end = payload.get("end_line")
-    if action == "insert_lines":
-        if not _is_positive_int(start):
-            return False
-        # start_line in [1, line_count + 1]; end_line is unused.
-        return 1 <= start <= line_count + 1
-    if action in ("replace_lines", "delete_lines"):
-        if not _is_positive_int(start) or not _is_positive_int(end):
-            return False
-        if line_count == 0:
-            return False
-        return 1 <= start <= end <= line_count
-    return False
-
-
-def _refresh_live_windows(
-        items: list[ContextPartitionItem],
-        path: str,
-        text: str,
-        revision: str,
-) -> int:
-    """Re-render every live window for `path` against `text` / `revision`. Items already
-    at `revision` are left alone. Returns the number of items actually rewritten."""
-    refreshed_count = 0
-    for item in items:
-        ann = item.prokaryotes_annotations
-        if not ann or ann.get("file_tool.path") != path or ann.get("file_tool.status") != "live":
-            continue
-        if ann.get("file_tool.revision") == revision and not _has_transient_file_diagnostic(item):
-            continue
-        try:
-            start_line = int(ann["file_tool.view_start_line"])
-        except (KeyError, ValueError):
-            continue
-        requested_end_line = _annotation_requested_end_line(ann)
-        end_line, line_count, view_lines = render_view(
-            text,
-            start_line,
-            FileTool.max_lines,
-            requested_end_line=requested_end_line,
-        )
-        item.output = render_live_window(
-            path=path,
-            revision=revision,
-            start_line=start_line,
-            end_line=end_line,
-            line_count=line_count,
-            view_lines=view_lines,
-        )
-        ann["file_tool.revision"] = revision
-        ann["file_tool.view_end_line"] = str(end_line)
-        refreshed_count += 1
-    return refreshed_count
-
-
-def _annotation_requested_end_line(annotations: dict[str, str]) -> int | None:
-    requested_end_line = annotations.get("file_tool.requested_end_line")
-    if requested_end_line is None:
-        return None
-    try:
-        return int(requested_end_line)
-    except ValueError:
-        return None
-
-
-def _has_transient_file_diagnostic(item: ContextPartitionItem) -> bool:
-    """Return True if `item`'s output carries a diagnostic header that should re-render on
-    the next refresh even at the same revision, so the header gets dropped once the
-    diagnostic's condition no longer applies."""
-    output = item.output or ""
-    return (
-        output.startswith("ALREADY_EXISTS ")
-        or output.startswith("CONFLICT ")
-        or output.startswith("RANGE_ERROR ")
-        or output.startswith("RANGE_TRUNCATED ")
-    )
-
-
-def _is_unstable_coverage(item: ContextPartitionItem) -> bool:
-    """Return True if `item` should not be trusted as coverage for redundant-read detection.
-
-    ALREADY_EXISTS, CONFLICT, and RANGE_ERROR carry decision-relevant state the model still
-    needs to react to before consuming the embedded view. RANGE_TRUNCATED is intentionally
-    excluded: its diagnostic header is about the request being over-cap, not about file state,
-    and the embedded view is a real live window over [view_start_line, view_end_line] with
-    `requested_end_line` set to the cap — i.e. stable coverage for its returned span."""
-    output = item.output or ""
-    return (
-        output.startswith("ALREADY_EXISTS ")
-        or output.startswith("CONFLICT ")
-        or output.startswith("RANGE_ERROR ")
-    )
-
-
-def _tombstone_live_windows(
-        items: list[ContextPartitionItem],
-        path: str,
-        reason: str,
-) -> None:
-    tombstone = render_tombstone(path, reason)
-    for item in items:
-        ann = item.prokaryotes_annotations or {}
-        if ann.get("file_tool.path") == path and ann.get("file_tool.status") == "live":
-            item.prokaryotes_annotations["file_tool.status"] = "stale"
-            item.output = tombstone
-
-
-def _render_diff_block(
-        label: str,
-        start_line: int,
-        end_line: int,
-        lines: list[str],
-        max_lines: int,
-) -> str:
-    header = f"{label} (lines {start_line}-{end_line}):"
-    if not lines:
-        return header
-    if len(lines) <= max_lines:
-        body = "\n".join(f"{i} | {line}" for i, line in enumerate(lines, start=start_line))
-        return f"{header}\n{body}"
-    truncated_count = len(lines) - max_lines
-    body = "\n".join(f"{i} | {line}" for i, line in enumerate(lines[:max_lines], start=start_line))
-    return f"{header}\n{body}\n... {truncated_count} more lines truncated ..."
-
-
-def _resolve_path(path_arg: str, workspace_root: Path) -> Path:
-    """Resolve `path_arg` against `workspace_root` and verify it does not escape it.
-
-    Absolute paths are kept as-is; relative paths are joined against `workspace_root`. The
-    resolved path must lie within `workspace_root.resolve()`."""
-    if not isinstance(path_arg, str) or not path_arg:
-        raise ValueError("path is required and must be a non-empty string")
-    candidate = Path(path_arg)
-    if not candidate.is_absolute():
-        candidate = workspace_root / candidate
-    resolved = candidate.resolve()
-    workspace_resolved = workspace_root.resolve()
-    try:
-        resolved.relative_to(workspace_resolved)
-    except ValueError as exc:
-        raise ValueError(
-            f"Path {path_arg!r} escapes workspace root {workspace_root}"
-        ) from exc
-    return resolved
-
-
-def _split_into_lines(text: str) -> list[str]:
-    """Split text into lines, ignoring a trailing newline. Empty text yields an empty list."""
-    if text == "":
-        return []
-    if text.endswith("\n"):
-        text = text[:-1]
-    return text.split("\n")

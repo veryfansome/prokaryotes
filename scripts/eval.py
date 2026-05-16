@@ -4,8 +4,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from prokaryotes.eval_v1.harness import EvalHarness
 from prokaryotes.eval_v1.tasks import TASKS
+from prokaryotes.harness_v1.eval import EvalHarness
 
 
 async def main(args: argparse.Namespace):

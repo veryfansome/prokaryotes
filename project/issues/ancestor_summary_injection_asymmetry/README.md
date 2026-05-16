@@ -2,13 +2,12 @@
 
 ## Location
 
-- `prokaryotes/openai_v1/web_harness.py:75` — manual injection
-- `prokaryotes/anthropic_v1/web_harness.py` — no injection needed (handled by model layer)
+- `prokaryotes/harness_v1/web.py` — `WebHarness._build_instruction_parts()` manually appends summaries only for `impl="openai"`
 - `prokaryotes/api_v1/models.py:133` — `to_anthropic_messages()` folds in `ancestor_summaries`
 
 ## Problem
 
-Ancestor summaries need to reach the model as part of the system/developer context on every request. The two providers handle this differently:
+Ancestor summaries need to reach the model as part of the system/developer context on every request. The consolidated web harness handles the two providers differently:
 
 **Anthropic** — `to_anthropic_messages()` automatically folds `partition.ancestor_summaries` into the system string:
 
@@ -18,22 +17,22 @@ def to_anthropic_messages(self):
     ...
 ```
 
-The Anthropic harness's `post_chat` does not need to touch `ancestor_summaries` at all.
+The Anthropic web-harness path does not need to touch `ancestor_summaries` in its instruction parts.
 
-**OpenAI** — `to_openai_input()` does not include `ancestor_summaries`. The OpenAI harness must remember to prepend them manually:
+**OpenAI** — `to_openai_input()` does not include `ancestor_summaries`. The OpenAI branch must remember to append them manually:
 
 ```python
-# openai_v1/web_harness.py
-developer_message_parts = list(context_partition.ancestor_summaries)
-developer_message_parts.append("# Tool usage")
-...
-developer_message = ContextPartitionItem(role="developer", ...)
-context_partition.items.insert(0, developer_message)
+# harness_v1/web.py
+if self.impl == "openai":
+    summary_block = context_partition.ancestor_summary_block()
+    if summary_block:
+        parts.append("")
+        parts.append(summary_block)
 ```
 
-This asymmetry creates a latent footgun: implementing a third provider requires the author to know (from reading the OpenAI harness or the compaction docs) that ancestor summaries must be manually injected. Nothing in the `ContextPartition` API signals this requirement — `to_openai_input()` silently omits the summaries with no indication that the caller is responsible for them.
+This asymmetry creates a latent footgun: implementing a third provider requires the author to know (from reading the OpenAI branch or the compaction docs) that ancestor summaries must be manually injected. Nothing in the `ContextPartition` API signals this requirement — `to_openai_input()` silently omits the summaries with no indication that the caller is responsible for them.
 
-If a new provider harness omits this step, conversations with compacted history will silently lose context with no error.
+If a new provider path omits this step, conversations with compacted history will silently lose context with no error.
 
 ## Proposed Fix
 
@@ -52,7 +51,7 @@ def ancestor_summary_preamble(self) -> str | None:
     return "\n\n".join(self.ancestor_summaries)
 ```
 
-The OpenAI harness then calls this explicitly:
+The OpenAI branch then calls this explicitly:
 
 ```python
 developer_message_parts = []
@@ -73,12 +72,12 @@ An alternative is to add a note to `to_openai_input()`'s docstring that it does 
 
 **Verdict: Valid problem, but the proposed fix does not solve the footgun.**
 
-The reviewer confirmed the asymmetry: `to_anthropic_messages()` at `models.py:133` folds in `ancestor_summaries` automatically, while the OpenAI harness at `web_harness.py:75` manually prepends them. This is real and correctly described.
+The reviewer confirmed the asymmetry: `to_anthropic_messages()` folds in `ancestor_summaries` automatically, while the OpenAI branch in `harness_v1/web.py` manually appends them. This is real and correctly described.
 
 **`ancestor_summary_preamble()` does not solve the footgun.** The method is advisory and opt-in. A future provider author who does not read its docstring will still omit the call and silently lose compacted context. The proposed fix converts an implicit contract (read the OpenAI harness to know you must inject summaries) into a slightly more explicit one (read the docstring of an optional utility method). That is a discoverability improvement, not a solution.
 
 **The only structural solutions** would be to make injection impossible to omit — either by having `to_openai_input()` prepend a synthetic dict unconditionally (mechanically possible, since `ancestor_summaries` can be prepended as a `{"role": "developer", ...}` dict), or by requiring callers to explicitly dispose of the summaries through the API. The issue does not explore these.
 
-**The asymmetry is partly structurally forced.** Anthropic's API takes a top-level `system` string, which is why `to_anthropic_messages()` naturally assembles the full system content. OpenAI's Responses API takes `input: list[dict]` with a first-class `developer` message item that the harness constructs locally. Some provider-specific context-header code in the harness is unavoidable given these API shapes. This weakens the framing of the asymmetry as a bug rather than a natural consequence of provider differences.
+**The asymmetry is partly structurally forced.** Anthropic's API takes a top-level `system` string, which is why `to_anthropic_messages()` naturally assembles the full system content. OpenAI's Responses API takes `input: list[dict]` with a first-class `developer` message item that `WebHarness` constructs locally. Some provider-specific context-header code in the harness is unavoidable given these API shapes. This weakens the framing of the asymmetry as a bug rather than a natural consequence of provider differences.
 
 **Recommendation:** Reframe this as a discoverability problem with a partial fix. Add `ancestor_summary_preamble()` and a docstring on `to_openai_input()` stating it does not include ancestor summaries. Do not claim this solves the footgun.

@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from prokaryotes.api_v1.models import ContextPartition, ContextPartitionItem
-from prokaryotes.eval_v1.harness import EvalHarness
 from prokaryotes.eval_v1.models import EvalTask
+from prokaryotes.harness_v1.eval import EvalHarness
 
 
 class FakeScriptHarness:

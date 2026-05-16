@@ -1,7 +1,7 @@
 import pytest
 from redis.exceptions import WatchError
 
-import prokaryotes.web_v1 as web_v1_module
+import prokaryotes.web_v1.compaction as web_v1_module
 from prokaryotes.api_v1.models import (
     ContextPartition,
     compute_boundary_hash,
@@ -10,8 +10,8 @@ from prokaryotes.search_v1.context_partitions import (
     COMPACTION_STATE_COMMITTED,
     COMPACTION_STATE_PENDING,
 )
+from prokaryotes.tools_v1.file_tool.live_windows import recency_tail_items
 from prokaryotes.utils_v1.llm_utils import COMPACTION_RECENCY_TAIL
-from prokaryotes.web_v1 import _recency_tail_items
 from tests.unit_tests.context_partition_utils import (
     FakePipeline,
     FakeRedis,
@@ -63,7 +63,7 @@ async def test_boundary_hash_stored_on_es_covers_full_parent_prefix():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(p0), make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "S1"
@@ -92,7 +92,7 @@ async def test_compact_partition_accumulates_ancestor_summaries_across_generatio
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "S1"
@@ -128,13 +128,13 @@ async def test_compact_partition_advances_raw_message_start_index_by_tail_offset
             ("assistant", "A4"),
         ),
     )
-    expected_tail, tail_offset = _recency_tail_items(snapshot.items, COMPACTION_RECENCY_TAIL)
+    expected_tail, tail_offset = recency_tail_items(snapshot.items, COMPACTION_RECENCY_TAIL)
     redis = FakeRedis({"context_partition:conv": snapshot.model_dump_json()})
     lock_key = "compaction_lock:conv"
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -167,7 +167,7 @@ async def test_compact_partition_carries_forward_post_snapshot_messages():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -196,7 +196,7 @@ async def test_compact_partition_releases_lock_when_compact_fn_raises():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         raise RuntimeError("LLM unavailable")
@@ -237,7 +237,7 @@ async def test_compact_partition_retries_redis_swap_on_watch_contention():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -268,7 +268,7 @@ async def test_compact_partition_returns_early_for_empty_summary():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return ""
@@ -301,7 +301,7 @@ async def test_compact_partition_skips_swap_when_active_prefix_changed():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -337,7 +337,7 @@ async def test_compact_partition_skips_swap_when_active_uuid_changed():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -363,7 +363,7 @@ async def test_compact_partition_skips_swap_when_redis_partition_missing():
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -405,7 +405,7 @@ async def test_compact_partition_aborts_before_redis_swap_if_child_persist_fails
 
     search = FailingChildPersistSearch([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -446,7 +446,7 @@ async def test_compact_partition_keeps_committed_child_reachable_when_parent_upd
 
     search = FailingParentUpdateSearch([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
@@ -502,7 +502,7 @@ async def test_compact_partition_leaves_pending_child_when_cas_never_commits(mon
     await redis.set(lock_key, "1")
     search = FakeSearchClient([make_doc(snapshot)])
     wb = make_web_base(search_client=search)
-    wb.redis_client = redis
+    wb._redis_client = redis
 
     async def compact_fn(current_snapshot):
         return "Summary"
