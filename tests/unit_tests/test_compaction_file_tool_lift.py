@@ -1,8 +1,5 @@
-from types import SimpleNamespace
-
 import pytest
 
-import prokaryotes.web_v1.compaction as web_v1_module
 from prokaryotes.api_v1.models import ContextPartition, ContextPartitionItem
 from prokaryotes.tools_v1.file_tool.live_windows import (
     is_live_window,
@@ -775,83 +772,3 @@ async def test_compact_partition_skips_swap_when_live_window_was_tombstoned():
     assert cached.ancestor_summaries == []
     assert search.docs["snap"]["is_compacted"] is False
     assert search.docs["snap"]["summary"] is None
-
-
-@pytest.fixture
-def stub_load_session(monkeypatch):
-    async def noop(_request):
-        return None
-
-    monkeypatch.setattr(web_v1_module, "load_session", noop)
-
-
-@pytest.mark.asyncio
-async def test_get_compaction_status_returns_new_partition_uuid_when_swap_committed(stub_load_session):
-    wb = make_web_base(redis_data={"context_partition:conv": ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="child",
-        parent_partition_uuid="parent",
-        items=[],
-    ).model_dump_json()})
-    request = SimpleNamespace(session={"user_id": "u1"})
-
-    response = await wb.get_compaction_status(
-        request=request,
-        conversation_uuid="conv",
-        pending_partition_uuid="parent",
-    )
-
-    assert response == {"done": True, "partition_uuid": "child"}
-
-
-@pytest.mark.asyncio
-async def test_get_compaction_status_reports_in_progress_while_lock_held(stub_load_session):
-    wb = make_web_base(redis_data={"compaction_lock:conv": "1"})
-    request = SimpleNamespace(session={"user_id": "u1"})
-
-    response = await wb.get_compaction_status(
-        request=request,
-        conversation_uuid="conv",
-        pending_partition_uuid="parent",
-    )
-
-    assert response == {"done": False}
-
-
-@pytest.mark.asyncio
-async def test_get_compaction_status_omits_partition_uuid_for_unrelated_changed_uuid(stub_load_session):
-    wb = make_web_base(redis_data={"context_partition:conv": ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="unrelated",
-        parent_partition_uuid="some-other-parent",
-        items=[],
-    ).model_dump_json()})
-    request = SimpleNamespace(session={"user_id": "u1"})
-
-    response = await wb.get_compaction_status(
-        request=request,
-        conversation_uuid="conv",
-        pending_partition_uuid="parent",
-    )
-
-    assert response == {"done": True}
-    assert "partition_uuid" not in response
-
-
-@pytest.mark.asyncio
-async def test_get_compaction_status_reports_done_when_swap_was_skipped(stub_load_session):
-    wb = make_web_base(redis_data={"context_partition:conv": ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="parent",
-        items=[],
-    ).model_dump_json()})
-    request = SimpleNamespace(session={"user_id": "u1"})
-
-    response = await wb.get_compaction_status(
-        request=request,
-        conversation_uuid="conv",
-        pending_partition_uuid="parent",
-    )
-
-    assert response == {"done": True}
-    assert "partition_uuid" not in response

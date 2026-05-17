@@ -74,13 +74,17 @@ Every overlay should include a `README.md` with the exact commands needed to ver
 ```markdown
 ## Verification Commands
 
+Overlay note:
+
+`tests/conftest.py` should prepend `project/wip/<feature-name>/overlay/prokaryotes` to `prokaryotes.__path__` during pytest startup so overlay modules take precedence while unchanged modules still fall back to the real repo package.
+
 Run Ruff against the proposed Python files:
 
     uv run ruff check \
       project/wip/<feature-name>/overlay/prokaryotes \
       project/wip/<feature-name>/overlay/tests
 
-Run the overlay Python tests (overlay package takes precedence; unchanged modules fall back to the real repo package):
+Run the overlay Python tests:
 
     PYTHONPATH=project/wip/<feature-name>/overlay:. \
       uv run --extra test pytest project/wip/<feature-name>/overlay/tests -q
@@ -94,6 +98,7 @@ Run the overlay JS tests:
 
 - The original source files are never touched, so there is always a pristine state to diff against: `diff -ruN prokaryotes/ project/wip/<feature-name>/overlay/prokaryotes/`
 - Overlay tests can be run alongside normal tests without affecting `uv run pytest`, which only collects from the real `tests/` directory (configured in `pyproject.toml`).
+- A generic `overlay/tests/conftest.py` bootstrap applies equally to overlay unit tests and overlay integration tests, so both tiers can exercise the overlaid package layout without changing the real repo package.
 
 ---
 

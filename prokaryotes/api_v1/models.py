@@ -42,6 +42,18 @@ class ChatMessage(BaseModel):
         return ContextPartitionItem(content=self.content, role=self.role)
 
 
+class CompactionStatusResponse(BaseModel):
+    """Response body for the `/compaction-status` polling endpoint.
+
+    `partition_uuid` is set only when the active partition is a direct child of the
+    UUID the UI polled for — that's the relabel target. In all other "done" cases
+    (lock released, partition evicted, parent mismatch) the field is omitted.
+    """
+
+    done: bool
+    partition_uuid: str | None = None
+
+
 class ContextPartition(BaseModel):
     """A provider-agnostic conversation history as a list of `ContextPartitionItem` objects."""
 

@@ -1,7 +1,7 @@
 import pytest
 from redis.exceptions import WatchError
 
-import prokaryotes.web_v1.compaction as web_v1_module
+import prokaryotes.context_v1.compaction as context_v1_module
 from prokaryotes.api_v1.models import (
     ContextPartition,
     compute_boundary_hash,
@@ -23,12 +23,12 @@ from tests.unit_tests.context_partition_utils import (
 
 
 def make_snapshot(
-        ancestor_summaries: list[str] | None = None,
-        conversation_uuid: str = "conv",
-        items=None,
-        parent_partition_uuid: str | None = None,
-        partition_uuid: str = "snap",
-        raw_message_start_index: int = 0,
+    ancestor_summaries: list[str] | None = None,
+    conversation_uuid: str = "conv",
+    items=None,
+    parent_partition_uuid: str | None = None,
+    partition_uuid: str = "snap",
+    raw_message_start_index: int = 0,
 ) -> ContextPartition:
     return ContextPartition(
         conversation_uuid=conversation_uuid,
@@ -382,7 +382,7 @@ async def test_compact_partition_skips_swap_when_redis_partition_missing():
 
 @pytest.mark.asyncio
 async def test_compact_partition_aborts_before_redis_swap_if_child_persist_fails(monkeypatch):
-    monkeypatch.setattr(web_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
+    monkeypatch.setattr(context_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
     snapshot = make_snapshot()
     redis = FakeRedis({"context_partition:conv": snapshot.model_dump_json()})
     lock_key = "compaction_lock:conv"
@@ -394,11 +394,11 @@ async def test_compact_partition_aborts_before_redis_swap_if_child_persist_fails
             self.put_attempts = 0
 
         async def put_partition(
-                self,
-                partition: ContextPartition,
-                *,
-                compaction_attempt_uuid: str | None = None,
-                compaction_state: str = COMPACTION_STATE_COMMITTED,
+            self,
+            partition: ContextPartition,
+            *,
+            compaction_attempt_uuid: str | None = None,
+            compaction_state: str = COMPACTION_STATE_COMMITTED,
         ) -> None:
             self.put_attempts += 1
             raise RuntimeError("ES unavailable")
@@ -427,7 +427,7 @@ async def test_compact_partition_aborts_before_redis_swap_if_child_persist_fails
 
 @pytest.mark.asyncio
 async def test_compact_partition_keeps_committed_child_reachable_when_parent_update_retries_exhausted(monkeypatch):
-    monkeypatch.setattr(web_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
+    monkeypatch.setattr(context_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
     snapshot = make_snapshot()
     redis = FakeRedis({"context_partition:conv": snapshot.model_dump_json()})
     lock_key = "compaction_lock:conv"
@@ -474,7 +474,7 @@ async def test_compact_partition_keeps_committed_child_reachable_when_parent_upd
 
 @pytest.mark.asyncio
 async def test_compact_partition_leaves_pending_child_when_cas_never_commits(monkeypatch):
-    monkeypatch.setattr(web_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
+    monkeypatch.setattr(context_v1_module, "_COMPACTION_SEARCH_WRITE_RETRY_DELAYS_SECONDS", (0, 0))
     snapshot = make_snapshot()
     execute_calls = []
     replacement_partition = make_snapshot(
@@ -517,7 +517,8 @@ async def test_compact_partition_leaves_pending_child_when_cas_never_commits(mon
     cached = ContextPartition.model_validate_json(await redis.get("context_partition:conv"))
     assert cached.partition_uuid == "new-branch"
     pending_children = [
-        doc for uuid, doc in search.docs.items()
+        doc
+        for uuid, doc in search.docs.items()
         if uuid not in {"snap", "new-branch"} and doc["parent_partition_uuid"] == "snap"
     ]
     assert len(pending_children) == 1

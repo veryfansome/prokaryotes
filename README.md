@@ -1,6 +1,6 @@
 # prokaryotes
 
-This project is about exploring agentic harnesses. It is set up as a FastAPI-based application backed by multiple data stores. Currently, it has a web-harness that provides a chat UI for human users, a script-harness for running tasks non-interactively, and an eval-harness that can run a small curated evaluation set.
+This project is about exploring agentic harnesses. It is set up as a locally running, multi-user, FastAPI-based application backed by multiple data stores. Currently, it has a web-harness that provides a chat UI for human users, a script-harness for running tasks non-interactively, and an eval-harness that can run a small curated evaluation set.
 
 ## Running the app
 
@@ -85,7 +85,7 @@ Be concise, not didactic. Maximize relevance per token.
 
 **Project docs** under `project/` describe specific features, designs, issues, or topics.
 
-Place each doc where its source of truth lives so it only goes stale when that source changes. Directory READMEs link to feature docs but never duplicate them. They should also not duplicate context already provided by parent READMEs. Full strategy: [project/features/context_architecture/README.md](project/features/context_architecture/README.md).
+Place each doc where its source of truth lives so it only goes stale when that source changes. Directory READMEs link to feature docs but never duplicate them. They should also not duplicate context already provided by parent READMEs. Full strategy: [project/features/documentation/README.md](project/features/documentation/README.md).
 
 ## Navigation
 
