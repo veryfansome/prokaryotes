@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from prokaryotes.api_v1.models import ContextPartition
+from prokaryotes.api_v1.models import CompactionStatusResponse, ContextPartition
 from tests.unit_tests.context_partition_utils import make_web_base
 
 
@@ -16,7 +16,7 @@ async def test_get_compaction_status_lock_present():
     wb = make_web_base(redis_data={"compaction_lock:conv-1": "1"})
     with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == {"done": False}
+    assert result == CompactionStatusResponse(done=False)
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,7 @@ async def test_get_compaction_status_partition_evicted():
     wb = make_web_base()
     with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == {"done": True}
+    assert result == CompactionStatusResponse(done=True)
 
 
 @pytest.mark.asyncio
@@ -38,7 +38,7 @@ async def test_get_compaction_status_partition_changed():
     wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
     with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == {"done": True, "partition_uuid": "new-uuid"}
+    assert result == CompactionStatusResponse(done=True, partition_uuid="new-uuid")
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,7 @@ async def test_get_compaction_status_partition_unchanged():
     wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
     with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == {"done": True}
+    assert result == CompactionStatusResponse(done=True)
 
 
 @pytest.mark.asyncio
@@ -65,4 +65,4 @@ async def test_get_compaction_status_partition_changed_without_child_uuid():
     wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
     with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
         result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == {"done": True}
+    assert result == CompactionStatusResponse(done=True)
