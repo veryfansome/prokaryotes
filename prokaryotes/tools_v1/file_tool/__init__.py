@@ -1,18 +1,25 @@
+"""FileTool — operates on a `TurnItem` view via `view_provider`.
+
+The view is built by the harness using `conversation_v1.project.current_turn_items(conversation, historical_turns,
+active_turn)`, so the tool sees lifted live windows from prior compactions in addition to the current turn's items.
+
+Live-window refresh and tombstoning operate on the view + pending-result list. Lift selection lives in
+`ConversationCompactor._compute_lift_plan`, which operates on `TurnExecution`s rather than a flat item list.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import fcntl
 import json
 import logging
 import os
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 
-from prokaryotes.api_v1.models import (
-    ContextPartition,
-    ContextPartitionItem,
-    FunctionToolCallback,
-    ToolParameters,
-    ToolSpec,
-)
+from prokaryotes.api_v1.models import FunctionToolCallback, ToolParameters, ToolSpec
+from prokaryotes.conversation_v1.models import TurnItem
 from prokaryotes.tools_v1.file_tool import live_windows, reads, reconciliation
 from prokaryotes.tools_v1.file_tool.live_windows import (
     _annotation_requested_end_line,
@@ -47,8 +54,17 @@ logger = logging.getLogger(__name__)
 __all__ = ["FileTool", "reconcile_tracked_files"]
 
 
+ViewProvider = Callable[[], list[TurnItem]]
+
+
 class FileTool(FunctionToolCallback):
-    """Tool to let the model read, create, and edit files with tracked context."""
+    """Read / create / edit UTF-8 text files with tracked live-window context.
+
+    The `view_provider` is invoked on every `_refreshable_items()` call and must return a flat list of `TurnItem`s
+    the tool may refresh — typically `current_turn_items(conversation, historical_turns, active_turn)`. Items just
+    produced by this `FileTool` instance (still in flight for the current round) live in `_pending_result_items`
+    until the LLM client commits them via `on_committed_turn_item`.
+    """
 
     current_view_marker_prefix = CURRENT_VIEW_MARKER_PREFIX
     max_concurrent_reconcile_paths = 8
@@ -57,22 +73,19 @@ class FileTool(FunctionToolCallback):
 
     def __init__(
         self,
-        context_partition: ContextPartition,
+        view_provider: ViewProvider,
         workspace_root: Path | None = None,
     ):
-        # context_partition is held by reference so write-side refresh and the harness's
-        # reconciliation pass mutate the same items the LLM client will serialize next round.
-        self._partition = context_partition
+        self._view_provider = view_provider
         self._workspace_root = workspace_root or Path.cwd()
-        # Both LLM clients dispatch tool callbacks within a round concurrently; the lock
-        # serializes call() to keep the read→mutate→refresh sequence atomic per request.
+        # Serializes call() so the read → mutate → refresh sequence is atomic per request.
         self._lock = asyncio.Lock()
-        # Callback result items are appended to ContextPartition only after the provider
-        # client awaits the whole batch. Keep references here so later file_tool calls in
-        # the same request can refresh live windows that have returned but are not appended yet.
-        self._pending_result_items: list[ContextPartitionItem] = []
+        # Bridges "callback returned" → "view contains it". Concurrent tool calls in one provider round each append
+        # their result here before returning so later refreshes see prior in-flight results. Drained against the
+        # view at every _refreshable_items() call: any item now present in the view is discarded from pending.
+        self._pending_result_items: list[TurnItem] = []
 
-    async def call(self, arguments: str, call_id: str) -> ContextPartitionItem:
+    async def call(self, arguments: str, call_id: str) -> TurnItem:
         async with self._lock:
             try:
                 payload = json.loads(arguments)
@@ -83,47 +96,28 @@ class FileTool(FunctionToolCallback):
                 resolved = _resolve_path(payload["path"], self._workspace_root)
                 if action == "read_lines":
                     result = await self._do_read_lines(call_id, resolved, payload)
-                    self._pending_result_items.append(result)
-                    return result
-                if action == "create_file":
+                elif action == "create_file":
                     result = await self._do_create_file(call_id, resolved, payload)
-                    self._pending_result_items.append(result)
-                    return result
-                if action in ("replace_lines", "insert_lines", "delete_lines"):
+                elif action in ("replace_lines", "insert_lines", "delete_lines"):
                     result = await self._do_write(call_id, resolved, action, payload)
-                    self._pending_result_items.append(result)
-                    return result
-                result = _error_item(call_id, f"Unsupported action: {action!r}")
+                else:
+                    result = _error_item(call_id, f"Unsupported action: {action!r}")
                 self._pending_result_items.append(result)
                 return result
             except Exception as exc:
                 logger.exception("FileTool[%s] failed", call_id)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
-    async def _do_read_lines(
-        self,
-        call_id: str,
-        path: Path,
-        payload: dict,
-    ) -> ContextPartitionItem:
+    async def _do_read_lines(self, call_id: str, path: Path, payload: dict) -> TurnItem:
         try:
             start_line = _read_start_line(payload)
             requested_end_line = _read_end_line(payload, start_line)
         except ValueError as exc:
             return _error_item(call_id, f"ValueError: {exc}")
-        # Resolve the requested span for redundancy detection. Open-ended pages are evaluated
-        # against the harness's intended coverage of [start_line, start_line + max_lines - 1]
-        # so a re-read of a short file (where view_end_line was clipped at EOF) still detects
-        # full coverage.
-        if requested_end_line is None:
-            effective_requested_end_for_check = start_line + self.max_lines - 1
-        else:
-            effective_requested_end_for_check = requested_end_line
-        covering_window = self._find_covering_window(
-            str(path),
-            start_line,
-            effective_requested_end_for_check,
+        effective_requested_end_for_check = (
+            start_line + self.max_lines - 1 if requested_end_line is None else requested_end_line
         )
+        covering_window = self._find_covering_window(str(path), start_line, effective_requested_end_for_check)
         if covering_window is not None:
             return self._build_redundant_read_item(
                 call_id=call_id,
@@ -145,21 +139,12 @@ class FileTool(FunctionToolCallback):
             return _error_item(call_id, f"{type(exc).__name__}: {exc}")
         revision = sha256(text.encode("utf-8")).hexdigest()
         live_windows._refresh_live_windows(self._refreshable_items(), str(path), text, revision, self.max_lines)
-        # Cap the effective end so live windows can never grow past max_lines on refresh,
-        # even if the user-supplied span was wider. The original `requested_end_line` is
-        # preserved separately so the RANGE_TRUNCATED diagnostic can echo what was asked.
         cap_end_line = start_line + self.max_lines - 1
-        if requested_end_line is not None and requested_end_line > cap_end_line:
-            effective_requested_end_line = cap_end_line
-        else:
-            effective_requested_end_line = requested_end_line
+        effective_requested_end_line = (
+            cap_end_line if requested_end_line is not None and requested_end_line > cap_end_line else requested_end_line
+        )
         line_count = _count_lines(text)
         if requested_end_line is not None and requested_end_line > cap_end_line and line_count > cap_end_line:
-            # Cap actually clips live content. Return a RANGE_TRUNCATED view-carrying item
-            # so the model gets a usable partial window plus an explicit paging instruction
-            # for the remainder, instead of a content-less hard ERROR. The remainder is the
-            # part of the *requested span* the model hasn't seen yet, not the rest of the
-            # file — for a 1000-line file asked as 1-250, the remainder is 50 lines, not 800.
             remaining = min(requested_end_line, line_count) - cap_end_line
             return self._build_view_carrying_item(
                 call_id=call_id,
@@ -183,10 +168,7 @@ class FileTool(FunctionToolCallback):
                 requested_end_line=cap_end_line,
             )
         end_line, line_count, view_lines = render_view(
-            text,
-            start_line,
-            self.max_lines,
-            requested_end_line=effective_requested_end_line,
+            text, start_line, self.max_lines, requested_end_line=effective_requested_end_line
         )
         output = render_live_window(
             path=str(path),
@@ -205,20 +187,14 @@ class FileTool(FunctionToolCallback):
         }
         if effective_requested_end_line is not None:
             annotations["file_tool.requested_end_line"] = str(effective_requested_end_line)
-        return ContextPartitionItem(
+        return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",
             prokaryotes_annotations=annotations,
         )
 
-    async def _do_write(
-        self,
-        call_id: str,
-        path: Path,
-        action: str,
-        payload: dict,
-    ) -> ContextPartitionItem:
+    async def _do_write(self, call_id: str, path: Path, action: str, payload: dict) -> TurnItem:
         expected_revision = payload.get("expected_revision")
         if not expected_revision:
             return _error_item(
@@ -229,14 +205,7 @@ class FileTool(FunctionToolCallback):
         if validation_error:
             return _error_item(call_id, validation_error)
 
-        # Two-layer cross-request safety. The class-level path lock serializes same-process
-        # writers before they ever enter the thread pool; the OS-level fcntl.flock inside
-        # _locked_write_transaction makes the read-check-write sequence atomic against any
-        # cooperating writer in any process on this host. Without the path lock the read,
-        # revision check, and write would race even within one Python process and the
-        # second writer could pass an `expected_revision` check on stale-but-still-current-
-        # at-read-time content and silently overwrite the first.
-        path_lock = self._get_path_lock(str(path))
+        path_lock = reads._get_path_lock(str(path))
         async with path_lock:
             try:
                 result_item, current_text, current_revision = await asyncio.to_thread(
@@ -257,56 +226,32 @@ class FileTool(FunctionToolCallback):
                 live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
-        # Refresh runs after the path lock releases: it touches only this request's
-        # in-memory partition, never disk, so it doesn't need the cross-request lock.
-        # We always refresh — including on conflict and range-error results — so prior
-        # live windows for this path move to the same revision the just-built result item
-        # reports. On conflict that revision is the on-disk state the model just discovered;
-        # on range-error and successful edits it is the post-transaction state. The
-        # refresh is a no-op for windows already at this revision, so always-refresh is safe.
-        refreshed_live_window_count = live_windows._refresh_live_windows(
-            self._refreshable_items(),
-            str(path),
-            current_text,
-            current_revision,
-            self.max_lines,
+        refreshed_count = live_windows._refresh_live_windows(
+            self._refreshable_items(), str(path), current_text, current_revision, self.max_lines
         )
         if result_item.output and result_item.output.startswith("EDITED "):
-            result_item.output = _append_live_window_refresh_note(
-                result_item.output,
-                refreshed_live_window_count,
-            )
+            result_item.output = _append_live_window_refresh_note(result_item.output, refreshed_count)
         return result_item
 
-    async def _do_create_file(
-        self,
-        call_id: str,
-        path: Path,
-        payload: dict,
-    ) -> ContextPartitionItem:
+    async def _do_create_file(self, call_id: str, path: Path, payload: dict) -> TurnItem:
         validation_error = _validate_create_payload(payload)
         if validation_error:
             return _error_item(call_id, validation_error)
-
         new_text = payload["new_text"]
         new_size = len(new_text.encode("utf-8"))
         if new_size > self.max_file_bytes:
             return _error_item(
                 call_id,
                 (
-                    "FileToolFileTooLargeError: create would make "
-                    f"{path} {new_size} bytes; limit is {self.max_file_bytes} bytes."
+                    f"FileToolFileTooLargeError: create would make {path} {new_size} bytes;"
+                    f" limit is {self.max_file_bytes} bytes."
                 ),
             )
-
-        path_lock = self._get_path_lock(str(path))
+        path_lock = reads._get_path_lock(str(path))
         async with path_lock:
             try:
                 result_item, current_text, current_revision = await asyncio.to_thread(
-                    self._locked_create_transaction,
-                    call_id,
-                    path,
-                    new_text,
+                    self._locked_create_transaction, call_id, path, new_text
                 )
             except (
                 FileNotFoundError,
@@ -317,28 +262,12 @@ class FileTool(FunctionToolCallback):
             ) as exc:
                 live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
-
         live_windows._refresh_live_windows(
-            self._refreshable_items(),
-            str(path),
-            current_text,
-            current_revision,
-            self.max_lines,
+            self._refreshable_items(), str(path), current_text, current_revision, self.max_lines
         )
         return result_item
 
-    def _find_covering_window(
-        self,
-        path: str,
-        requested_start_line: int,
-        requested_end_line: int,
-    ) -> ContextPartitionItem | None:
-        """Return an existing live window whose intended coverage fully covers
-        [requested_start_line, requested_end_line], or None.
-
-        Intended coverage end is `file_tool.requested_end_line` when annotated; otherwise
-        `view_start_line + max_lines - 1`. `view_end_line` alone understates coverage for
-        open-ended reads that were clipped at EOF, so it isn't used as the lookup key."""
+    def _find_covering_window(self, path: str, requested_start_line: int, requested_end_line: int) -> TurnItem | None:
         for item in self._refreshable_items():
             ann = item.prokaryotes_annotations
             if not ann:
@@ -360,40 +289,27 @@ class FileTool(FunctionToolCallback):
                 return item
         return None
 
-    def _refreshable_items(self) -> list[ContextPartitionItem]:
-        partition_item_ids = {id(item) for item in self._partition.items}
-        self._pending_result_items = [item for item in self._pending_result_items if id(item) not in partition_item_ids]
-        return [*self._partition.items, *self._pending_result_items]
+    def _refreshable_items(self) -> list[TurnItem]:
+        """Return the unified view + any in-flight tool results not yet in the view.
+
+        Reads from `view_provider()` each call so the FileTool always sees the freshest snapshot of
+        `current_turn_items` (lifted + historical + active turn). Pending results that have since been committed to
+        the view are dropped.
+        """
+        view = self._view_provider()
+        view_ids = {id(item) for item in view}
+        self._pending_result_items = [item for item in self._pending_result_items if id(item) not in view_ids]
+        return [*view, *self._pending_result_items]
 
     def _locked_write_transaction(
-        self,
-        call_id: str,
-        path: Path,
-        action: str,
-        payload: dict,
-        expected_revision: str,
-    ) -> tuple[ContextPartitionItem, str, str]:
-        """Run the read → revision-check → write critical section under fcntl.flock(LOCK_EX).
-
-        Returns `(item, current_text, current_revision)` where `current_text` /
-        `current_revision` describe the file's post-transaction on-disk state — the new
-        content and revision for a successful edit, or the just-read content and revision
-        for a conflict or range-error result. Conflict and range-error items are built from
-        the just-read content so the caller can return them directly without further
-        filesystem I/O. The caller uses `current_text` / `current_revision` to refresh
-        any prior live windows in the partition; that refresh is a no-op when those
-        windows are already at this revision.
-
-        Runs synchronously inside `asyncio.to_thread`. The advisory lock is released when
-        the file handle exits its `with` block and closes the file descriptor.
-        """
+        self, call_id: str, path: Path, action: str, payload: dict, expected_revision: str
+    ) -> tuple[TurnItem, str, str]:
         with _open_text_file_no_follow(path, os.O_RDWR, "r+") as fp:
             fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
             _raise_if_file_too_large(fp.fileno(), path, self.max_file_bytes)
             original_text = fp.read()
             current_revision = sha256(original_text.encode("utf-8")).hexdigest()
             line_count = _count_lines(original_text)
-
             if expected_revision != current_revision:
                 item = self._build_view_carrying_item(
                     call_id=call_id,
@@ -403,11 +319,13 @@ class FileTool(FunctionToolCallback):
                     line_count=line_count,
                     view_start_line=payload.get("start_line") or 1,
                     header_lines=[
-                        f"CONFLICT path={path} expected_revision={expected_revision}"
-                        f" current_revision={current_revision}",
                         (
-                            "The file changed since the revision returned by read_lines. "
-                            "Use the current view before retrying."
+                            f"CONFLICT path={path} expected_revision={expected_revision}"
+                            f" current_revision={current_revision}"
+                        ),
+                        (
+                            "The file changed since the revision returned by read_lines."
+                            " Use the current view before retrying."
                         ),
                     ],
                 )
@@ -426,7 +344,6 @@ class FileTool(FunctionToolCallback):
                     ],
                 )
                 return item, original_text, current_revision
-
             updated_text = _apply_line_edit(original_text, action, payload)
             updated_size = len(updated_text.encode("utf-8"))
             if updated_size > self.max_file_bytes:
@@ -434,8 +351,8 @@ class FileTool(FunctionToolCallback):
                     _error_item(
                         call_id,
                         (
-                            "FileToolFileTooLargeError: edit would make "
-                            f"{path} {updated_size} bytes; limit is {self.max_file_bytes} bytes."
+                            f"FileToolFileTooLargeError: edit would make {path} {updated_size} bytes;"
+                            f" limit is {self.max_file_bytes} bytes."
                         ),
                     ),
                     original_text,
@@ -446,7 +363,6 @@ class FileTool(FunctionToolCallback):
             fp.write(updated_text)
             fp.flush()
             new_revision = sha256(updated_text.encode("utf-8")).hexdigest()
-
         edit_output = render_edit_record(
             action=action,
             path=str(path),
@@ -457,9 +373,7 @@ class FileTool(FunctionToolCallback):
             payload=payload,
             max_lines=self.max_lines,
         )
-        # Edit records carry only `file_tool.path` — they are frozen audit trails, never
-        # refreshed, but the path annotation lets compaction recognize this path as active.
-        item = ContextPartitionItem(
+        item = TurnItem(
             call_id=call_id,
             output=edit_output,
             type="function_call_output",
@@ -467,15 +381,8 @@ class FileTool(FunctionToolCallback):
         )
         return item, updated_text, new_revision
 
-    def _locked_create_transaction(
-        self,
-        call_id: str,
-        path: Path,
-        new_text: str,
-    ) -> tuple[ContextPartitionItem, str, str]:
+    def _locked_create_transaction(self, call_id: str, path: Path, new_text: str) -> tuple[TurnItem, str, str]:
         try:
-            # `create_file` is allowed to materialize a missing directory tree as long as
-            # the resolved target path stays inside the workspace sandbox.
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "x", encoding="utf-8") as fp:
                 fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
@@ -501,15 +408,11 @@ class FileTool(FunctionToolCallback):
                 ],
             )
             return item, current_text, current_revision
-
         current_revision = sha256(new_text.encode("utf-8")).hexdigest()
-        item = ContextPartitionItem(
+        item = TurnItem(
             call_id=call_id,
             output=render_create_record(
-                path=str(path),
-                new_revision=current_revision,
-                new_text=new_text,
-                max_lines=self.max_lines,
+                path=str(path), new_revision=current_revision, new_text=new_text, max_lines=self.max_lines
             ),
             type="function_call_output",
             prokaryotes_annotations={"file_tool.path": str(path)},
@@ -520,38 +423,29 @@ class FileTool(FunctionToolCallback):
         self,
         *,
         call_id: str,
-        covering_window: ContextPartitionItem,
+        covering_window: TurnItem,
         path: Path,
         requested_end_line: int,
         requested_start_line: int,
-    ) -> ContextPartitionItem:
-        """Build a REDUNDANT_READ diagnostic that points the model at an existing covering window.
-
-        Carries `file_tool.path` only — no `file_tool.status=live`, no `file_tool.revision`, no
-        rendered file body — so that `_refresh_live_windows` and `_tombstone_live_windows` skip
-        it (they require `status=live`), while `_lift_active_live_windows` still treats the path
-        as active (it only checks for `file_tool.path`)."""
+    ) -> TurnItem:
         ann = covering_window.prokaryotes_annotations or {}
         view_start_line = int(ann["file_tool.view_start_line"])
         view_end_line = int(ann["file_tool.view_end_line"])
-        intended_coverage_end = _annotation_requested_end_line(ann)
-        if intended_coverage_end is None:
-            intended_coverage_end = view_start_line + self.max_lines - 1
+        intended_coverage_end = _annotation_requested_end_line(ann) or (view_start_line + self.max_lines - 1)
         revision = ann.get("file_tool.revision", "")
         output = "\n".join(
             [
-                (f"REDUNDANT_READ path={path} requested_lines={requested_start_line}-{requested_end_line}"),
+                f"REDUNDANT_READ path={path} requested_lines={requested_start_line}-{requested_end_line}",
                 (
                     "An existing live window already covers this span"
                     f" (rendered lines {view_start_line}-{view_end_line},"
                     f" intended coverage {view_start_line}-{intended_coverage_end},"
-                    f" revision {revision})."
-                    " Use that window. To extend coverage, page forward from"
-                    f" start_line={intended_coverage_end + 1}."
+                    f" revision {revision}). Use that window."
+                    f" To extend coverage, page forward from start_line={intended_coverage_end + 1}."
                 ),
             ]
         )
-        return ContextPartitionItem(
+        return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",
@@ -569,17 +463,9 @@ class FileTool(FunctionToolCallback):
         view_start_line: int,
         header_lines: list[str],
         requested_end_line: int | None = None,
-    ) -> ContextPartitionItem:
-        """Build a function_call_output that carries arbitrary header lines plus a fresh live-window
-        view of the current file. Used for ALREADY_EXISTS, CONFLICT, RANGE_ERROR, and
-        RANGE_TRUNCATED results so the model can immediately retry or page against the current
-        revision. When `requested_end_line` is set, the view honours it and the annotation pins
-        future refreshes to the same bound."""
+    ) -> TurnItem:
         end_line, _, view_lines = render_view(
-            current_text,
-            view_start_line,
-            self.max_lines,
-            requested_end_line=requested_end_line,
+            current_text, view_start_line, self.max_lines, requested_end_line=requested_end_line
         )
         if line_count == 0:
             body = f"{self.current_view_marker_prefix}: empty file (line_count=0)"
@@ -597,19 +483,12 @@ class FileTool(FunctionToolCallback):
         }
         if requested_end_line is not None:
             annotations["file_tool.requested_end_line"] = str(requested_end_line)
-        return ContextPartitionItem(
+        return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",
             prokaryotes_annotations=annotations,
         )
-
-    @classmethod
-    def _get_path_lock(cls, path: str) -> asyncio.Lock:
-        """Back-compat delegator to the per-path lock registry in `reads.py`. The canonical
-        location is module-level state in `reads`; this classmethod is preserved because tests
-        and any external callers still reach in via the FileTool class surface."""
-        return reads._get_path_lock(path)
 
     @property
     def name(self) -> str:
@@ -769,69 +648,39 @@ class FileTool(FunctionToolCallback):
         )
 
 
-def _error_item(call_id: str, message: str) -> ContextPartitionItem:
-    return ContextPartitionItem(
-        call_id=call_id,
-        output=f"ERROR {message}",
-        type="function_call_output",
-    )
-
-
-def _locked_read_text(path: Path) -> str:
-    """Back-compat wrapper preserving the original 1-arg signature for tests. Reads
-    `FileTool.max_file_bytes` at call time so monkeypatched values propagate.
-    """
-    return reads._locked_read_text(path, FileTool.max_file_bytes)
-
-
-async def _read_text_under_file_tool_lock(path: Path) -> str:
-    """Back-compat wrapper preserving the original 1-arg signature. Reads
-    `FileTool.max_file_bytes` at call time so monkeypatched values propagate.
-    """
-    return await reads._read_text_under_file_tool_lock(path, FileTool.max_file_bytes)
-
-
-def _refresh_live_windows(
-    items: list[ContextPartitionItem],
-    path: str,
-    text: str,
-    revision: str,
-) -> int:
-    """Back-compat wrapper preserving the original 4-arg signature for tests. Reads
-    `FileTool.max_lines` at call time so monkeypatched values propagate.
-    """
-    return live_windows._refresh_live_windows(items, path, text, revision, FileTool.max_lines)
+def _error_item(call_id: str, message: str) -> TurnItem:
+    return TurnItem(call_id=call_id, output=f"ERROR {message}", type="function_call_output")
 
 
 async def reconcile_tracked_files(
-    context_partition: ContextPartition,
+    items: list[TurnItem],
     workspace_root: Path | None = None,
 ) -> None:
-    """Refresh live windows in `context_partition.items` against current on-disk content.
+    """Refresh live-window items in `items` against current on-disk content.
 
-    Called by each harness's `post_chat()` after `sync_context_partition()`. Tombstones
-    every live item for a path that is no longer accessible. Idempotent: items already at
-    the current revision are left untouched.
+    Takes a flat `list[TurnItem]` (typically the unified view from `current_turn_items`). Mutates items in place;
+    tombstones live items for paths that are no longer accessible. Idempotent.
     """
     workspace_root = workspace_root or Path.cwd()
-    paths_with_live_items: set[str] = set()
-    for item in context_partition.items:
+    paths_with_live: set[str] = set()
+    for item in items:
         ann = item.prokaryotes_annotations or {}
         if item.type == "function_call_output" and ann.get("file_tool.status") == "live":
             path = ann.get("file_tool.path")
             if path:
-                paths_with_live_items.add(path)
-
+                paths_with_live.add(path)
+    if not paths_with_live:
+        return
     semaphore = asyncio.Semaphore(FileTool.max_concurrent_reconcile_paths)
 
     async def reconcile_with_limit(path_str: str) -> None:
         async with semaphore:
             await reconciliation._reconcile_one_tracked_path(
-                context_partition.items,
+                items,
                 path_str,
                 workspace_root,
                 max_file_bytes=FileTool.max_file_bytes,
                 max_lines=FileTool.max_lines,
             )
 
-    await asyncio.gather(*(reconcile_with_limit(path_str) for path_str in paths_with_live_items))
+    await asyncio.gather(*(reconcile_with_limit(p) for p in paths_with_live))

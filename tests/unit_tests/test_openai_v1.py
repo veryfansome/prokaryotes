@@ -1,14 +1,14 @@
+"""OpenAIClient streaming + transient-narration invariant."""
+
+from __future__ import annotations
+
 from types import SimpleNamespace
 
 import pytest
 from openai.types.shared_params import Reasoning
 
-from prokaryotes.api_v1.models import (
-    ContextPartition,
-    ContextPartitionItem,
-    ToolParameters,
-    ToolSpec,
-)
+from prokaryotes.api_v1.models import ToolParameters, ToolSpec
+from prokaryotes.conversation_v1.models import ProjectedItem, TurnItem
 from prokaryotes.openai_v1 import OpenAIClient
 
 
@@ -27,10 +27,10 @@ class AsyncEventStream:
 
 
 class DummyToolCallback:
-    async def call(self, arguments: str, call_id: str):
+    async def call(self, arguments: str, call_id: str) -> TurnItem:
         assert arguments == '{"query":"mars"}'
         assert call_id == "call_1"
-        return ContextPartitionItem(
+        return TurnItem(
             call_id=call_id,
             output="Mars facts",
             type="function_call_output",
@@ -41,15 +41,13 @@ class DummyToolCallback:
         return ToolSpec(
             name="lookup",
             description="Look up a record",
-            parameters=ToolParameters(
-                properties={"query": {"type": "string"}},
-            ),
+            parameters=ToolParameters(properties={"query": {"type": "string"}}),
         )
 
 
 class FakeResponsesAPI:
     def __init__(self, event_sequences: list[list]):
-        self.calls = []
+        self.calls: list[dict] = []
         self._sequences = iter(event_sequences)
 
     async def create(self, **kwargs):
@@ -57,13 +55,23 @@ class FakeResponsesAPI:
         return AsyncEventStream(next(self._sequences))
 
 
-class FakeOpenAIClient:
+class FakeAsyncOpenAI:
     def __init__(self, event_sequences: list[list]):
         self.responses = FakeResponsesAPI(event_sequences)
         self.closed = False
 
     async def close(self):
         self.closed = True
+
+
+def _make_client(event_sequences):
+    client = OpenAIClient()
+    client.async_openai = FakeAsyncOpenAI(event_sequences)
+    return client
+
+
+def _user_msg(content: str) -> ProjectedItem:
+    return ProjectedItem(type="message", role="user", content=content)
 
 
 def function_call_done(name: str, arguments: str, call_id: str):
@@ -88,77 +96,83 @@ def text_done(text: str):
 
 @pytest.mark.asyncio
 async def test_stream_turn_emits_context_pct_for_ndjson_stream():
-    # 102_400 / 128_000 * 100 == 80; validates the percentage math, not just presence.
-    client = OpenAIClient()
-    client.async_openai = FakeOpenAIClient([
-        [text_delta("ok"), text_done("ok"), response_completed(input_tokens=102_400)],
-    ])
-    context_partition = ContextPartition(
-        conversation_uuid="test",
-        items=[ContextPartitionItem(role="user", content="Hi")],
+    client = _make_client(
+        [
+            [text_delta("ok"), text_done("ok"), response_completed(input_tokens=102_400)],
+        ]
     )
 
     chunks = [
-        chunk async for chunk in client.stream_turn(
-            context_partition=context_partition,
+        chunk
+        async for chunk in client.stream_turn(
+            items=[_user_msg("Hi")],
+            instruction=None,
             model="gpt-5.4-mini",
             stream_ndjson=True,
         )
     ]
 
+    # 102_400 / 128_000 == 80%
     assert '{"context_pct": 80}\n' in chunks
 
 
 @pytest.mark.asyncio
-async def test_stream_turn_no_intermediate_assistant_item_before_tool_call():
-    # Regression guard: the partition must NOT contain a standalone assistant text item
-    # positioned before a function_call item.
+async def test_intermediate_narration_not_committed():
+    """Regression guard: on_committed_turn_item must NEVER receive a `message`
+    item. Intermediate narration text from a tool-use round is transient; only the final assistant text reaches
+    on_final_assistant_message."""
     callback = DummyToolCallback()
-    client = OpenAIClient()
-    client.async_openai = FakeOpenAIClient([
+    client = _make_client(
         [
-            text_delta("Checking "),
-            text_done("Checking "),
-            function_call_done("lookup", '{"query":"mars"}', "call_1"),
-        ],
-        [text_delta("Done."), text_done("Done.")],
-    ])
-    context_partition = ContextPartition(
-        conversation_uuid="test",
-        items=[ContextPartitionItem(role="user", content="Tell me about Mars")],
+            [
+                text_delta("Checking "),
+                text_done("Checking "),
+                function_call_done("lookup", '{"query":"mars"}', "call_1"),
+            ],
+            [text_delta("Done."), text_done("Done.")],
+        ]
     )
+    committed: list[TurnItem] = []
+    finals: list[str] = []
 
-    _ = [chunk async for chunk in client.stream_turn(
-        context_partition=context_partition,
-        model="gpt-5.4",
-        tool_callbacks={"lookup": callback},
-    )]
+    _ = [
+        chunk
+        async for chunk in client.stream_turn(
+            items=[_user_msg("Tell me about Mars")],
+            instruction=None,
+            model="gpt-5.4",
+            on_committed_turn_item=committed.append,
+            on_final_assistant_message=finals.append,
+            tool_callbacks={"lookup": callback},
+        )
+    ]
 
-    items = context_partition.items
-    function_call_idx = next(i for i, it in enumerate(items) if it.type == "function_call")
-    assert not any(
-        it.type == "message" and it.role == "assistant"
-        for it in items[:function_call_idx]
-    )
+    assert all(item.type in {"function_call", "function_call_output"} for item in committed)
+    assert [item.type for item in committed] == ["function_call", "function_call_output"]
+    assert finals == ["Done."]
 
 
 @pytest.mark.asyncio
 async def test_stream_turn_passes_correct_params():
+    """Provider request is built from `items` + `instruction` + `tool_callbacks`.
+    `system` role projected items become `developer` role on the wire."""
     callback = DummyToolCallback()
-    client = OpenAIClient()
-    client.async_openai = FakeOpenAIClient([
-        [text_delta("ok"), text_done("ok")],
-    ])
-    context_partition = ContextPartition(conversation_uuid="test", items=[
-        ContextPartitionItem(role="user", content="Hi"),
-    ])
+    client = _make_client(
+        [
+            [text_delta("ok"), text_done("ok")],
+        ]
+    )
 
-    _ = [chunk async for chunk in client.stream_turn(
-        context_partition=context_partition,
-        model="gpt-5.4",
-        reasoning_effort="low",
-        tool_callbacks={"lookup": callback},
-    )]
+    _ = [
+        chunk
+        async for chunk in client.stream_turn(
+            items=[_user_msg("Hi")],
+            instruction=None,
+            model="gpt-5.4",
+            reasoning_effort="low",
+            tool_callbacks={"lookup": callback},
+        )
+    ]
 
     call = client.async_openai.responses.calls[0]
     assert call["model"] == "gpt-5.4"
@@ -171,52 +185,44 @@ async def test_stream_turn_passes_correct_params():
 @pytest.mark.asyncio
 async def test_stream_turn_yields_text_and_continues_after_tool_callback():
     callback = DummyToolCallback()
-    client = OpenAIClient()
-    client.async_openai = FakeOpenAIClient([
+    client = _make_client(
         [
-            text_delta("Checking "),
-            text_done("Checking "),
-            function_call_done("lookup", '{"query":"mars"}', "call_1"),
-        ],
-        [
-            text_delta("Done."),
-            text_done("Done."),
-        ],
-    ])
-    context_partition = ContextPartition(
-        conversation_uuid="test",
-        items=[ContextPartitionItem(role="user", content="Tell me about Mars")],
+            [
+                text_delta("Checking "),
+                text_done("Checking "),
+                function_call_done("lookup", '{"query":"mars"}', "call_1"),
+            ],
+            [text_delta("Done."), text_done("Done.")],
+        ]
     )
+    finals: list[str] = []
 
     chunks = [
-        chunk async for chunk in client.stream_turn(
-            context_partition=context_partition,
+        chunk
+        async for chunk in client.stream_turn(
+            items=[_user_msg("Tell me about Mars")],
+            instruction=None,
             model="gpt-5.4",
+            on_final_assistant_message=finals.append,
             tool_callbacks={"lookup": callback},
         )
     ]
 
     assert chunks == ["Checking ", "\n", "Done."]
-
-    # Intermediate tool-round text is streamed to the user, but not persisted in the
-    # partition. The persisted assistant message contains only the final answer text.
-    assert context_partition.items == [
-        ContextPartitionItem(role="user", content="Tell me about Mars"),
-        ContextPartitionItem(
-            type="function_call", name="lookup",
-            arguments='{"query":"mars"}', call_id="call_1", id="call_1",
-        ),
-        ContextPartitionItem(call_id="call_1", output="Mars facts", type="function_call_output"),
-        ContextPartitionItem(role="assistant", content="Done."),
-    ]
+    assert finals == ["Done."]
 
     assert len(client.async_openai.responses.calls) == 2
-    # The second call receives only persisted conversation items; the transient
-    # progress message is not replayed into provider input.
+    # Second call sees the projected user message, the dispatched function_call, and the function_call_output; no
+    # transient narration leaks back in.
     assert client.async_openai.responses.calls[1]["input"] == [
         {"content": "Tell me about Mars", "role": "user", "type": "message"},
-        {"type": "function_call", "name": "lookup", "arguments": '{"query":"mars"}',
-         "call_id": "call_1", "id": "call_1"},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": '{"query":"mars"}',
+            "status": "completed",
+        },
         {"type": "function_call_output", "call_id": "call_1", "output": "Mars facts"},
     ]
 
@@ -224,29 +230,32 @@ async def test_stream_turn_yields_text_and_continues_after_tool_callback():
 @pytest.mark.asyncio
 async def test_stream_turn_emits_progress_message_for_ndjson_tool_rounds():
     callback = DummyToolCallback()
-    client = OpenAIClient()
-    client.async_openai = FakeOpenAIClient([
+    client = _make_client(
         [
-            text_delta("Checking "),
-            text_done("Checking "),
-            function_call_done("lookup", '{"query":"mars"}', "call_1"),
-            response_completed(),
-        ],
-        [
-            text_delta("Done."),
-            text_done("Done."),
-            response_completed(),
-        ],
-    ])
-    context_partition = ContextPartition(
-        conversation_uuid="test",
-        items=[ContextPartitionItem(role="user", content="Tell me about Mars")],
+            [
+                text_delta("Checking "),
+                text_done("Checking "),
+                function_call_done("lookup", '{"query":"mars"}', "call_1"),
+                response_completed(),
+            ],
+            [
+                text_delta("Done."),
+                text_done("Done."),
+                response_completed(),
+            ],
+        ]
     )
+    committed: list[TurnItem] = []
+    finals: list[str] = []
 
     chunks = [
-        chunk async for chunk in client.stream_turn(
-            context_partition=context_partition,
+        chunk
+        async for chunk in client.stream_turn(
+            items=[_user_msg("Tell me about Mars")],
+            instruction=None,
             model="gpt-5.4",
+            on_committed_turn_item=committed.append,
+            on_final_assistant_message=finals.append,
             stream_ndjson=True,
             tool_callbacks={"lookup": callback},
         )
@@ -256,4 +265,42 @@ async def test_stream_turn_emits_progress_message_for_ndjson_tool_rounds():
     assert '{"tool_call": {"name": "lookup", "arguments": "{\\"query\\":\\"mars\\"}"}}\n' in chunks
     assert '{"text_delta": "Checking "}\n' not in chunks
     assert '{"text_delta": "Done."}\n' in chunks
-    assert context_partition.items[-1] == ContextPartitionItem(role="assistant", content="Done.")
+    assert all(item.type in {"function_call", "function_call_output"} for item in committed)
+    assert finals == ["Done."]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_max_tool_call_rounds_commits_round_then_stops():
+    """`max_tool_call_rounds` blocks the *next* LLM call, not the current round.
+    With max=1: the first round dispatches a tool, the callback completes, and BOTH the function_call and
+    function_call_output are committed atomically. The loop then breaks before the next API call."""
+    callback = DummyToolCallback()
+    client = _make_client(
+        [
+            [
+                function_call_done("lookup", '{"query":"mars"}', "call_1"),
+                response_completed(),
+            ],
+        ]
+    )
+    committed: list[TurnItem] = []
+
+    async for _ in client.stream_turn(
+        items=[_user_msg("Tell me about Mars")],
+        instruction=None,
+        model="gpt-5.4",
+        max_tool_call_rounds=1,
+        on_committed_turn_item=committed.append,
+        tool_callbacks={"lookup": callback},
+    ):
+        pass
+
+    # Function_call + function_call_output committed together.
+    assert len(committed) == 2
+    assert committed[0].type == "function_call"
+    assert committed[0].call_id == "call_1"
+    assert committed[1].type == "function_call_output"
+    assert committed[1].call_id == "call_1"
+    assert committed[1].output == "Mars facts"
+    # Only one LLM call ran.
+    assert len(client.async_openai.responses.calls) == 1

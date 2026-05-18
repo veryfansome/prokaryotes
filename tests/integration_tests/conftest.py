@@ -1,10 +1,10 @@
 """Root conftest for the integration tier.
 
-Module-level env setup runs before any `prokaryotes` import. Both web harness modules
-pull `COMPACTION_TOKEN_THRESHOLD_PCT` / `COMPACTION_RECENCY_TAIL` into their own namespace
-via `from prokaryotes.utils_v1.llm_utils import …`, so the bindings freeze at import time.
-Setting env vars at module top — above any `from prokaryotes…` import, with harness imports
-deferred into fixtures — is the only way to make the override actually take effect.
+Module-level env setup runs before any `prokaryotes` import. Both web harness modules pull
+`COMPACTION_TOKEN_THRESHOLD_PCT` / `COMPACTION_RECENCY_TAIL` into their own namespace via `from
+prokaryotes.utils_v1.llm_utils import …`, so the bindings freeze at import time. Setting env vars at module top —
+above any `from prokaryotes…` import, with harness imports deferred into fixtures — is the only way to make the
+override actually take effect.
 """
 import os
 

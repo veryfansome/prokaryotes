@@ -1,269 +1,335 @@
+"""Tests for `EvalHarness.count_turns` + `run_task` against the new model.
+
+`count_turns` operates on `list[TurnItem]` + a `had_final_assistant` boolean. `run_task` consumes a `ScriptRunResult`
+and produces two artifact files (`conversation.json`, `turn_execution.json`) instead of the legacy
+`context_partition.json`.
+"""
+
+from __future__ import annotations
+
 import asyncio
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
-from prokaryotes.api_v1.models import ContextPartition, ContextPartitionItem
+from prokaryotes.conversation_v1.models import (
+    Conversation,
+    ConversationMessage,
+    TurnExecution,
+    TurnItem,
+)
 from prokaryotes.eval_v1.models import EvalTask
 from prokaryotes.harness_v1.eval import EvalHarness
+from prokaryotes.harness_v1.script import ScriptRunResult
+
+
+def _fc(call_id: str, name: str = "shell_command") -> TurnItem:
+    return TurnItem(type="function_call", call_id=call_id, name=name, arguments="{}")
+
+
+def _fco(call_id: str, output: str = "ok") -> TurnItem:
+    return TurnItem(type="function_call_output", call_id=call_id, output=output)
+
+
+class TestCountTurns:
+    def test_zero_tool_calls_one_final_message(self):
+        """Pure text completion — one LLM call, no tools."""
+        assert EvalHarness.count_turns([], had_final_assistant=True) == 1
+
+    def test_one_round_then_final(self):
+        """One tool round then a final answer — two LLM calls."""
+        items = [_fc("c1"), _fco("c1")]
+        assert EvalHarness.count_turns(items, had_final_assistant=True) == 2
+
+    def test_two_rounds_then_final(self):
+        items = [_fc("c1"), _fco("c1"), _fc("c2"), _fco("c2")]
+        assert EvalHarness.count_turns(items, had_final_assistant=True) == 3
+
+    def test_max_rounds_hit_no_final(self):
+        """Tool-call loop exhausted max rounds without producing a final message."""
+        items = [_fc("c1"), _fco("c1"), _fc("c2"), _fco("c2")]
+        assert EvalHarness.count_turns(items, had_final_assistant=False) == 2
+
+    def test_parallel_tool_calls_in_one_round(self):
+        """Multiple function_calls before any function_call_output count as one round."""
+        items = [_fc("c1"), _fc("c2"), _fco("c1"), _fco("c2")]
+        assert EvalHarness.count_turns(items, had_final_assistant=True) == 2
+
+    def test_only_function_call_no_output(self):
+        """A tool call without its output yet still counts as one round."""
+        items = [_fc("c1")]
+        assert EvalHarness.count_turns(items, had_final_assistant=False) == 1
+
+    def test_think_call_counts_like_any_tool(self):
+        """Think tool calls are regular function_calls and participate in rounds."""
+        items = [_fc("c1", name="think"), _fco("c1"), _fc("c2", name="shell_command"), _fco("c2")]
+        assert EvalHarness.count_turns(items, had_final_assistant=True) == 3
+
+
+@dataclass
+class FakeScriptRun:
+    """Per-test recipe for what FakeScriptHarness.run() should return."""
+
+    items: list[TurnItem] = field(default_factory=list)
+    final_assistant_text: str = "ok"
 
 
 class FakeScriptHarness:
-    """Stub that optionally runs a side effect instead of calling a real LLM."""
+    """Replaces ScriptHarness for EvalHarness.run_task tests. Records its
+    invocation kwargs and returns the scripted ScriptRunResult."""
 
-    def __init__(self, side_effect=None, partition: ContextPartition | None = None):
+    __test__ = False
+
+    def __init__(self, *_args, **_kwargs):
         self.calls: list[dict] = []
-        self._side_effect = side_effect  # callable(cwd) invoked inside run(), or None
-        self._partition = partition
+        self.return_value: FakeScriptRun | None = FakeScriptRun()
+        self.closed = False
 
-    async def run(self, task: str, cwd: str = None, max_tool_call_rounds=None, on_usage=None, verbose=True):
-        self.calls.append({"task": task, "cwd": cwd})
-        if self._side_effect:
-            self._side_effect(cwd)
-        return self._partition
+    async def run(self, *, task, cwd, max_tool_call_rounds, on_usage, verbose):
+        self.calls.append({"task": task, "cwd": cwd, "max_tool_call_rounds": max_tool_call_rounds})
+        if self.return_value is None:
+            return None
+        conv = Conversation(
+            conversation_uuid="fake-conv",
+            bot_author_id="__bot__",
+            messages=[ConversationMessage(source_id="0.000000", author_id="__user__", content=task)],
+        )
+        if self.return_value.final_assistant_text:
+            conv.messages.append(
+                ConversationMessage(
+                    source_id="1.000000",
+                    author_id="__bot__",
+                    content=self.return_value.final_assistant_text,
+                )
+            )
+        te: TurnExecution | None = None
+        if self.return_value.items:
+            te = TurnExecution(
+                conversation_uuid="fake-conv",
+                bot_message_source_id="1.000000",
+                items=self.return_value.items,
+                completed=True,
+            )
+        return ScriptRunResult(
+            conversation=conv,
+            final_assistant_text=self.return_value.final_assistant_text,
+            turn_execution=te,
+        )
 
     async def close(self):
-        pass
+        self.closed = True
 
 
-def make_harness(fake: FakeScriptHarness) -> EvalHarness:
-    harness = EvalHarness()
-    harness.make_script_harness = lambda: fake
-    return harness
+def _eval_task(
+    *,
+    check_command: str = "true",
+    check_files: dict[str, str] | None = None,
+    prompt: str = "do the thing",
+    setup_command: str | None = None,
+    setup_files: dict[str, str] | None = None,
+    task_id: str = "t1",
+    tier: int = 1,
+    timeout_seconds: int = 30,
+) -> EvalTask:
+    return EvalTask(
+        check_command=check_command,
+        check_files=check_files or {},
+        description="test task",
+        id=task_id,
+        prompt=prompt,
+        setup_command=setup_command,
+        setup_files=setup_files or {},
+        tier=tier,
+        timeout_seconds=timeout_seconds,
+    )
 
 
-def make_partition(*specs: str) -> ContextPartition:
-    return ContextPartition(conversation_uuid="test", items=make_partition_items(*specs))
+@pytest.fixture
+def fake_harness(monkeypatch) -> FakeScriptHarness:
+    """Patch make_script_harness to return a FakeScriptHarness."""
+    fake = FakeScriptHarness()
+    monkeypatch.setattr(EvalHarness, "make_script_harness", lambda self: fake)
+    return fake
 
 
-def make_partition_items(*specs) -> list[ContextPartitionItem]:
-    """Build a list of ContextPartitionItems from (role_or_type, ...) shorthand."""
-    result = []
-    for i, spec in enumerate(specs):
-        if spec == "user":
-            result.append(ContextPartitionItem(role="user", content="hi"))
-        elif spec == "assistant":
-            result.append(ContextPartitionItem(role="assistant", content="ok"))
-        elif spec == "function_call":
-            result.append(ContextPartitionItem(type="function_call", name="tool", arguments="{}", call_id=f"c{i}"))
-        elif spec == "function_call_output":
-            result.append(ContextPartitionItem(type="function_call_output", call_id=f"c{i}", output="ok"))
-    return result
+class TestRunTask:
+    @pytest.mark.asyncio
+    async def test_setup_files_written_before_agent(self, tmp_path, fake_harness):
+        """Setup files must exist in the workspace before the agent's `run()` is called."""
+        observed: list[bool] = []
 
+        async def recording_run(*, task, cwd, max_tool_call_rounds, on_usage, verbose):
+            observed.append((Path(cwd) / "setup.txt").exists())
+            fake_harness.calls.append({"task": task, "cwd": cwd})
+            return None
 
-def simple_task(**kwargs) -> EvalTask:
-    defaults = dict(id="test_task", tier=1, description="test", prompt="do something", check_command="true")
-    return EvalTask(**{**defaults, **kwargs})
+        fake_harness.run = recording_run
+        task = _eval_task(setup_files={"setup.txt": "content"})
 
+        await EvalHarness().run_task(task, tmp_path / "task")
 
-@pytest.mark.asyncio
-async def test_agent_exception_recorded_as_error(tmp_path):
-    class BrokenHarness:
-        async def run(self, **kwargs):
+        assert observed == [True]
+
+    @pytest.mark.asyncio
+    async def test_setup_command_runs_before_agent(self, tmp_path, fake_harness):
+        observed: list[bool] = []
+
+        async def recording_run(*, task, cwd, max_tool_call_rounds, on_usage, verbose):
+            observed.append((Path(cwd) / "marker.txt").exists())
+            fake_harness.calls.append({"task": task, "cwd": cwd})
+            return None
+
+        fake_harness.run = recording_run
+        task = _eval_task(setup_command="touch marker.txt")
+
+        await EvalHarness().run_task(task, tmp_path / "task")
+
+        assert observed == [True]
+
+    @pytest.mark.asyncio
+    async def test_agent_receives_prompt_and_cwd(self, tmp_path, fake_harness):
+        task = _eval_task(prompt="custom prompt")
+
+        await EvalHarness().run_task(task, tmp_path / "task")
+
+        assert fake_harness.calls[0]["task"] == "custom prompt"
+        assert fake_harness.calls[0]["cwd"] == str(tmp_path / "task")
+
+    @pytest.mark.asyncio
+    async def test_agent_exception_recorded_as_error(self, tmp_path, fake_harness):
+        async def raising_run(*, task, cwd, max_tool_call_rounds, on_usage, verbose):
             raise RuntimeError("boom")
 
-        async def close(self):
-            pass
+        fake_harness.run = raising_run
+        task = _eval_task()
 
-    harness = EvalHarness()
-    harness.make_script_harness = lambda: BrokenHarness()
-    result = await harness.run_task(simple_task(), tmp_path)
+        result = await EvalHarness().run_task(task, tmp_path / "task")
 
-    assert result.passed is False
-    assert result.error is not None
-    assert "RuntimeError" in result.error
+        assert result.error is not None
+        assert "RuntimeError" in result.error
+        assert "boom" in result.error
 
+    @pytest.mark.asyncio
+    async def test_timeout_recorded_as_error(self, tmp_path, fake_harness):
+        async def slow_run(*, task, cwd, max_tool_call_rounds, on_usage, verbose):
+            await asyncio.sleep(10)
+            return None
 
-@pytest.mark.asyncio
-async def test_agent_receives_prompt_and_cwd(tmp_path):
-    fake = FakeScriptHarness()
-    task = simple_task(prompt="list the files")
-    await make_harness(fake).run_task(task, tmp_path)
+        fake_harness.run = slow_run
+        task = _eval_task(timeout_seconds=1)
 
-    assert fake.calls[0]["task"] == "list the files"
-    assert fake.calls[0]["cwd"] == str(tmp_path)
+        result = await EvalHarness().run_task(task, tmp_path / "task")
 
+        assert result.error is not None
+        assert "timed out" in result.error
 
-@pytest.mark.asyncio
-async def test_check_command_runs_in_workspace(tmp_path):
-    def side_effect(cwd):
-        (tmp_path / "result.txt").write_text("42")
+    @pytest.mark.asyncio
+    async def test_check_files_invisible_to_agent_but_present_at_check_time(self, tmp_path, fake_harness):
+        observed_during_run: list[bool] = []
 
-    task = simple_task(check_command='grep -qx "42" result.txt')
-    result = await make_harness(FakeScriptHarness(side_effect=side_effect)).run_task(task, tmp_path)
-
-    assert result.passed is True
-
-
-@pytest.mark.asyncio
-async def test_check_fail_recorded(tmp_path):
-    result = await make_harness(FakeScriptHarness()).run_task(simple_task(check_command="false"), tmp_path)
-
-    assert result.passed is False
-    assert result.error is None
-
-
-@pytest.mark.asyncio
-async def test_check_files_invisible_to_agent_but_present_at_check_time(tmp_path):
-    seen_during_agent: list[bool] = []
-
-    def side_effect(cwd):
-        seen_during_agent.append((tmp_path / "check.py").exists())
-
-    task = simple_task(
-        check_command="test -f check.py && grep -qx 'secret' check.py",
-        check_files={"check.py": "secret\n"},
-    )
-    result = await make_harness(FakeScriptHarness(side_effect=side_effect)).run_task(task, tmp_path)
-
-    assert seen_during_agent == [False], "check_files must NOT be visible while the agent runs"
-    assert result.passed is True, "check_files must be present when check_command runs"
-
-
-@pytest.mark.asyncio
-async def test_check_pass_recorded(tmp_path):
-    result = await make_harness(FakeScriptHarness()).run_task(simple_task(check_command="true"), tmp_path)
-
-    assert result.passed is True
-    assert result.error is None
-    assert result.task_id == "test_task"
-    assert result.tier == 1
-
-
-@pytest.mark.asyncio
-async def test_context_partition_not_written_when_none(tmp_path):
-    await make_harness(FakeScriptHarness()).run_task(simple_task(), tmp_path)
-
-    assert not (tmp_path / "context_partition.json").exists()
-
-
-@pytest.mark.asyncio
-async def test_context_partition_written_to_workspace(tmp_path):
-    partition = make_partition("function_call", "function_call_output")
-    fake = FakeScriptHarness(partition=partition)
-    await make_harness(fake).run_task(simple_task(), tmp_path)
-
-    written = ContextPartition.model_validate_json((tmp_path / "context_partition.json").read_text())
-    assert len(written.items) == 2
-
-
-def test_count_turns_no_items():
-    assert EvalHarness.count_turns([]) == 0
-
-
-def test_count_turns_text_only():
-    assert EvalHarness.count_turns(make_partition_items("user", "assistant")) == 1
-
-
-def test_count_turns_text_then_tool():
-    # turn 1: assistant + function_call; turn 2: assistant
-    assert (
-        EvalHarness.count_turns(
-            make_partition_items(
-                "user",
-                "assistant",
-                "function_call",
-                "function_call_output",
-                "assistant",
+        async def recording_run(*, task, cwd, max_tool_call_rounds, on_usage, verbose):
+            observed_during_run.append((Path(cwd) / "check.py").exists())
+            return ScriptRunResult(
+                conversation=Conversation(conversation_uuid="c", bot_author_id="__bot__"),
+                final_assistant_text="done",
             )
+
+        fake_harness.run = recording_run
+        task = _eval_task(check_files={"check.py": "print('hi')"}, check_command="ls check.py")
+
+        result = await EvalHarness().run_task(task, tmp_path / "task")
+
+        # During the agent's run, check.py was NOT present.
+        assert observed_during_run == [False]
+        # By check time, it was.
+        assert "check.py" in result.check_output
+
+    @pytest.mark.asyncio
+    async def test_check_command_runs_in_workspace(self, tmp_path, fake_harness):
+        workspace = tmp_path / "task"
+        task = _eval_task(check_command="pwd")
+
+        result = await EvalHarness().run_task(task, workspace)
+
+        assert str(workspace) in result.check_output
+
+    @pytest.mark.asyncio
+    async def test_check_pass_recorded(self, tmp_path, fake_harness):
+        task = _eval_task(check_command="true")
+
+        result = await EvalHarness().run_task(task, tmp_path / "task")
+
+        assert result.passed is True
+
+    @pytest.mark.asyncio
+    async def test_check_fail_recorded(self, tmp_path, fake_harness):
+        task = _eval_task(check_command="false")
+
+        result = await EvalHarness().run_task(task, tmp_path / "task")
+
+        assert result.passed is False
+
+    @pytest.mark.asyncio
+    async def test_conversation_and_turn_execution_artifacts_written_to_workspace(self, tmp_path, fake_harness):
+        """When the run produces tool calls, BOTH conversation.json AND
+        turn_execution.json are written to the workspace."""
+        fake_harness.return_value = FakeScriptRun(items=[_fc("c1"), _fco("c1")])
+        workspace = tmp_path / "task"
+        task = _eval_task()
+
+        await EvalHarness().run_task(task, workspace)
+
+        assert (workspace / "conversation.json").exists()
+        assert (workspace / "turn_execution.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_turn_execution_artifact_absent_when_run_was_pure_text(self, tmp_path, fake_harness):
+        fake_harness.return_value = FakeScriptRun(items=[])  # no tools
+        workspace = tmp_path / "task"
+        task = _eval_task()
+
+        await EvalHarness().run_task(task, workspace)
+
+        assert (workspace / "conversation.json").exists()
+        assert not (workspace / "turn_execution.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_artifacts_not_written_when_agent_returns_none(self, tmp_path, fake_harness):
+        fake_harness.return_value = None
+        workspace = tmp_path / "task"
+        task = _eval_task()
+
+        await EvalHarness().run_task(task, workspace)
+
+        assert not (workspace / "conversation.json").exists()
+        assert not (workspace / "turn_execution.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_tool_call_count_from_turn_execution(self, tmp_path, fake_harness):
+        fake_harness.return_value = FakeScriptRun(items=[_fc("c1"), _fco("c1"), _fc("c2", name="think"), _fco("c2")])
+        task = _eval_task()
+
+        result = await EvalHarness().run_task(task, tmp_path / "task")
+
+        assert result.tool_call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_tool_call_count_zero_when_no_turn_execution(self, tmp_path, fake_harness):
+        fake_harness.return_value = FakeScriptRun(items=[])
+        task = _eval_task()
+
+        result = await EvalHarness().run_task(task, tmp_path / "task")
+
+        assert result.tool_call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_think_call_count(self, tmp_path, fake_harness):
+        fake_harness.return_value = FakeScriptRun(
+            items=[_fc("c1", name="think"), _fco("c1"), _fc("c2", name="shell_command"), _fco("c2")]
         )
-        == 2
-    )
+        task = _eval_task()
 
+        result = await EvalHarness().run_task(task, tmp_path / "task")
 
-def test_count_turns_tool_only_turns():
-    # turn 1: function_call+function_call; turn 2: function_call; turn 3: assistant
-    assert (
-        EvalHarness.count_turns(
-            make_partition_items(
-                "user",
-                "function_call",
-                "function_call",
-                "function_call_output",
-                "function_call_output",
-                "function_call",
-                "function_call_output",
-                "assistant",
-            )
-        )
-        == 3
-    )
-
-
-@pytest.mark.asyncio
-async def test_setup_command_runs_before_agent(tmp_path):
-    seen_files: list[bool] = []
-
-    def side_effect(cwd):
-        seen_files.append((tmp_path / "created.txt").exists())
-
-    task = simple_task(setup_command=f"touch {tmp_path}/created.txt")
-    await make_harness(FakeScriptHarness(side_effect=side_effect)).run_task(task, tmp_path)
-
-    assert seen_files == [True], "setup_command must run before the agent runs"
-
-
-@pytest.mark.asyncio
-async def test_setup_files_written_before_agent(tmp_path):
-    seen_files: list[bool] = []
-
-    def side_effect(cwd):
-        seen_files.append((tmp_path / "data.txt").exists())
-
-    task = simple_task(setup_files={"data.txt": "hello"})
-    await make_harness(FakeScriptHarness(side_effect=side_effect)).run_task(task, tmp_path)
-
-    assert seen_files == [True], "setup_files must be written before the agent runs"
-    assert (tmp_path / "data.txt").read_text() == "hello"
-
-
-@pytest.mark.asyncio
-async def test_think_call_count(tmp_path):
-    partition = ContextPartition(
-        conversation_uuid="test",
-        items=[
-            ContextPartitionItem(role="user", content="go"),
-            ContextPartitionItem(type="function_call", name="shell_command", arguments="{}", call_id="c1"),
-            ContextPartitionItem(type="function_call", name="think", arguments="{}", call_id="c2"),
-            ContextPartitionItem(type="function_call_output", call_id="c1", output="ok"),
-            ContextPartitionItem(type="function_call_output", call_id="c2", output="ok"),
-        ],
-    )
-    result = await make_harness(FakeScriptHarness(partition=partition)).run_task(simple_task(), tmp_path)
-
-    assert result.tool_call_count == 2
-    assert result.think_call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_timeout_recorded_as_error(tmp_path):
-    class SlowHarness:
-        async def run(self, **kwargs):
-            await asyncio.sleep(9999)
-
-        async def close(self):
-            pass
-
-    harness = EvalHarness()
-    harness.make_script_harness = lambda: SlowHarness()
-    result = await harness.run_task(simple_task(check_command="true", timeout_seconds=1), tmp_path)
-
-    assert result.passed is False
-    assert result.error is not None
-    assert "timed out" in result.error
-
-
-@pytest.mark.asyncio
-async def test_tool_call_count_from_partition(tmp_path):
-    partition = make_partition("function_call", "function_call_output", "function_call", "function_call_output")
-    result = await make_harness(FakeScriptHarness(partition=partition)).run_task(simple_task(), tmp_path)
-
-    assert result.tool_call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_tool_call_count_zero_when_no_partition(tmp_path):
-    result = await make_harness(FakeScriptHarness()).run_task(simple_task(), tmp_path)
-
-    assert result.tool_call_count == 0
-    assert result.think_call_count == 0
-    assert result.turn_count == 0
+        assert result.think_call_count == 1

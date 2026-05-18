@@ -4,13 +4,12 @@ import os
 import uuid
 
 from prokaryotes.api_v1.models import (
-    ContextPartition,
-    ContextPartitionItem,
     FunctionToolCallback,
     LLMClient,
     ToolParameters,
     ToolSpec,
 )
+from prokaryotes.conversation_v1.models import ProjectedItem, TurnItem
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +22,12 @@ class ThinkTool(FunctionToolCallback):
         self.model = model
         self.reasoning_effort = reasoning_effort or os.getenv("THINK_TOOL_REASONING_EFFORT", "low")
 
-    async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None:
+    async def call(self, arguments: str, call_id: str) -> TurnItem | None:
         args = json.loads(arguments)
         context = args["context"]
         goal = args["goal"]
         perspectives = args["perspectives"]
-        # Per-call UUID suffixes prevent payload text from accidentally closing the delimiters.
+        # Per-call UUID suffixes prevent payload text from closing the delimiters.
         s = uuid.uuid4().hex[:8]
         prompt_parts = [
             f"<goal-{s}>\n{goal}\n</goal-{s}>",
@@ -90,16 +89,16 @@ class ThinkTool(FunctionToolCallback):
                 f"You MUST address each perspective in <perspectives-{s}>..</perspectives-{s}> with a dedicated"
                 " labeled section in the order listed. Do not merge, skip, or reorder them."
             )
-        partition = ContextPartition(
-            conversation_uuid=str(uuid.uuid4()),
-            items=[
-                ContextPartitionItem(role="system", content="\n".join(system_parts)),
-                ContextPartitionItem(role="user", content="\n\n".join(prompt_parts)),
-            ],
+        instruction = "\n".join(system_parts)
+        items = [ProjectedItem(type="message", role="user", content="\n\n".join(prompt_parts))]
+        output = await self.llm_client.complete(
+            items=items,
+            instruction=instruction,
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
         )
-        output = await self.llm_client.complete(partition, self.model, reasoning_effort=self.reasoning_effort)
         logger.info(f"{self.__class__.__name__}[{call_id}]:\n{output}")
-        return ContextPartitionItem(
+        return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",

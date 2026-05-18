@@ -24,10 +24,9 @@ async def collect_stream(response: httpx.Response) -> list[dict]:
 async def request_scope(harness):
     """Track background tasks spawned during a request and surface their failures.
 
-    The harness fixture is session-scoped, so harness.background_tasks is shared across
-    tests. We temporarily wrap background_and_forget so this scope records the exact
-    tasks spawned by the current request, even if they finish and remove themselves from
-    harness.background_tasks before the context exits.
+    The harness fixture is session-scoped, so harness.background_tasks is shared across tests. We temporarily wrap
+    background_and_forget so this scope records the exact tasks spawned by the current request, even if they finish
+    and remove themselves from harness.background_tasks before the context exits.
     """
     spawned_tasks: list[asyncio.Task[Any]] = []
     original_background_and_forget = harness.background_and_forget

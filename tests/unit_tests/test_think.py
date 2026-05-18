@@ -27,9 +27,9 @@ async def test_call_omits_perspectives_block_when_empty(mock_client):
     tool = ThinkTool(mock_client, model="test-model")
     await tool.call(make_args(perspectives=[]), call_id="c1")
 
-    partition = mock_client.complete.call_args[0][0]
-    assert "<perspectives-" not in partition.items[1].content
-    assert "perspectives" not in partition.items[0].content
+    kwargs = mock_client.complete.call_args.kwargs
+    assert "<perspectives-" not in kwargs["items"][0].content
+    assert "perspectives" not in kwargs["instruction"]
 
 
 @pytest.mark.asyncio
@@ -37,9 +37,9 @@ async def test_call_wraps_goal_context_and_perspectives_in_uuid_delimiters(mock_
     tool = ThinkTool(mock_client, model="test-model")
     await tool.call(make_args(goal="my goal", context="my context", perspectives=["trade-offs", "risks"]), call_id="c1")
 
-    partition = mock_client.complete.call_args[0][0]
-    user_content = partition.items[1].content
-    system_content = partition.items[0].content
+    kwargs = mock_client.complete.call_args.kwargs
+    user_content = kwargs["items"][0].content
+    system_content = kwargs["instruction"]
 
     goal_match = re.search(r"<goal-([0-9a-f]+)>(.*?)</goal-\1>", user_content, re.DOTALL)
     context_match = re.search(r"<context-([0-9a-f]+)>(.*?)</context-\1>", user_content, re.DOTALL)

@@ -1,68 +1,117 @@
-from unittest.mock import AsyncMock, patch
+"""HTTP /compaction-status handler: response-shape per Redis state."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
-from prokaryotes.api_v1.models import CompactionStatusResponse, ContextPartition
-from tests.unit_tests.context_partition_utils import make_web_base
-
-
-class MockRequest:
-    def __init__(self, session=None):
-        self.session = session if session is not None else {"user": "test"}
+from prokaryotes.web_v1.compaction import CompactionStatusHandler
+from tests.unit_tests._fakes import FakeRedis
 
 
-@pytest.mark.asyncio
-async def test_get_compaction_status_lock_present():
-    wb = make_web_base(redis_data={"compaction_lock:conv-1": "1"})
-    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
-        result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == CompactionStatusResponse(done=False)
+class StubHandler(CompactionStatusHandler):
+    """Concrete handler wired to a FakeRedis for assertion."""
+
+    def __init__(self, redis: FakeRedis) -> None:
+        self._redis = redis
+
+    @property
+    def redis_client(self) -> FakeRedis:  # type: ignore[override]
+        return self._redis
 
 
-@pytest.mark.asyncio
-async def test_get_compaction_status_partition_evicted():
-    wb = make_web_base()
-    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
-        result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == CompactionStatusResponse(done=True)
+def _make_request_with_session() -> MagicMock:
+    """Fake `Request` for the handler. `load_session` is mocked so the test doesn't need starsessions
+    middleware to populate state."""
+    req = MagicMock()
+    req.session = {"user_id": "u1"}
+    return req
 
 
-@pytest.mark.asyncio
-async def test_get_compaction_status_partition_changed():
-    partition = ContextPartition(
-        conversation_uuid="conv-1",
-        partition_uuid="new-uuid",
-        parent_partition_uuid="old-uuid",
-        items=[],
-    )
-    wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
-    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
-        result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == CompactionStatusResponse(done=True, partition_uuid="new-uuid")
+CONVO = "conv-1"
+PENDING = "pending-snap-1"
+
+
+@pytest.fixture(autouse=True)
+def _stub_load_session(monkeypatch):
+    monkeypatch.setattr("prokaryotes.web_v1.compaction.load_session", AsyncMock())
 
 
 @pytest.mark.asyncio
-async def test_get_compaction_status_partition_unchanged():
-    partition = ContextPartition(
-        conversation_uuid="conv-1",
-        partition_uuid="old-uuid",
-        items=[],
-    )
-    wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
-    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
-        result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == CompactionStatusResponse(done=True)
+async def test_lock_present_returns_pending():
+    redis = FakeRedis()
+    await redis.set(f"compaction_lock:{CONVO}", "1")
+    handler = StubHandler(redis)
+
+    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
+
+    assert response.done is False
+    assert response.snapshot_uuid is None
 
 
 @pytest.mark.asyncio
-async def test_get_compaction_status_partition_changed_without_child_uuid():
-    partition = ContextPartition(
-        conversation_uuid="conv-1",
-        partition_uuid="new-uuid",
-        parent_partition_uuid="some-other-parent",
-        items=[],
-    )
-    wb = make_web_base(redis_data={"context_partition:conv-1": partition.model_dump_json()})
-    with patch("prokaryotes.web_v1.compaction.load_session", new_callable=AsyncMock):
-        result = await wb.get_compaction_status(MockRequest(), "conv-1", "old-uuid")
-    assert result == CompactionStatusResponse(done=True)
+async def test_no_relabel_target_returns_done_without_snapshot_uuid():
+    """Lock released, no compaction_status key: client clears the indicator without relabeling (this is the
+    long-idle-past-TTL case too)."""
+    redis = FakeRedis()
+    handler = StubHandler(redis)
+
+    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
+
+    assert response.done is True
+    assert response.snapshot_uuid is None
+
+
+@pytest.mark.asyncio
+async def test_relabel_target_returns_done_with_snapshot_uuid():
+    """compaction_status holds the committed child's snapshot_uuid — relabel target."""
+    redis = FakeRedis()
+    await redis.set(f"compaction_status:{PENDING}", "child-snap-1")
+    handler = StubHandler(redis)
+
+    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
+
+    assert response.done is True
+    assert response.snapshot_uuid == "child-snap-1"
+
+
+@pytest.mark.asyncio
+async def test_empty_sentinel_returns_done_without_snapshot_uuid():
+    """Empty-string sentinel marks "lock released without a relabel target" — distinct from "key never
+    written" but indistinguishable in response shape."""
+    redis = FakeRedis()
+    await redis.set(f"compaction_status:{PENDING}", "")
+    handler = StubHandler(redis)
+
+    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
+
+    assert response.done is True
+    assert response.snapshot_uuid is None
+
+
+@pytest.mark.asyncio
+async def test_long_idle_past_ttl_returns_done_without_snapshot_uuid():
+    """Missing compaction_status key (e.g. TTL elapsed) returns done=True with no snapshot_uuid — same shape
+    as the fresh-no-key case."""
+    redis = FakeRedis()
+    handler = StubHandler(redis)
+
+    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
+
+    assert response.done is True
+    assert response.snapshot_uuid is None
+
+
+@pytest.mark.asyncio
+async def test_missing_session_raises_400():
+    redis = FakeRedis()
+    handler = StubHandler(redis)
+    req = MagicMock()
+    req.session = {}
+
+    with pytest.raises(HTTPException) as excinfo:
+        await handler.get_compaction_status(req, CONVO, PENDING)
+
+    assert excinfo.value.status_code == 400

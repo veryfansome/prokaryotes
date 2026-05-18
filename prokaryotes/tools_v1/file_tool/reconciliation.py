@@ -1,7 +1,11 @@
+"""Per-path reconciliation against on-disk state — retyped for `TurnItem`."""
+
+from __future__ import annotations
+
 from hashlib import sha256
 from pathlib import Path
 
-from prokaryotes.api_v1.models import ContextPartitionItem
+from prokaryotes.conversation_v1.models import TurnItem
 from prokaryotes.tools_v1.file_tool.live_windows import (
     _refresh_live_windows,
     _tombstone_live_windows,
@@ -14,7 +18,7 @@ from prokaryotes.tools_v1.file_tool.reads import _read_text_under_file_tool_lock
 
 
 async def _reconcile_one_tracked_path(
-    items: list[ContextPartitionItem],
+    items: list[TurnItem],
     path_str: str,
     workspace_root: Path,
     *,

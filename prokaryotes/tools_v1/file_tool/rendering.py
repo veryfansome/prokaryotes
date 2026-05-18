@@ -90,8 +90,7 @@ def render_edit_record(
 ) -> str:
     """Render a frozen edit record describing an applied write.
 
-    `Removed` line numbers reference the file before the edit; `Added` line numbers
-    reference the file after.
+    `Removed` line numbers reference the file before the edit; `Added` line numbers reference the file after.
     """
     old_lines = _split_into_lines(old_text)
     new_lines = _split_into_lines(new_text)
@@ -116,9 +115,8 @@ def render_edit_record(
         parts.append("")
         parts.append(_render_diff_block("Added", added_start, added_end, inserted_lines, max_lines))
 
-    # Show a small window of unchanged adjacent lines from the post-edit file so the model
-    # can see boundary artifacts (duplicate fences, stray braces) that a Removed/Added pair
-    # in isolation cannot reveal.
+    # Show a small window of unchanged adjacent lines from the post-edit file so the model can see boundary
+    # artifacts (duplicate fences, stray braces) that a Removed/Added pair in isolation cannot reveal.
     context_window = 3
     context_before_end = payload["start_line"] - 1
     context_after_start = payload["start_line"] + len(inserted_lines)
@@ -183,12 +181,11 @@ def render_view(
     max_lines: int,
     requested_end_line: int | None = None,
 ) -> tuple[int, int, list[str]]:
-    """Return (end_line, line_count, view_lines) for a 1-based inclusive view from
-    `start_line`, either up to `max_lines` lines or through `requested_end_line`,
-    capped at the file's line count.
+    """Return (end_line, line_count, view_lines) for a 1-based inclusive view from `start_line`, either up to
+    `max_lines` lines or through `requested_end_line`, capped at the file's line count.
 
-    `end_line` is the inclusive last line in the view, or `start_line - 1` if the view is
-    empty (e.g. start_line is past EOF or the file is empty)."""
+    `end_line` is the inclusive last line in the view, or `start_line - 1` if the view is empty (e.g. start_line is
+    past EOF or the file is empty)."""
     lines = _split_into_lines(text)
     line_count = len(lines)
     if line_count == 0:

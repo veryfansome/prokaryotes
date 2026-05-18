@@ -2,12 +2,12 @@ import os
 
 from elasticsearch import AsyncElasticsearch
 
-from prokaryotes.search_v1.context_partitions import ContextPartitionSearcher
+from prokaryotes.search_v1.conversations import ConversationSearcher
 from prokaryotes.search_v1.topics import TopicSearcher
 
 
 class SearchClient(
-    ContextPartitionSearcher,
+    ConversationSearcher,
     TopicSearcher,
 ):
     def __init__(self):

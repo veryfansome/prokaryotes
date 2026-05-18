@@ -1,7 +1,7 @@
 """LLM-judge helpers for Tier A behavioral assertions.
 
-Binary, falsifiable verdicts only — `{"passed": bool, "reason": str}`. Each judged
-assertion runs three judge calls and uses 2-of-3 majority for flake insurance.
+Binary, falsifiable verdicts only — `{"passed": bool, "reason": str}`. Each judged assertion runs three judge calls
+and uses 2-of-3 majority for flake insurance.
 """
 from __future__ import annotations
 

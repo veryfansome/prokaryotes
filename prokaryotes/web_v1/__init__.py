@@ -11,9 +11,9 @@ from starsessions import SessionMiddleware
 from starsessions.stores.redis import RedisStore
 
 from prokaryotes.context_v1 import (
-    PartitionCompactor,
-    PartitionSyncer,
-    _partition_can_follow_client,
+    ConversationCompactor,
+    ConversationSyncer,
+    _conversation_can_follow_client,
     get_redis_client,
 )
 from prokaryotes.harness_v1.base import HarnessBase
@@ -42,7 +42,6 @@ class WebBase(HarnessBase, AuthHandler, CompactionStatusHandler):
 
     def init(self):
         self.ensure_runtime_clients()
-
         self.app = FastAPI(
             lifespan=self.lifespan,
             middleware=[
@@ -76,10 +75,7 @@ class WebBase(HarnessBase, AuthHandler, CompactionStatusHandler):
             yield
         finally:
             logger.info("Entering teardown")
-            await asyncio.gather(
-                self.on_stop(),
-                self.postgres_pool.close(),
-            )
+            await asyncio.gather(self.on_stop(), self.postgres_pool.close())
 
     @property
     def postgres_pool(self) -> Pool:
@@ -90,10 +86,10 @@ class WebBase(HarnessBase, AuthHandler, CompactionStatusHandler):
 
 __all__ = [
     "AuthHandler",
-    "PartitionCompactor",
-    "PartitionSyncer",
+    "ConversationCompactor",
+    "ConversationSyncer",
     "WebBase",
-    "_partition_can_follow_client",
+    "_conversation_can_follow_client",
     "get_postgres_pool",
     "get_redis_client",
     "hash_password",

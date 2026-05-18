@@ -3,12 +3,7 @@ from prokaryotes.harness_v1.base import HarnessBase
 
 
 def build_llm_client(impl: str) -> tuple[LLMClient, str]:
-    """Return (uninitialized LLMClient, instruction_role) for the given provider impl.
-
-    Callers decide when to call `client.init_client()`. `ScriptHarness` does it eagerly
-    in `__init__`; `WebHarness` defers to its synchronous `init()` setup phase to match
-    the FastAPI lifecycle.
-    """
+    """Return `(uninitialized LLMClient, instruction_role)` for the given provider impl."""
     if impl == "anthropic":
         from prokaryotes.anthropic_v1 import AnthropicClient
 
@@ -20,7 +15,4 @@ def build_llm_client(impl: str) -> tuple[LLMClient, str]:
     raise ValueError(f"Unsupported impl: {impl!r}")
 
 
-__all__ = [
-    "HarnessBase",
-    "build_llm_client",
-]
+__all__ = ["HarnessBase", "build_llm_client"]

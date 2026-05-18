@@ -3,12 +3,8 @@ import json
 import logging
 import traceback
 
-from prokaryotes.api_v1.models import (
-    ContextPartitionItem,
-    FunctionToolCallback,
-    ToolParameters,
-    ToolSpec,
-)
+from prokaryotes.api_v1.models import FunctionToolCallback, ToolParameters, ToolSpec
+from prokaryotes.conversation_v1.models import TurnItem
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +14,7 @@ class ShellCommandTool(FunctionToolCallback):
 
     max_output_lines = 400
 
-    async def call(self, arguments: str, call_id: str) -> ContextPartitionItem | None:
+    async def call(self, arguments: str, call_id: str) -> TurnItem | None:
         error = ""
         output = ""
         try:
@@ -50,7 +46,7 @@ class ShellCommandTool(FunctionToolCallback):
                 output += "\n\n"
             output += f"An error occurred:\n{error}"
         logger.info(f"{self.__class__.__name__}[{call_id}]:\n{output}")
-        return ContextPartitionItem(
+        return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",

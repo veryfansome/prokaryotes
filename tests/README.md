@@ -1,10 +1,10 @@
 # Test Suite Overview
 
-Tests should make intended behavior easy to find, easy to extend, and safe to refactor. This document describes the organization we want to converge toward.
+Tests should make intended behavior easy to find, easy to extend, and safe to refactor.
 
 ## Test organization
 
-**Default to `test_<module>.py`**: use this when the file primarily validates one production module's contract, invariants, or public helpers. This should be the default because it keeps the mapping from code to tests obvious.
+**Default to `test_<module>.py`**: use this when the file primarily validates one production module's contract, invariants, or public helpers. Keeps the code-to-tests mapping obvious.
 
 **Use `test_<feature>.py` for cross-cutting behavior**: use this when the meaningful unit is a feature or workflow that intentionally spans multiple production modules. Good candidates are flows like compaction, auth/session behavior, or provider-plus-web streaming behavior.
 
@@ -25,6 +25,8 @@ Tests should make intended behavior easy to find, easy to extend, and safe to re
 ## Within-file organization
 
 **Classes**: introduce a class only when a fake or helper needs to share mutable state or implement a multi-method protocol. Otherwise prefer module-level helper functions and plain data builders.
+
+**Comment width**: wrap docstrings and long-form comments at 119 characters; `ruff format` won't reflow them.
 
 **Method type**: use the least powerful form that satisfies the need: instance method if it needs `self`, `@classmethod` if it needs `cls` but not an instance, `@staticmethod` if it belongs on the class but needs neither, and module-level if it has no meaningful connection to any class.
 

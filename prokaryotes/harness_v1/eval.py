@@ -1,11 +1,20 @@
+"""EvalHarness — orchestrates `ScriptHarness` runs over `EvalTask` fixtures.
+
+Tool/think counts derive from `TurnExecution.items`. Each task produces two artifacts: `conversation.json` and
+`turn_execution.json` (the latter only when the run produced tool calls).
+"""
+
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
 import traceback
 from pathlib import Path
 
+from prokaryotes.conversation_v1.models import TurnItem
 from prokaryotes.eval_v1.models import EvalResult, EvalRun, EvalTask
-from prokaryotes.harness_v1.script import ScriptHarness
+from prokaryotes.harness_v1.script import ScriptHarness, ScriptRunResult
 from prokaryotes.utils_v1.llm_utils import ANTHROPIC_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -27,30 +36,29 @@ class EvalHarness:
         self.reasoning_effort = reasoning_effort
 
     @staticmethod
-    def count_turns(items) -> int:
-        """Count LLM API calls (turns) from a partition's item list.
+    def count_turns(turn_items: list[TurnItem], had_final_assistant: bool) -> int:
+        """Count LLM API calls (turns) made by a one-shot script run.
 
-        A turn starts on the first function_call after user/function_call_output items, or on any
-        assistant message. An assistant message and the tool calls it triggers
-        belong to the same turn.
+        Each contiguous group of `function_call` items (separated by `function_call_output` items) is one LLM call
+        producing tool calls. Add one for the terminal LLM call that emitted the final assistant message.
+
+        Examples:
+        - `[]` + had_final=True  →  1 (just the final response, no tools)
+        - `[fc, fco] + final`    →  2 (one tool-round + one final)
+        - `[fc, fco, fc, fco]`   →  2 (two tool-rounds, no final)
         """
-        turns = 0
-        in_turn = False
-        for item in items:
-            if item.role in ("system", "developer", "user"):
-                in_turn = False
-            elif item.type == "function_call":
-                if not in_turn:
-                    turns += 1
-                    in_turn = True
+        rounds = 0
+        in_round = False
+        for item in turn_items:
+            if item.type == "function_call":
+                if not in_round:
+                    rounds += 1
+                    in_round = True
             elif item.type == "function_call_output":
-                in_turn = False
-            elif item.role == "assistant" and item.type == "message":
-                turns += 1
-                in_turn = True
-        return turns
+                in_round = False
+        return rounds + (1 if had_final_assistant else 0)
 
-    def make_script_harness(self):
+    def make_script_harness(self) -> ScriptHarness:
         return ScriptHarness(impl=self.impl, model=self.model, reasoning_effort=self.reasoning_effort)
 
     async def run(
@@ -125,8 +133,9 @@ class EvalHarness:
                 output_tokens += out_toks
 
             harness = self.make_script_harness()
+            result: ScriptRunResult | None = None
             try:
-                partition = await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     harness.run(
                         task=task.prompt,
                         cwd=str(workspace),
@@ -138,13 +147,19 @@ class EvalHarness:
                 )
             finally:
                 await harness.close()
-            if partition is not None:
-                tool_call_count = sum(1 for item in partition.items if item.type == "function_call")
+
+            if result is not None:
+                turn_items = result.turn_execution.items if result.turn_execution else []
+                tool_call_count = sum(1 for item in turn_items if item.type == "function_call")
                 think_call_count = sum(
-                    1 for item in partition.items if item.type == "function_call" and item.name == "think"
+                    1 for item in turn_items if item.type == "function_call" and item.name == "think"
                 )
-                turn_count = self.count_turns(partition.items)
-                (workspace / "context_partition.json").write_text(partition.model_dump_json(indent=2))
+                turn_count = self.count_turns(turn_items, bool(result.final_assistant_text))
+                (workspace / "conversation.json").write_text(result.conversation.model_dump_json(indent=2))
+                if result.turn_execution is not None:
+                    (workspace / "turn_execution.json").write_text(
+                        result.turn_execution.model_dump_json(indent=2)
+                    )
 
             for rel_path, content in task.check_files.items():
                 dest = workspace / rel_path

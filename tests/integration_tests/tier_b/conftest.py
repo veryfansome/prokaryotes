@@ -1,4 +1,8 @@
-"""Tier B fixtures: fake-backed harnesses, authed clients, autouse fake reset."""
+"""Tier B fixtures: fake-backed harnesses, authed clients, autouse fake reset.
+
+Uses the unit-tier LLM fakes (tests.unit_tests._llm_fakes) so the suite keeps exactly one fake-LLM contract.
+"""
+
 from __future__ import annotations
 
 import secrets
@@ -15,7 +19,7 @@ from httpx import ASGITransport
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _web_harness_anthropic():
     from prokaryotes.harness_v1.web import WebHarness
-    from tests.integration_tests.fakes import FakeAnthropicClient
+    from tests.unit_tests._llm_fakes import FakeAnthropicClient
 
     harness = WebHarness(impl="anthropic", static_dir="scripts/static")
     harness.llm_client = FakeAnthropicClient()  # replace BEFORE init()
@@ -27,7 +31,7 @@ async def _web_harness_anthropic():
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _web_harness_openai():
     from prokaryotes.harness_v1.web import WebHarness
-    from tests.integration_tests.fakes import FakeOpenAIClient
+    from tests.unit_tests._llm_fakes import FakeOpenAIClient
 
     harness = WebHarness(impl="openai", static_dir="scripts/static")
     harness.llm_client = FakeOpenAIClient()
@@ -77,11 +81,7 @@ def authed_client(request):
 
 @pytest.fixture(autouse=True)
 def _reset_fake_llm(request):
-    """Reset fake LLM state before each Tier B test.
-
-    Defensive: if a future test omits the `web_harness` fixture, the reset becomes a
-    no-op rather than a hard collection failure on `request.param`.
-    """
+    """Reset fake LLM state before each test."""
     if "web_harness" not in request.fixturenames:
         yield
         return
