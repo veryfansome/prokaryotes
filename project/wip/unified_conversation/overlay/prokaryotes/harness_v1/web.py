@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from starsessions import load_session
 
 from prokaryotes.api_v1.models import FunctionToolCallback, IncomingConversation
+from prokaryotes.context_v1.conversation_sync import AssistantMessageGuardrailError
 from prokaryotes.conversation_v1.models import (
     Conversation,
     TurnExecution,
@@ -87,6 +88,15 @@ class WebHarness(WebBase):
         if len(incoming.messages) == 0:
             raise HTTPException(status_code=400, detail="At least one message is required")
         model = model or self.default_model
+
+        # DAG-scoped guardrail: reject POSTs that fabricate or rewrite bot
+        # messages. Runs before `sync_conversation` so `_partially_normalize`
+        # can't quietly accept hostile `role="assistant"` entries by mapping
+        # them to `bot_author_id`.
+        try:
+            await self.validate_assistant_messages(incoming.conversation_uuid, incoming.messages)
+        except AssistantMessageGuardrailError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         sync_result = await self.sync_conversation(
             conversation_uuid=incoming.conversation_uuid,

@@ -22,7 +22,10 @@ from typing import Any
 
 from redis.exceptions import WatchError
 
-from prokaryotes.context_v1.conversation_sync import ConversationSyncer
+from prokaryotes.context_v1.conversation_sync import (
+    ConversationSyncer,
+    _active_paths_in_turns,
+)
 from prokaryotes.conversation_v1.models import (
     Conversation,
     ConversationMessage,
@@ -30,7 +33,6 @@ from prokaryotes.conversation_v1.models import (
     TurnItem,
     compute_boundary_hash,
     compute_tail_hash,
-    conversation_message_items,
 )
 from prokaryotes.search_v1.conversations import (
     COMPACTION_STATE_COMMITTED,
@@ -148,46 +150,6 @@ class ConversationCompactor(ConversationSyncer):
             await self._write_compaction_status(snapshot.snapshot_uuid, _NO_RELABEL_SENTINEL)
         finally:
             await self.redis_client.delete(lock_key)
-
-    async def _boundary_messages_for_conversation(
-        self,
-        conversation: Conversation,
-    ) -> list[ConversationMessage]:
-        """Return `prefix + this snapshot's non-deleted messages` for boundary
-        hashing. Walks the parent chain when this snapshot has a non-zero
-        `raw_message_start_index`."""
-        prefix: list[ConversationMessage] = []
-        if conversation.parent_snapshot_uuid and conversation.raw_message_start_index > 0:
-            parent_doc = await self.search_client.get_conversation(conversation.parent_snapshot_uuid)
-            if parent_doc:
-                parent_prefix = await self._boundary_messages_for_doc(parent_doc)
-                prefix = parent_prefix[: conversation.raw_message_start_index]
-        return prefix + conversation_message_items(conversation.messages)
-
-    async def _boundary_messages_for_doc(
-        self,
-        doc: dict,
-        memo: dict[str, list[ConversationMessage]] | None = None,
-    ) -> list[ConversationMessage]:
-        from prokaryotes.search_v1.conversations import messages_from_doc
-
-        memo = memo or {}
-        key = doc.get("snapshot_uuid")
-        if key in memo:
-            return memo[key]
-        prefix: list[ConversationMessage] = []
-        raw_start = doc.get("raw_message_start_index") or 0
-        parent_uuid = doc.get("parent_snapshot_uuid")
-        if parent_uuid and raw_start > 0:
-            parent_doc = await self.search_client.get_conversation(parent_uuid)
-            if parent_doc:
-                parent_prefix = await self._boundary_messages_for_doc(parent_doc, memo)
-                prefix = parent_prefix[:raw_start]
-        own_messages = conversation_message_items(messages_from_doc(doc))
-        result = prefix + own_messages
-        if key:
-            memo[key] = result
-        return result
 
     async def _cas_swap_child(
         self,
@@ -358,15 +320,7 @@ def _compute_lift_plan(
     """Determine active paths from the new raw window's TurnExecutions, lift
     pre-tail TurnItems + parent's already-lifted items whose path is active,
     and choose the anchor bot. Invariant: anchor=None iff lifted_turn_items==[]."""
-    active_paths: set[str] = set()
-    for turn in recency_tail_turns.values():
-        for item in turn.items:
-            ann = item.prokaryotes_annotations or {}
-            if ann.get("file_tool.status") == "stale":
-                continue
-            path = ann.get("file_tool.path")
-            if path:
-                active_paths.add(path)
+    active_paths = _active_paths_in_turns(recency_tail_turns)
     if not active_paths:
         return _LiftPlan(lifted_turn_items=[], lifted_anchor_source_id=None)
 

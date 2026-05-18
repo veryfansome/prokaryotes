@@ -90,9 +90,11 @@ class HarnessBase(ConversationCompactor):
         bot_message_content: str,
         turn_items: list[TurnItem],
     ) -> None:
-        """Append the bot's final ConversationMessage to the Conversation and
-        persist the TurnExecution. Called by `stream_and_finalize` once the LLM
-        stream produces its final assistant text."""
+        """Append the bot's final ConversationMessage to the Conversation,
+        persist the TurnExecution, and add the new bot message to the
+        DAG-scoped assistant index so the next POST's guardrail recognizes it.
+        Called by `stream_and_finalize` once the LLM stream produces its final
+        assistant text."""
         conversation.messages.append(
             ConversationMessage(
                 source_id=bot_message_source_id,
@@ -116,6 +118,11 @@ class HarnessBase(ConversationCompactor):
                     completed=True,
                 )
             )
+        await self.refresh_assistant_index_with(
+            conversation.conversation_uuid,
+            bot_message_source_id,
+            bot_message_content,
+        )
 
     async def on_start(self):
         self.ensure_runtime_clients()

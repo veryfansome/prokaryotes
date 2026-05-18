@@ -174,6 +174,56 @@ class ConversationSearcher(ABC):
         except Exception:
             logger.warning("Failed to delete turn-execution %s", bot_message_source_id, exc_info=True)
 
+    async def rekey_turn_execution(self, old_id: str, new_id: str) -> None:
+        """Move a `TurnExecution` doc from `old_id` to `new_id`.
+
+        ES has no native id rename — implement as `index(new_id) + delete(old_id)`.
+        Called when a bot `ConversationMessage` that owns a `TurnExecution` is
+        tombstoned and the next non-tombstoned bot in the same consecutive run
+        becomes the new owner.
+
+        Silent no-op if the old doc doesn't exist (the run-walker may pass us a
+        speculative re-key for an entry that was never persisted yet).
+        """
+        try:
+            result = await self.es.get(index=TURN_EXECUTIONS_INDEX, id=old_id)
+        except Exception:
+            return
+        doc = result["_source"]
+        doc["bot_message_source_id"] = new_id
+        doc["dt_modified"] = datetime.now(UTC).isoformat()
+        try:
+            await self.es.index(index=TURN_EXECUTIONS_INDEX, id=new_id, document=doc)
+            await self.es.delete(index=TURN_EXECUTIONS_INDEX, id=old_id)
+        except Exception:
+            logger.warning(
+                "Failed to rekey turn-execution %s -> %s",
+                old_id,
+                new_id,
+                exc_info=True,
+            )
+
+    async def find_all_conversation_docs(self, conversation_uuid: str) -> list[dict]:
+        """Return every conversation doc for `conversation_uuid` (compacted
+        ancestors and branch siblings alike). Used by the DAG-scoped
+        assistant-message guardrail to populate the known-source_id index.
+
+        Cap is generous (10k) — a single dialogue's DAG sits in the tens of
+        snapshots at most under realistic usage."""
+        response = await self.es.search(
+            index=CONVERSATIONS_INDEX,
+            query={
+                "bool": {
+                    "must": [
+                        {"term": {"conversation_uuid": conversation_uuid}},
+                        _committed_or_legacy_clause(),
+                    ]
+                }
+            },
+            size=10_000,
+        )
+        return [hit["_source"] for hit in response["hits"]["hits"]]
+
     async def find_conversation_by_tail_hash(self, conversation_uuid: str, tail_hash: str) -> dict | None:
         """Heuristic fallback for clients that didn't persist their `snapshot_uuid`:
         given a tail_hash computed from the last N non-bot messages, locate the
