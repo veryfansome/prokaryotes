@@ -221,11 +221,7 @@ class TestCaseABranchMultipleWindowsPerPath:
         assert result.is_new_branch is True
         # Both lifted pairs preserved — multiple windows over the same path is
         # first-class.
-        outputs = [
-            item.output
-            for item in result.conversation.lifted_turn_items
-            if item.type == "function_call_output"
-        ]
+        outputs = [item.output for item in result.conversation.lifted_turn_items if item.type == "function_call_output"]
         assert outputs == ["<window 1>", "<window 2>"]
         assert result.conversation.lifted_anchor_source_id == "1.000001"
 

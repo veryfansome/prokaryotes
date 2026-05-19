@@ -17,6 +17,9 @@
 //
 // The resync handshake (post-commit stream loss recovery) is handled by
 // `applyResyncHandshake(messageTree, pendingUserNodeId, handshake, composeMode)`.
+//
+// `messageTree` here is a `Map<nodeId, node>` to match `scripts/static/ui.js`'s
+// production data structure (`const messageTree = new Map()`).
 
 /**
  * Stamp `source_id` + `snapshot_uuid` on user nodes submitted in this POST.
@@ -44,7 +47,7 @@ export function applyHandshake(messageTree, sentClientIds, handshake) {
     let stamped = 0;
     for (let i = 0; i < sentClientIds.length; i++) {
         const nodeId = sentClientIds[i];
-        const node = messageTree[nodeId];
+        const node = messageTree.get(nodeId);
         if (!node) {
             continue;
         }
@@ -79,7 +82,7 @@ export function applyBotMessage(messageTree, {
     createNodeFn,
 }) {
     const newNodeId = createNodeFn("assistant", fullResponse, parentNodeId);
-    const node = messageTree[newNodeId];
+    const node = messageTree.get(newNodeId);
     if (node) {
         node.source_id = sourceId;
         node.snapshot_uuid = snapshotUuid;
@@ -102,7 +105,7 @@ export function relabelSnapshotUuid(messageTree, oldUuid, newUuid) {
         return 0;
     }
     let count = 0;
-    for (const node of Object.values(messageTree)) {
+    for (const node of messageTree.values()) {
         if (node && node.snapshot_uuid === oldUuid) {
             node.snapshot_uuid = newUuid;
             count += 1;
@@ -118,14 +121,18 @@ export function relabelSnapshotUuid(messageTree, oldUuid, newUuid) {
  *
  * - `composeMode === "send-from-leaf"`: reparent the pending user node so its
  *   parent becomes the last (most recent in `source_id` order) reconstructed
- *   assistant node. Update `activeChildId` along the path so the reparented
- *   user node remains the active leaf. Caller is expected to **auto-retry**
+ *   assistant node. Maintains bidirectional links — removes the pending node
+ *   from its old parent's `children` array, appends it to the new parent's
+ *   `children`, and sets the new parent's `activeChildId` to keep the
+ *   reparented node as the active leaf. Caller is expected to **auto-retry**
  *   the original POST after this returns.
  *
  * - `composeMode === "edit"` or `"regenerate"`: pop the pending user node out
- *   of the tree (caller restores its content to the draft input). Do not
- *   auto-retry; the user authored the message without seeing the recovered
- *   bot history, so silently auto-sending would change their intent.
+ *   of the tree (caller restores its content to the draft input) AND remove
+ *   its id from its parent's `children` array so fork navigation doesn't see
+ *   a dangling reference. Do not auto-retry; the user authored the message
+ *   without seeing the recovered bot history, so silently auto-sending would
+ *   change their intent.
  *
  * Returns `{ assistantNodeIds, draftContent }`. On send-from-leaf,
  * `draftContent` is null. On edit/regenerate, `draftContent` is the popped
@@ -136,24 +143,26 @@ export function applyResyncHandshake(messageTree, {
     handshake,
     composeMode,
     createNodeFn,
-    setActiveChildFn,
 }) {
     const snapshotUuid = handshake.snapshot_uuid;
     const unacked = handshake.unacknowledged_bot_messages || [];
     // Reconstruct assistant nodes in source_id ascending order. Chained entries
     // (a later entry whose parent_source_id matches an earlier entry's source_id)
     // become a chain because each is created under its parent_source_id's node.
+    // `createNodeFn` is expected to wire `children` / `activeChildId` on the
+    // parent (production `createMessageNode` does this); we don't repair the
+    // newly-created chain here.
     const sourceIdToNodeId = _indexBySourceId(messageTree);
     const assistantNodeIds = [];
     let lastReconstructedNodeId = null;
     for (const entry of [...unacked].sort((a, b) =>
         a.source_id < b.source_id ? -1 : a.source_id > b.source_id ? 1 : 0,
     )) {
-        // Resolve parent: prefer a just-reconstructed entry, fall back to the tree
+        // Resolve parent: prefer a just-reconstructed entry, fall back to the tree.
         const parentNodeId =
             sourceIdToNodeId.get(entry.parent_source_id) ?? null;
         const newNodeId = createNodeFn("assistant", entry.content, parentNodeId);
-        const newNode = messageTree[newNodeId];
+        const newNode = messageTree.get(newNodeId);
         if (newNode) {
             newNode.source_id = entry.source_id;
             newNode.snapshot_uuid = snapshotUuid;
@@ -164,27 +173,58 @@ export function applyResyncHandshake(messageTree, {
     }
 
     if (composeMode === "send-from-leaf") {
-        // Reparent the pending user node under the last reconstructed assistant.
-        const pending = messageTree[pendingUserNodeId];
-        if (pending && lastReconstructedNodeId) {
-            pending.parentId = lastReconstructedNodeId;
-            // Update the parent chain's activeChildId so the reparented user node
-            // remains the active leaf for fork navigation.
-            if (setActiveChildFn) {
-                setActiveChildFn(lastReconstructedNodeId, pendingUserNodeId);
-            }
+        // Reparent the pending user node under the last reconstructed assistant —
+        // bidirectionally: detach from old parent's children, attach to new.
+        if (lastReconstructedNodeId) {
+            _reparent(messageTree, pendingUserNodeId, lastReconstructedNodeId);
         }
         return { assistantNodeIds, draftContent: null };
     }
 
-    // edit / regenerate: pop the pending node out, return its content as a draft.
-    const pending = messageTree[pendingUserNodeId];
+    // edit / regenerate: detach the pending node from its parent's `children`,
+    // then drop it from the tree. Return its content as a draft for restore.
+    const pending = messageTree.get(pendingUserNodeId);
     const draftContent = pending ? pending.content : null;
     if (pending) {
-        // Remove the pending node from the tree so navigation skips it.
-        delete messageTree[pendingUserNodeId];
+        _detach(messageTree, pendingUserNodeId);
+        messageTree.delete(pendingUserNodeId);
     }
     return { assistantNodeIds, draftContent };
+}
+
+function _detach(messageTree, nodeId) {
+    const node = messageTree.get(nodeId);
+    if (!node) {
+        return;
+    }
+    const parent = messageTree.get(node.parentId);
+    if (!parent || !Array.isArray(parent.children)) {
+        return;
+    }
+    parent.children = parent.children.filter((id) => id !== nodeId);
+    if (parent.activeChildId === nodeId) {
+        // Fall back to the next-most-recent child, or clear if no siblings remain.
+        parent.activeChildId =
+            parent.children.length > 0
+                ? parent.children[parent.children.length - 1]
+                : null;
+    }
+}
+
+function _reparent(messageTree, nodeId, newParentId) {
+    const node = messageTree.get(nodeId);
+    if (!node) {
+        return;
+    }
+    _detach(messageTree, nodeId);
+    node.parentId = newParentId;
+    const newParent = messageTree.get(newParentId);
+    if (newParent && Array.isArray(newParent.children)) {
+        if (!newParent.children.includes(nodeId)) {
+            newParent.children.push(nodeId);
+        }
+        newParent.activeChildId = nodeId;
+    }
 }
 
 /**
@@ -196,7 +236,7 @@ export function applyResyncHandshake(messageTree, {
  */
 export function buildRequestMessages(messageTree, activePath) {
     return activePath.map((nodeId) => {
-        const node = messageTree[nodeId];
+        const node = messageTree.get(nodeId);
         const msg = { role: node.role, content: node.content };
         if (node.source_id) {
             msg.source_id = node.source_id;
@@ -207,7 +247,7 @@ export function buildRequestMessages(messageTree, activePath) {
 
 function _indexBySourceId(messageTree) {
     const map = new Map();
-    for (const [nodeId, node] of Object.entries(messageTree)) {
+    for (const [nodeId, node] of messageTree.entries()) {
         if (node && node.source_id) {
             map.set(node.source_id, nodeId);
         }

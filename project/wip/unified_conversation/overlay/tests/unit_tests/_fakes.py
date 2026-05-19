@@ -19,6 +19,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from prokaryotes.context_v1.compaction import ConversationCompactor
 from prokaryotes.context_v1.conversation_sync import ConversationSyncer
 from prokaryotes.conversation_v1.models import Conversation, TurnExecution
 
@@ -28,13 +29,22 @@ class FakeRedis:
 
     Values are stored as the bytes the real client would return on `get`; `set` accepts
     either str or bytes. `ex` is recorded but not enforced (tests don't measure TTL).
+
+    `pipeline()` returns a `FakePipeline` supporting watch/multi/execute for the
+    compactor's CAS swap. The pipeline only models the verbs the compactor uses;
+    fanned-out usage from production code paths the compactor doesn't touch is
+    intentionally out of scope.
     """
 
     def __init__(self) -> None:
         self._store: dict[str, bytes] = {}
         self._ex: dict[str, int | None] = {}
+        # Recording hooks.
+        self.set_calls: list[tuple[str, bytes, int | None, bool]] = []
+        self.delete_calls: list[tuple[str, ...]] = []
 
     async def delete(self, *keys: str) -> int:
+        self.delete_calls.append(tuple(keys))
         removed = 0
         for key in keys:
             if key in self._store:
@@ -49,6 +59,9 @@ class FakeRedis:
     async def get(self, key: str) -> bytes | None:
         return self._store.get(key)
 
+    def pipeline(self) -> FakePipeline:
+        return FakePipeline(self)
+
     async def set(
         self,
         key: str,
@@ -62,7 +75,52 @@ class FakeRedis:
             value = value.encode("utf-8")
         self._store[key] = value
         self._ex[key] = ex
+        self.set_calls.append((key, value, ex, nx))
         return True
+
+
+class FakePipeline:
+    """Minimal `redis.asyncio.client.Pipeline` for the compactor's CAS swap.
+
+    Tests inject WATCH contention by subclassing and overriding `execute`. The
+    pipeline doesn't enforce a true MULTI/EXEC semantic — `set` queues into
+    `commands` after `multi()`, and `execute()` flushes them to the underlying
+    FakeRedis. Use `_force_watch_error_on_execute=N` to fail the next N
+    `execute()` calls with WatchError before applying queued writes.
+    """
+
+    def __init__(self, redis: FakeRedis) -> None:
+        self.redis = redis
+        self.commands: list[tuple[str, bytes | str, int | None]] = []
+        self.watched_key: str | None = None
+        self.execute_calls = 0
+
+    async def __aenter__(self) -> FakePipeline:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    async def execute(self) -> None:
+        self.execute_calls += 1
+        for key, value, ex in self.commands:
+            await self.redis.set(key, value, ex=ex)
+        self.commands = []
+
+    async def get(self, key: str) -> bytes | None:
+        return await self.redis.get(key)
+
+    def multi(self) -> None:
+        self.commands = []
+
+    async def reset(self) -> None:
+        self.commands = []
+
+    def set(self, key: str, value: str | bytes, ex: int | None = None) -> None:
+        self.commands.append((key, value, ex))
+
+    async def watch(self, key: str) -> None:
+        self.watched_key = key
 
 
 class FakeSearchClient:
@@ -86,11 +144,7 @@ class FakeSearchClient:
         self.turn_executions.pop(bot_message_source_id, None)
 
     async def find_all_conversation_docs(self, conversation_uuid: str) -> list[dict[str, Any]]:
-        return [
-            doc
-            for doc in self.conversations.values()
-            if doc.get("conversation_uuid") == conversation_uuid
-        ]
+        return [doc for doc in self.conversations.values() if doc.get("conversation_uuid") == conversation_uuid]
 
     async def get_conversation(self, snapshot_uuid: str) -> dict[str, Any] | None:
         return self.conversations.get(snapshot_uuid)
@@ -174,12 +228,29 @@ class FakeSearchClient:
         *,
         is_compacted: bool = False,
         summary: str | None = None,
+        boundary_hash: str | None = None,
+        boundary_message_count: int | None = None,
+        boundary_user_count: int | None = None,
+        tail_hash: str | None = None,
     ) -> None:
         """Test-only setup helper. Persists a Conversation as if produced by the
-        compactor — `is_compacted=True` for parent snapshots, with `summary` set."""
+        compactor — `is_compacted=True` for parent snapshots, with `summary` set.
+
+        Optional boundary fields mirror what the real compactor writes onto the
+        parent snapshot at commit time (`_compact_conversation`). They're
+        required for chain-rebuild validation in `_rebuild_from_chain`.
+        """
         doc = self._build_conversation_doc(conversation, compaction_state="committed")
         doc["is_compacted"] = is_compacted
         doc["summary"] = summary
+        if boundary_hash is not None:
+            doc["boundary_hash"] = boundary_hash
+        if boundary_message_count is not None:
+            doc["boundary_message_count"] = boundary_message_count
+        if boundary_user_count is not None:
+            doc["boundary_user_count"] = boundary_user_count
+        if tail_hash is not None:
+            doc["tail_hash"] = tail_hash
         self.conversations[conversation.snapshot_uuid] = doc
 
     @staticmethod
@@ -214,6 +285,8 @@ class FakeSearchClient:
 class TestableConversationSyncer(ConversationSyncer):
     """Concrete `ConversationSyncer` wired to fakes for unit tests."""
 
+    __test__ = False  # not a pytest test class
+
     def __init__(
         self,
         *,
@@ -243,3 +316,39 @@ def make_syncer() -> tuple[TestableConversationSyncer, FakeRedis, FakeSearchClie
     search = FakeSearchClient()
     syncer = TestableConversationSyncer(redis_client=redis, search_client=search)
     return syncer, redis, search
+
+
+class TestableConversationCompactor(ConversationCompactor):
+    """Concrete `ConversationCompactor` wired to fakes for unit tests."""
+
+    __test__ = False  # not a pytest test class
+
+    def __init__(
+        self,
+        *,
+        redis_client: FakeRedis,
+        search_client: FakeSearchClient,
+        conversation_cache_ex: int = 60 * 60 * 24 * 7,
+    ) -> None:
+        self._redis_client = redis_client
+        self._search_client = search_client
+        self._conversation_cache_ex = conversation_cache_ex
+
+    @property
+    def conversation_cache_ex(self) -> int:
+        return self._conversation_cache_ex
+
+    @property
+    def redis_client(self) -> FakeRedis:  # type: ignore[override]
+        return self._redis_client
+
+    @property
+    def search_client(self) -> FakeSearchClient:  # type: ignore[override]
+        return self._search_client
+
+
+def make_compactor() -> tuple[TestableConversationCompactor, FakeRedis, FakeSearchClient]:
+    redis = FakeRedis()
+    search = FakeSearchClient()
+    compactor = TestableConversationCompactor(redis_client=redis, search_client=search)
+    return compactor, redis, search

@@ -103,7 +103,7 @@ class WebHarness(WebBase):
             snapshot_uuid=incoming.snapshot_uuid,
             bot_author_id=_BOT_AUTHOR_ID,
             incoming=incoming.messages,
-            session_user_id=str(session["chat_user_id"]),
+            session_user_id=str(session["user_id"]),
             session_display_name=session.get("full_name"),
         )
 
