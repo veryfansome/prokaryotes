@@ -10,6 +10,18 @@
  * 8) exports + bootstrap
  */
 
+import {
+    applyBotMessage,
+    applyHandshake,
+    applyResyncHandshake,
+    buildRequestMessages,
+    relabelSnapshotUuid,
+} from './conversation_client.js';
+
+// Cap on resync round-trips per send. A second handshake arrives only if new bot history landed between the
+// retry's POST and its reply; two retries hard-caps cascading failures.
+const MAX_RESYNC_RETRIES = 2;
+
 // 1) constants + exported pure helpers
 const MAX_INPUT_HEIGHT = 200;
 const BOTTOM_SCROLL_TOLERANCE = 2;
@@ -65,11 +77,42 @@ export function parseStreamPayloadLine(line) {
         };
     }
 
-    if ('partition_uuid' in payload) {
-        if (typeof payload.partition_uuid !== 'string') {
-            throw new Error('Invalid stream payload: partition_uuid must be a string');
+    // The handshake is the first stream event under the unified-conversation wire. It carries `snapshot_uuid`
+    // (the authoritative branch for this turn), the `source_id_assignments` map from `client_index` → assigned
+    // `source_id` for submitted user nodes, and optionally `unacknowledged_bot_messages` for the post-commit
+    // stream-loss recovery path.
+    if ('snapshot_uuid' in payload && 'source_id_assignments' in payload) {
+        if (typeof payload.snapshot_uuid !== 'string') {
+            throw new Error('Invalid stream payload: snapshot_uuid must be a string');
         }
-        return { type: 'partition_uuid', partition_uuid: payload.partition_uuid };
+        if (!Array.isArray(payload.source_id_assignments)) {
+            throw new Error('Invalid stream payload: source_id_assignments must be an array');
+        }
+        const handshake = {
+            type: 'handshake',
+            snapshot_uuid: payload.snapshot_uuid,
+            source_id_assignments: payload.source_id_assignments,
+        };
+        if ('unacknowledged_bot_messages' in payload) {
+            if (!Array.isArray(payload.unacknowledged_bot_messages)) {
+                throw new Error('Invalid stream payload: unacknowledged_bot_messages must be an array');
+            }
+            handshake.unacknowledged_bot_messages = payload.unacknowledged_bot_messages;
+        }
+        return handshake;
+    }
+
+    // `bot_message` marks the final commit — the bot's `ConversationMessage` was persisted with the
+    // server-assigned `source_id`. The client must wait for this event before creating an assistant node;
+    // absence (mid-turn abort, max rounds hit) means no assistant node should be created.
+    if ('bot_message' in payload) {
+        if (!payload.bot_message || typeof payload.bot_message !== 'object') {
+            throw new Error('Invalid stream payload: bot_message must be an object');
+        }
+        if (typeof payload.bot_message.source_id !== 'string') {
+            throw new Error('Invalid stream payload: bot_message.source_id must be a string');
+        }
+        return { type: 'bot_message', source_id: payload.bot_message.source_id };
     }
 
     if ('context_pct' in payload) {
@@ -190,7 +233,10 @@ export function createChatApp({
         role: 'root',
         content: '',
         parentId: null,
-        partitionUuid: null,
+        // Nodes carry `snapshot_uuid` (set by handshake/applyHandshake), and `source_id` (server-assigned).
+        // Root has neither.
+        snapshot_uuid: null,
+        source_id: null,
         children: [],
         activeChildId: null,
     });
@@ -211,7 +257,9 @@ export function createChatApp({
             role,
             content,
             parentId,
-            partitionUuid: null,
+            // snapshot_uuid + source_id are stamped by applyHandshake / applyBotMessage.
+            snapshot_uuid: null,
+            source_id: null,
             children: [],
             activeChildId: null,
         };
@@ -315,26 +363,15 @@ export function createChatApp({
         });
     }
 
-    function getLastPartitionUuid(upToNodeId) {
+    function getLastSnapshotUuid(upToNodeId) {
         const pathIds = getPathIdsToNode(upToNodeId);
         for (let i = pathIds.length - 1; i >= 0; i -= 1) {
             const node = getNode(pathIds[i]);
-            if (node && node.partitionUuid) {
-                return node.partitionUuid;
+            if (node && node.snapshot_uuid) {
+                return node.snapshot_uuid;
             }
         }
         return null;
-    }
-
-    function relabelPartitionUuid(oldPartitionUuid, newPartitionUuid) {
-        if (!oldPartitionUuid || !newPartitionUuid || oldPartitionUuid === newPartitionUuid) {
-            return;
-        }
-        messageTree.forEach(node => {
-            if (node.partitionUuid === oldPartitionUuid) {
-                node.partitionUuid = newPartitionUuid;
-            }
-        });
     }
 
     function getUserSiblingIds(nodeId) {
@@ -364,36 +401,60 @@ export function createChatApp({
             .map(entry => entry.text);
     }
 
-    let compactionIndicatorVisible = false;
-    let pendingCompactionPartitionUuid = null;
-    let compactionPollInterval = null;
+    // Compaction-pending indicators are branch-scoped: each pending compaction is keyed on the `snapshot_uuid`
+    // that scheduled it and gets its own poll loop. Concurrent compactions on sibling branches each get an
+    // independent entry, so switching branches mid-compaction never strands a relabel.
+    const compactionPolls = new Map(); // pending snapshot_uuid -> interval id
 
-    function startCompactionPolling(partitionUuid) {
-        stopCompactionPolling();
-        compactionPollInterval = setInterval(async () => {
+    function setCompactionIndicatorHidden(hidden) {
+        const el = doc.getElementById('compaction-indicator');
+        if (el) {
+            el.hidden = hidden;
+        }
+    }
+
+    function startCompactionPolling(snapshotUuid) {
+        // Idempotent: a repeated `compaction_pending` for the same snapshot must not spawn a second loop.
+        if (!snapshotUuid || compactionPolls.has(snapshotUuid)) {
+            return;
+        }
+        const intervalId = setInterval(async () => {
             try {
                 const params = new URLSearchParams({
                     conversation_uuid: conversationUuid,
-                    pending_partition_uuid: partitionUuid,
+                    pending_snapshot_uuid: snapshotUuid,
                 });
                 const res = await fetchImpl(`${apiUrl}/compaction-status?${params}`);
-                if (!res.ok) { stopCompactionPolling(); return; }
+                // Transient failure: the compaction is still scheduled server-side. Keep the loop alive so the
+                // relabel still lands — never clear the indicator off a failed poll (polling is the only
+                // clearing path).
+                if (!res.ok) {
+                    return;
+                }
                 const data = await res.json();
                 if (data.done) {
-                    if (typeof data.partition_uuid === 'string' && data.partition_uuid) {
-                        relabelPartitionUuid(partitionUuid, data.partition_uuid);
+                    if (typeof data.snapshot_uuid === 'string' && data.snapshot_uuid) {
+                        relabelSnapshotUuid(messageTree, snapshotUuid, data.snapshot_uuid);
                     }
-                    clearCompactionIndicator();
+                    stopCompactionPolling(snapshotUuid);
                 }
             } catch {
-                stopCompactionPolling();
+                // Transient network error — keep polling.
             }
         }, 5_000);
+        compactionPolls.set(snapshotUuid, intervalId);
     }
 
-    function stopCompactionPolling() {
-        clearInterval(compactionPollInterval);
-        compactionPollInterval = null;
+    function stopCompactionPolling(snapshotUuid) {
+        const intervalId = compactionPolls.get(snapshotUuid);
+        if (intervalId !== undefined) {
+            clearInterval(intervalId);
+            compactionPolls.delete(snapshotUuid);
+        }
+        // The shared DOM indicator hides only once no branch has a pending compaction left.
+        if (compactionPolls.size === 0) {
+            setCompactionIndicatorHidden(true);
+        }
     }
 
     function setContextFill(pct) {
@@ -405,24 +466,9 @@ export function createChatApp({
         }
     }
 
-    function showCompactionIndicator(partitionUuid) {
-        const el = doc.getElementById('compaction-indicator');
-        if (el) {
-            el.hidden = false;
-        }
-        compactionIndicatorVisible = true;
-        pendingCompactionPartitionUuid = partitionUuid;
-        startCompactionPolling(partitionUuid);
-    }
-
-    function clearCompactionIndicator() {
-        stopCompactionPolling();
-        const el = doc.getElementById('compaction-indicator');
-        if (el) {
-            el.hidden = true;
-        }
-        compactionIndicatorVisible = false;
-        pendingCompactionPartitionUuid = null;
+    function showCompactionIndicator(snapshotUuid) {
+        setCompactionIndicatorHidden(false);
+        startCompactionPolling(snapshotUuid);
     }
 
     // 4) rendering helpers
@@ -1032,13 +1078,23 @@ export function createChatApp({
             return;
         }
 
+        // Capture the regenerated branch's leaf BEFORE detaching activeChildId, so the request's
+        // `snapshot_uuid` reflects the branch in view rather than a shared ancestor a sibling branch may have
+        // restamped.
+        const snapshotAnchorNodeId = getCurrentLeafId();
         parentNode.activeChildId = null;
         editingParentId = null;
         editingMessageId = null;
         editSession = null;
         renderMessages();
 
-        await generateAssistantResponse(parentNode.id);
+        // Regenerate has no pending user node — the user message already exists and was acked. On resync,
+        // applyResyncHandshake reconstructs unacked bots but pops nothing.
+        await generateAssistantResponse(parentNode.id, {
+            composeMode: 'regenerate',
+            pendingUserNodeId: null,
+            snapshotAnchorNodeId,
+        });
     }
 
     async function sendMessage() {
@@ -1047,7 +1103,14 @@ export function createChatApp({
             return;
         }
 
+        // "edit" mode = user typed a new fork under a non-leaf node. "send-from-leaf" = user typed at the tail
+        // of the active path.
+        const composeMode = editingParentId !== null ? 'edit' : 'send-from-leaf';
         const parentNodeId = editingParentId !== null ? editingParentId : getCurrentLeafId();
+        // Capture the viewed branch's leaf BEFORE createMessageNode rewrites activeChildId. This anchors the
+        // request's `snapshot_uuid` to the branch the user is on — in edit mode `parentNodeId` is a shared node
+        // and would otherwise yield whichever sibling branch last stamped it.
+        const snapshotAnchorNodeId = getCurrentLeafId();
 
         editSession = null;
         editingParentId = null;
@@ -1062,16 +1125,29 @@ export function createChatApp({
         }
 
         renderMessages();
-        await generateAssistantResponse(userNode.id);
+        await generateAssistantResponse(userNode.id, {
+            composeMode,
+            pendingUserNodeId: userNode.id,
+            snapshotAnchorNodeId,
+        });
     }
 
     // 6) network/stream side effects
-    async function generateAssistantResponse(parentNodeId) {
+    async function generateAssistantResponse(parentNodeId, {
+        composeMode = 'send-from-leaf',
+        pendingUserNodeId = null,
+        resyncRetryCount = 0,
+        snapshotAnchorNodeId = null,
+    } = {}) {
         isGenerating = true;
         isAutoScrollSuspended = false;
         sendButton.disabled = true;
 
         let didCompleteResponse = false;
+        let errorOccurred = false;
+        // Captures resync state observed inside the stream so the finally / post-loop block can dispatch the
+        // right recovery action without re-parsing.
+        let resyncState = null;
 
         const pendingMessageDiv = doc.createElement('div');
         pendingMessageDiv.className = 'message assistant';
@@ -1092,6 +1168,9 @@ export function createChatApp({
 
         maybeAutoScrollDuringGeneration();
 
+        // Capture the client-side node ids in the same order they appear in the request payload. The
+        // handshake's `source_id_assignments` references positions in this array via `client_index`.
+        const sentClientIds = getPathIdsToNode(parentNodeId);
         try {
             const query = buildChatQueryParams(timeZone, latitude, longitude);
             const response = await fetchImpl(`${apiUrl}/chat?${query}`, {
@@ -1101,8 +1180,13 @@ export function createChatApp({
                 },
                 body: JSON.stringify({
                     conversation_uuid: conversationUuid,
-                    partition_uuid: getLastPartitionUuid(parentNodeId),
-                    messages: getConversationMessagesUpTo(parentNodeId),
+                    // Anchor the snapshot lookup on the leaf of the branch the user is viewing, not on
+                    // `parentNodeId` — for edit/regenerate `parentNodeId` is a shared-prefix node whose
+                    // `snapshot_uuid` may have been restamped by a sibling branch's POST.
+                    snapshot_uuid: getLastSnapshotUuid(snapshotAnchorNodeId ?? parentNodeId),
+                    // `buildRequestMessages` emits `source_id` only for server-stamped nodes, so the
+                    // DAG-scoped guardrail recognizes the echoed assistant entries on multi-turn POSTs.
+                    messages: buildRequestMessages(messageTree, sentClientIds),
                 }),
             });
 
@@ -1117,7 +1201,10 @@ export function createChatApp({
             let fullResponse = '';
             const activityEntries = [];
             let streamBuffer = '';
-            let receivedPartitionUuid = null;
+            let receivedSnapshotUuid = null;
+            // `bot_message` source_id captured from the stream. Required before the assistant node is created
+            // — its presence is the commit signal.
+            let receivedBotSourceId = null;
 
             const renderPendingActivity = () => {
                 activityContainer.innerHTML = '';
@@ -1133,16 +1220,41 @@ export function createChatApp({
                     return;
                 }
 
-                if (parsed.type === 'partition_uuid') {
+                if (parsed.type === 'handshake') {
+                    // Stamp snapshot_uuid + assigned source_ids onto submitted user nodes. The polling
+                    // endpoint is the only indicator-clearing path, so a sibling-branch send during pending
+                    // compaction must NOT disturb the indicator.
+                    receivedSnapshotUuid = parsed.snapshot_uuid;
+                    applyHandshake(messageTree, sentClientIds, parsed);
+                    console.log('Snapshot UUID:', receivedSnapshotUuid);
+                    // Resync handshake: server detected post-commit stream loss and closed the stream without
+                    // invoking the LLM. Apply the repair (reconstruct unacked bots, fix the pending user per
+                    // composeMode) once the stream is drained, then auto-retry or restore the draft.
                     if (
-                        compactionIndicatorVisible
-                        && pendingCompactionPartitionUuid
-                        && parsed.partition_uuid !== pendingCompactionPartitionUuid
+                        Array.isArray(parsed.unacknowledged_bot_messages)
+                        && parsed.unacknowledged_bot_messages.length > 0
                     ) {
-                        clearCompactionIndicator();
+                        const result = applyResyncHandshake(messageTree, {
+                            pendingUserNodeId,
+                            handshake: parsed,
+                            composeMode,
+                            createNodeFn: (role, content, parentId) => {
+                                const created = createMessageNode(role, content, parentId);
+                                return created ? created.id : null;
+                            },
+                        });
+                        resyncState = {
+                            assistantNodeIds: result.assistantNodeIds,
+                            draftContent: result.draftContent,
+                        };
                     }
-                    receivedPartitionUuid = parsed.partition_uuid;
-                    console.log('Partition UUID:', receivedPartitionUuid);
+                    return;
+                }
+
+                if (parsed.type === 'bot_message') {
+                    // Final-commit marker. Capture the assigned source_id; the assistant node is created
+                    // post-loop only when this is set.
+                    receivedBotSourceId = parsed.source_id;
                     return;
                 }
 
@@ -1152,7 +1264,7 @@ export function createChatApp({
                 }
 
                 if (parsed.type === 'compaction_pending') {
-                    showCompactionIndicator(receivedPartitionUuid);
+                    showCompactionIndicator(receivedSnapshotUuid);
                     return;
                 }
 
@@ -1203,21 +1315,39 @@ export function createChatApp({
                 processLine(finalLine);
             }
 
-            const assistantNode = createMessageNode('assistant', fullResponse, parentNodeId);
-            if (assistantNode && receivedPartitionUuid) {
-                assistantNode.partitionUuid = receivedPartitionUuid;
+            // The assistant node is created only when the server emitted
+            // `bot_message` — that's the exactly-once commit signal. If the stream
+            // ended without one (mid-turn abort, max-rounds hit, error), no
+            // assistant node should appear in the tree.
+            let assistantNode = null;
+            if (receivedBotSourceId) {
+                const newNodeId = applyBotMessage(messageTree, {
+                    parentNodeId,
+                    fullResponse,
+                    snapshotUuid: receivedSnapshotUuid,
+                    sourceId: receivedBotSourceId,
+                    // applyBotMessage delegates node creation back to createMessageNode so children/activeChildId
+                    // are wired correctly by the existing tree code (it requires the parent's
+                    // children/activeChildId update).
+                    createNodeFn: (role, content, parentId) => {
+                        const created = createMessageNode(role, content, parentId);
+                        return created ? created.id : null;
+                    },
+                });
+                assistantNode = getNode(newNodeId);
             }
             if (assistantNode && activityEntries.length > 0) {
                 activityByNodeId.set(assistantNode.id, [...activityEntries]);
             }
-            didCompleteResponse = true;
+            didCompleteResponse = Boolean(assistantNode);
         } catch (error) {
-            if (compactionIndicatorVisible) {
-                clearCompactionIndicator();
-            }
+            // A stream error does not abort an already-scheduled compaction: if `compaction_pending` was
+            // emitted, the server's background swap is running regardless. Leave its poll loop alone so the
+            // relabel still lands — polling is the only indicator-clearing path.
             console.error('Error:', error);
             activityContainer.hidden = true;
             assistantContent.innerHTML = `<div class="error-message">Error: ${error.message}</div>`;
+            errorOccurred = true;
         } finally {
             loadingIndicator.style.display = 'none';
             isGenerating = false;
@@ -1226,6 +1356,42 @@ export function createChatApp({
                 renderMessages({ scrollToBottom: !isAutoScrollSuspended });
                 if (!isAutoScrollSuspended) {
                     scrollToBottomWhereInputIs();
+                }
+            } else if (errorOccurred) {
+                // Keep the pending bubble visible — the catch block painted an .error-message into it, and
+                // `renderMessages()` would wipe it. The conversation tree has no assistant node, so the user
+                // will see the error in place of the would-be reply.
+            } else {
+                // Clean non-commit path (mid-turn abort, max-rounds, or resync). The pending DOM bubble
+                // carries text/activity that's NOT in the tree — remove it so the displayed conversation
+                // matches storage. `renderMessages()` then rebuilds chatWrapper from the tree (which, on
+                // resync, includes the reconstructed unacked bots and the reparented pending user for
+                // send-from-leaf).
+                if (pendingMessageDiv.parentNode) {
+                    pendingMessageDiv.parentNode.removeChild(pendingMessageDiv);
+                }
+                renderMessages({ scrollToBottom: !isAutoScrollSuspended });
+            }
+            if (resyncState) {
+                if (composeMode === 'send-from-leaf' && resyncRetryCount < MAX_RESYNC_RETRIES) {
+                    // Auto-retry: the pending user node is now reparented under the recovered bot; its
+                    // source_id will get assigned on the retry's handshake. Re-use the same pendingUserNodeId
+                    // since it's still the parent for the bot's reply.
+                    await generateAssistantResponse(pendingUserNodeId, {
+                        composeMode,
+                        pendingUserNodeId,
+                        resyncRetryCount: resyncRetryCount + 1,
+                    });
+                } else if (
+                    (composeMode === 'edit' || composeMode === 'regenerate')
+                    && typeof resyncState.draftContent === 'string'
+                    && resyncState.draftContent
+                ) {
+                    // Restore the popped pending user's content to the input box so the user can re-author
+                    // against the recovered state.
+                    chatInput.value = resyncState.draftContent;
+                    setInputHeight(chatInput);
+                    updateSendButtonState();
                 }
             }
         }

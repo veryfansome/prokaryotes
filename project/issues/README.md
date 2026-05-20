@@ -135,4 +135,4 @@ project/
       README.md                  ← issue description, fix, and second opinion
 ```
 
-Issue folder names use kebab-case and describe the problem, not the fix: `dead-put-partition-kwargs`, not `remove-put-partition-kwargs`.
+Issue folder names use kebab-case and describe the problem, not the fix: `dead-put-conversation-kwargs`, not `remove-put-conversation-kwargs`.

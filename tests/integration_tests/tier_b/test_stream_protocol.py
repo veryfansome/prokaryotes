@@ -1,11 +1,11 @@
 """Tier B scenario 9: NDJSON event-type ordering across providers.
 
-The chat-flow and compaction-flow tests already check provider-specific event order
-inside individual scenarios; this file pins down the cross-cutting invariants
-(`partition_uuid` first; tool-round order matches the provider contract;
-`compaction_pending` is terminal when present; final-round `context_pct`
-precedes any `text_delta`).
+Unified-conversation wire:
+- First event is a handshake (`{snapshot_uuid, source_id_assignments, ...}`).
+- `bot_message` marks final commit with the server-assigned bot `source_id`.
+- `compaction_pending`, when present, is the last persistence-relevant event.
 """
+
 from __future__ import annotations
 
 import json
@@ -13,8 +13,8 @@ from uuid import uuid4
 
 import pytest
 
-from tests.integration_tests.fakes import LLMRound, LLMScript, ToolCallSpec
 from tests.integration_tests.stream_utils import collect_stream, request_scope
+from tests.unit_tests._llm_fakes import LLMRound, LLMScript, ToolCallSpec
 
 pytestmark = pytest.mark.integration
 
@@ -26,6 +26,10 @@ def _event_types(events: list[dict]) -> list[str]:
     return types
 
 
+def _is_handshake(event: dict) -> bool:
+    return "snapshot_uuid" in event and "source_id_assignments" in event
+
+
 async def _post_events(
     web_harness,
     authed_client,
@@ -33,12 +37,12 @@ async def _post_events(
     *,
     messages: list[dict],
     rounds: list[LLMRound],
-    partition_uuid: str | None = None,
+    snapshot_uuid: str | None = None,
 ) -> list[dict]:
     web_harness.llm_client.set_script(LLMScript(rounds=rounds))
     payload: dict = {"conversation_uuid": conversation_uuid, "messages": messages}
-    if partition_uuid is not None:
-        payload["partition_uuid"] = partition_uuid
+    if snapshot_uuid is not None:
+        payload["snapshot_uuid"] = snapshot_uuid
     async with request_scope(web_harness):
         async with authed_client.stream("POST", "/chat", json=payload) as response:
             return await collect_stream(response)
@@ -50,10 +54,10 @@ async def _post_events(
     indirect=True,
 )
 @pytest.mark.asyncio(loop_scope="session")
-async def test_partition_uuid_arrives_first(web_harness, authed_client):
-    web_harness.llm_client.set_script(
-        LLMScript(rounds=[LLMRound(text_deltas=["x"], stop_reason="end_turn")])
-    )
+async def test_handshake_arrives_first(web_harness, authed_client):
+    """First NDJSON event is a handshake carrying `snapshot_uuid` and `source_id_assignments` — no top-level
+    `partition_uuid` event."""
+    web_harness.llm_client.set_script(LLMScript(rounds=[LLMRound(text_deltas=["x"], stop_reason="end_turn")]))
     payload = {
         "conversation_uuid": str(uuid4()),
         "messages": [{"role": "user", "content": "hi"}],
@@ -61,8 +65,27 @@ async def test_partition_uuid_arrives_first(web_harness, authed_client):
     async with request_scope(web_harness):
         async with authed_client.stream("POST", "/chat", json=payload) as response:
             events = await collect_stream(response)
-    types = _event_types(events)
-    assert types[0] == "partition_uuid"
+    assert _is_handshake(events[0])
+
+
+@pytest.mark.parametrize(
+    "web_harness, authed_client",
+    [("anthropic", "anthropic"), ("openai", "openai")],
+    indirect=True,
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_bot_message_marks_final_commit(web_harness, authed_client):
+    """A successful turn emits exactly one `bot_message` event with a fresh server-assigned `source_id`."""
+    events = await _post_events(
+        web_harness,
+        authed_client,
+        str(uuid4()),
+        messages=[{"role": "user", "content": "hi"}],
+        rounds=[LLMRound(text_deltas=["a", "b", "c"], stop_reason="end_turn")],
+    )
+    bot_messages = [e for e in events if "bot_message" in e]
+    assert len(bot_messages) == 1
+    assert "source_id" in bot_messages[0]["bot_message"]
 
 
 @pytest.mark.parametrize(
@@ -92,6 +115,8 @@ async def test_final_round_context_pct_precedes_text_deltas(web_harness, authed_
 )
 @pytest.mark.asyncio(loop_scope="session")
 async def test_tool_round_order_matches_provider(web_harness, authed_client, request):
+    """Provider-specific tool-round ordering: Anthropic emits context_pct before progress_message+tool_call; OpenAI
+    emits tool_call first."""
     conversation_uuid = str(uuid4())
     provider = request.node.callspec.params["web_harness"]
     events = await _post_events(
@@ -114,25 +139,15 @@ async def test_tool_round_order_matches_provider(web_harness, authed_client, req
             LLMRound(text_deltas=["Done."], stop_reason="end_turn"),
         ],
     )
-    types = _event_types(events)
+    # Skip the handshake; isolate the remaining event vocabulary.
+    assert _is_handshake(events[0])
+    types_after = _event_types(events[1:])
     if provider == "anthropic":
-        assert types == [
-            "partition_uuid",
-            "context_pct",
-            "progress_message",
-            "tool_call",
-            "context_pct",
-            "text_delta",
-        ]
+        # context_pct → progress_message → tool_call → context_pct → text_delta → bot_message
+        assert types_after[:3] == ["context_pct", "progress_message", "tool_call"]
     else:
-        assert types == [
-            "partition_uuid",
-            "tool_call",
-            "context_pct",
-            "progress_message",
-            "context_pct",
-            "text_delta",
-        ]
+        # tool_call → context_pct → progress_message → context_pct → text_delta → bot_message
+        assert types_after[:3] == ["tool_call", "context_pct", "progress_message"]
 
 
 @pytest.mark.parametrize(
@@ -142,23 +157,35 @@ async def test_tool_round_order_matches_provider(web_harness, authed_client, req
 )
 @pytest.mark.asyncio(loop_scope="session")
 async def test_compaction_pending_is_last(web_harness, authed_client):
+    """When compaction triggers, `compaction_pending` is the final NDJSON event."""
     conversation_uuid = str(uuid4())
     messages: list[dict] = []
-    partition_uuid: str | None = None
+    snapshot_uuid: str | None = None
+    bot_source_id: str | None = None
 
     for i in range(3):
+        if bot_source_id is not None:
+            # Echo previous assistant with its server-assigned source_id.
+            pass
         messages.append({"role": "user", "content": f"u{i + 1}"})
         events = await _post_events(
             web_harness,
             authed_client,
             conversation_uuid,
             messages=messages,
-            partition_uuid=partition_uuid,
+            snapshot_uuid=snapshot_uuid,
             rounds=[LLMRound(text_deltas=[f"a{i + 1}"], stop_reason="end_turn", input_tokens=500)],
         )
-        partition_uuid = events[0]["partition_uuid"]
-        assistant_text = "".join(e["text_delta"] for e in events if "text_delta" in e)
-        messages.append({"role": "assistant", "content": assistant_text})
+        snapshot_uuid = events[0]["snapshot_uuid"]
+        # Apply source_id_assignments from the handshake.
+        for a in events[0].get("source_id_assignments", []):
+            messages[a["client_index"]]["source_id"] = a["source_id"]
+        # Capture the bot's source_id and echo on next round.
+        bot_event = next((e for e in events if "bot_message" in e), None)
+        if bot_event:
+            bot_source_id = bot_event["bot_message"]["source_id"]
+            assistant_text = "".join(e["text_delta"] for e in events if "text_delta" in e)
+            messages.append({"role": "assistant", "content": assistant_text, "source_id": bot_source_id})
 
     messages.append({"role": "user", "content": "u4"})
     events = await _post_events(
@@ -166,7 +193,7 @@ async def test_compaction_pending_is_last(web_harness, authed_client):
         authed_client,
         conversation_uuid,
         messages=messages,
-        partition_uuid=partition_uuid,
+        snapshot_uuid=snapshot_uuid,
         rounds=[LLMRound(text_deltas=["a4"], stop_reason="end_turn", input_tokens=5000)],
     )
     types = _event_types(events)

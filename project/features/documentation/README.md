@@ -15,7 +15,7 @@ The repo's docs split cleanly on two axes:
 - **Code-tree docs** describe the directory they sit in: what's here, what its public surface is, what non-obvious contracts callers and editors need to respect.
 - **Project docs** under `project/` describe work — features being built, issues being tracked, ideas being explored. These describe *behavior* and *process*, not directory structure.
 
-A given concept usually has exactly one home along each axis. For example, the compaction feature lives at `project/features/compaction/README.md` (cross-module behavioral spec); the code that implements it lives across `prokaryotes/web_v1/`, `prokaryotes/api_v1/`, `prokaryotes/search_v1/`, and each of those code-tree docs only needs to mention compaction at the level of "this module participates in compaction; see the feature doc."
+A given concept usually has exactly one home along each axis. For example, the compaction feature lives at `project/features/compaction/README.md` (cross-module behavioral spec); the code that implements it lives across `prokaryotes/context_v1/`, `prokaryotes/conversation_v1/`, `prokaryotes/search_v1/`, and `prokaryotes/web_v1/`, and each of those code-tree docs only needs to mention compaction at the level of "this module participates in compaction; see the feature doc."
 
 ## Code-tree docs
 
@@ -29,7 +29,7 @@ Stays stable. Updates only when the build/run surface changes.
 
 Each top-level tree gets a README that orients the reader to that subtree:
 
-- `prokaryotes/README.md` — codebase map: one line per `*_v1/` module describing its role, plus cross-cutting conventions (the `ContextPartition` lingua franca, code-organization rules) and the dependency table.
+- `prokaryotes/README.md` — codebase map: one line per `*_v1/` module describing its role, plus cross-cutting conventions (the `Conversation` lingua franca, code-organization rules) and the dependency table.
 - `scripts/README.md` — entry-point scripts (`cli.py`, `eval.py`, `web.py`, `search_init.py`) and their roles.
 - `tests/README.md` — testing policy: organization, design principles, hermeticity rules.
 - `database/README.md` — migration policy and layout.

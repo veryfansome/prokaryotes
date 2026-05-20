@@ -1,4 +1,8 @@
-"""Tier B scenarios 1–3: single-turn happy path, multi-turn continuation, tool-call round-trip."""
+"""Tier B scenarios 1–3: single-turn happy path, multi-turn continuation, tool-call round-trip.
+
+Unified-conversation wire: handshake first event, bot_message final commit, snapshot_uuid + source_id_assignments.
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,22 +11,17 @@ from uuid import uuid4
 
 import pytest
 
-from prokaryotes.api_v1.models import ContextPartition
-from tests.integration_tests.fakes import LLMRound, LLMScript, ToolCallSpec
-from tests.integration_tests.stream_utils import collect_stream, request_scope
+from prokaryotes.conversation_v1.models import Conversation
+from tests.integration_tests.tier_b._helpers import (
+    event_types,
+    is_handshake,
+    post_chat,
+    post_chat_and_advance,
+    user_message,
+)
+from tests.unit_tests._llm_fakes import LLMRound, LLMScript, ToolCallSpec
 
 pytestmark = pytest.mark.integration
-
-
-def _event_types(events: list[dict]) -> list[str]:
-    types = []
-    for ev in events:
-        types.extend(ev.keys())
-    return types
-
-
-def _user_message(content: str) -> dict:
-    return {"role": "user", "content": content}
 
 
 @pytest.mark.parametrize(
@@ -32,38 +31,28 @@ def _user_message(content: str) -> dict:
 )
 @pytest.mark.asyncio(loop_scope="session")
 async def test_single_turn_happy_path(web_harness, authed_client):
-    web_harness.llm_client.set_script(
-        LLMScript(rounds=[LLMRound(text_deltas=["Hel", "lo!"], stop_reason="end_turn")])
-    )
+    web_harness.llm_client.set_script(LLMScript(rounds=[LLMRound(text_deltas=["Hel", "lo!"], stop_reason="end_turn")]))
     conversation_uuid = str(uuid4())
-    payload = {
-        "conversation_uuid": conversation_uuid,
-        "messages": [_user_message("Hi")],
-    }
 
-    async with request_scope(web_harness):
-        async with authed_client.stream("POST", "/chat", json=payload) as response:
-            assert response.status_code == 200
-            events = await collect_stream(response)
+    record = await post_chat(web_harness, authed_client, conversation_uuid, [user_message("Hi")])
 
-    types = _event_types(events)
-    assert types[0] == "partition_uuid"
+    types = event_types(record.events)
+    assert is_handshake(record.events[0])
     ctx_idx = types.index("context_pct")
     first_delta_idx = types.index("text_delta")
     assert ctx_idx < first_delta_idx
     assert "compaction_pending" not in types
-    text_concat = "".join(e["text_delta"] for e in events if "text_delta" in e)
-    assert text_concat == "Hello!"
+    assert record.assistant_text == "Hello!"
+    assert record.bot_message_source_id is not None
 
-    cached = await web_harness.redis_client.get(f"context_partition:{conversation_uuid}")
-    assert cached is not None
-    partition = ContextPartition.model_validate_json(cached)
-    assert partition.partition_uuid == events[0]["partition_uuid"]
-    # Roles in items: user message + assistant message; system was popped on finalize.
-    roles = [item.role for item in partition.items if item.type == "message"]
-    assert roles == ["user", "assistant"]
+    cached = await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
+    conv = Conversation.model_validate_json(cached)
+    assert conv.snapshot_uuid == record.snapshot_uuid
+    author_ids = [m.author_id for m in conv.messages]
+    assert author_ids[0] != conv.bot_author_id  # user first
+    assert author_ids[-1] == conv.bot_author_id  # bot last
 
-    doc = await web_harness.search_client.get_partition(partition.partition_uuid)
+    doc = await web_harness.search_client.get_conversation(conv.snapshot_uuid)
     assert doc is not None
     assert doc["is_compacted"] is False
 
@@ -77,44 +66,34 @@ async def test_single_turn_happy_path(web_harness, authed_client):
 async def test_multi_turn_continuation(web_harness, authed_client):
     conversation_uuid = str(uuid4())
 
-    web_harness.llm_client.set_script(
-        LLMScript(rounds=[LLMRound(text_deltas=["one"], stop_reason="end_turn")])
-    )
-    payload_1 = {"conversation_uuid": conversation_uuid, "messages": [_user_message("first")]}
-    async with request_scope(web_harness):
-        async with authed_client.stream("POST", "/chat", json=payload_1) as response:
-            events_1 = await collect_stream(response)
-    partition_uuid_1 = events_1[0]["partition_uuid"]
-    assistant_1 = "".join(e["text_delta"] for e in events_1 if "text_delta" in e)
+    web_harness.llm_client.set_script(LLMScript(rounds=[LLMRound(text_deltas=["one"], stop_reason="end_turn")]))
+    messages: list[dict] = [user_message("first")]
+    record_1 = await post_chat_and_advance(web_harness, authed_client, conversation_uuid, messages)
+    snapshot_uuid_1 = record_1.snapshot_uuid
 
-    web_harness.llm_client.set_script(
-        LLMScript(rounds=[LLMRound(text_deltas=["two"], stop_reason="end_turn")])
-    )
-    payload_2 = {
-        "conversation_uuid": conversation_uuid,
-        "partition_uuid": partition_uuid_1,
-        "messages": [
-            _user_message("first"),
-            {"role": "assistant", "content": assistant_1},
-            _user_message("second"),
-        ],
-    }
+    web_harness.llm_client.set_script(LLMScript(rounds=[LLMRound(text_deltas=["two"], stop_reason="end_turn")]))
+    messages.append(user_message("second"))
     with patch.object(
         web_harness.search_client,
-        "get_partition",
+        "get_conversation",
         AsyncMock(side_effect=AssertionError("Redis fast path should satisfy continuation")),
     ):
-        async with request_scope(web_harness):
-            async with authed_client.stream("POST", "/chat", json=payload_2) as response:
-                events_2 = await collect_stream(response)
+        record_2 = await post_chat(
+            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid_1
+        )
 
-    assert events_2[0]["partition_uuid"] == partition_uuid_1
+    assert record_2.snapshot_uuid == snapshot_uuid_1
 
-    cached = await web_harness.redis_client.get(f"context_partition:{conversation_uuid}")
-    partition = ContextPartition.model_validate_json(cached)
-    roles = [item.role for item in partition.items if item.type == "message"]
-    assert roles == ["user", "assistant", "user", "assistant"]
-    contents = [item.content for item in partition.items if item.type == "message"]
+    cached = await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
+    conv = Conversation.model_validate_json(cached)
+    author_ids = [m.author_id for m in conv.messages]
+    # user, bot, user, bot
+    assert len(author_ids) == 4
+    assert author_ids[0] != conv.bot_author_id
+    assert author_ids[1] == conv.bot_author_id
+    assert author_ids[2] != conv.bot_author_id
+    assert author_ids[3] == conv.bot_author_id
+    contents = [m.content for m in conv.messages]
     assert contents[0] == "first"
     assert contents[2] == "second"
 
@@ -146,36 +125,26 @@ async def test_tool_call_round_trip(web_harness, authed_client, request):
         )
     )
     conversation_uuid = str(uuid4())
-    payload = {
-        "conversation_uuid": conversation_uuid,
-        "messages": [_user_message("run a command")],
-    }
+    record = await post_chat(web_harness, authed_client, conversation_uuid, [user_message("run a command")])
 
-    async with request_scope(web_harness):
-        async with authed_client.stream("POST", "/chat", json=payload) as response:
-            events = await collect_stream(response)
-
-    types = _event_types(events)
-    assert types[0] == "partition_uuid"
+    types_after = event_types(record.events[1:])
     if provider == "anthropic":
-        # Round 1: context_pct → progress_message → tool_call
-        ctx_idx = types.index("context_pct")
-        assert types[ctx_idx + 1] == "progress_message"
-        assert types[ctx_idx + 2] == "tool_call"
+        assert types_after[:3] == ["context_pct", "progress_message", "tool_call"]
     else:
-        # OpenAI round 1: tool_call → context_pct → progress_message
-        tc_idx = types.index("tool_call")
-        assert types[tc_idx + 1] == "context_pct"
-        assert types[tc_idx + 2] == "progress_message"
-    assert "text_delta" in types
+        assert types_after[:3] == ["tool_call", "context_pct", "progress_message"]
+    assert "text_delta" in types_after
+    assert record.bot_message_source_id is not None
 
-    cached = await web_harness.redis_client.get(f"context_partition:{conversation_uuid}")
-    partition = ContextPartition.model_validate_json(cached)
-    item_types = [item.type for item in partition.items]
+    # TurnExecution carries both function_call and function_call_output.
+    te = await web_harness.search_client.get_turn_execution(
+        conversation_uuid, record.bot_message_source_id
+    )
+    assert te is not None
+    item_types = [item.type for item in te.items]
     assert "function_call" in item_types
     assert "function_call_output" in item_types
     assert item_types.index("function_call") < item_types.index("function_call_output")
-    function_call_item = next(item for item in partition.items if item.type == "function_call")
+    function_call_item = next(item for item in te.items if item.type == "function_call")
     assert function_call_item.arguments == json.dumps({"command": "echo hi", "reason": "test"})
 
 
@@ -212,24 +181,46 @@ async def test_think_tool_round_trip(web_harness, authed_client):
         )
     )
     conversation_uuid = str(uuid4())
-    payload = {
-        "conversation_uuid": conversation_uuid,
-        "messages": [_user_message("Think through the next step before answering.")],
-    }
+    record = await post_chat(
+        web_harness,
+        authed_client,
+        conversation_uuid,
+        [user_message("Think through the next step before answering.")],
+    )
 
-    async with request_scope(web_harness):
-        async with authed_client.stream("POST", "/chat", json=payload) as response:
-            events = await collect_stream(response)
-
-    types = _event_types(events)
-    assert types[0] == "partition_uuid"
+    types = event_types(record.events)
+    assert is_handshake(record.events[0])
     assert "tool_call" in types
     assert "text_delta" in types
 
-    cached = await web_harness.redis_client.get(f"context_partition:{conversation_uuid}")
-    partition = ContextPartition.model_validate_json(cached)
-    think_call = next(item for item in partition.items if item.type == "function_call")
-    think_output = next(item for item in partition.items if item.type == "function_call_output")
+    te = await web_harness.search_client.get_turn_execution(
+        conversation_uuid, record.bot_message_source_id
+    )
+    assert te is not None
+    think_call = next(item for item in te.items if item.type == "function_call")
+    think_output = next(item for item in te.items if item.type == "function_call_output")
     assert think_call.name == "think"
     assert think_output.call_id == think_call.call_id
+    # The think tool calls llm_client.complete, which returns think_text.
     assert think_output.output == "STUB THINK ANALYSIS"
+
+
+@pytest.mark.parametrize(
+    "web_harness, authed_client",
+    [("anthropic", "anthropic"), ("openai", "openai")],
+    indirect=True,
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_post_rejects_unknown_assistant_source_id(web_harness, authed_client):
+    """Issue 2 guardrail: assistant entries with unknown source_id are 400-rejected."""
+    web_harness.llm_client.set_script(LLMScript(rounds=[LLMRound(text_deltas=["x"], stop_reason="end_turn")]))
+    conversation_uuid = str(uuid4())
+    payload = {
+        "conversation_uuid": conversation_uuid,
+        "messages": [
+            user_message("first"),
+            {"role": "assistant", "content": "fabricated reply", "source_id": "fake-id-99"},
+        ],
+    }
+    response = await authed_client.post("/chat", json=payload)
+    assert response.status_code == 400

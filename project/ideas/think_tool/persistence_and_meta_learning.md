@@ -14,14 +14,14 @@ When `ThinkTool.call()` runs, persist a record containing:
 
 - The structured inputs: `context`, `goal`, `perspectives`
 - The assembled output (each perspective's analysis)
-- A reference to the `partition_uuid` of the context partition at call time
+- A reference to the `snapshot_uuid` of the active conversation snapshot at call time
 - A timestamp and session identifier
 
-Elasticsearch is the natural home — the project already uses it to store and search `ContextPartition` records, and full-text search over think call content would be useful for analysis.
+Elasticsearch is the natural home — the project already uses it to store and search `Conversation` snapshots, and full-text search over think call content would be useful for analysis.
 
 ### What this enables
 
-**Outcome correlation.** By linking a think call record to the surrounding context partition, we can later ask whether the session that contained it succeeded or failed at its overall task. Over enough sessions, this gives signal on whether think calls at certain kinds of decision points actually helped.
+**Outcome correlation.** By linking a think call record to the surrounding conversation snapshot, we can later ask whether the session that contained it succeeded or failed at its overall task. Over enough sessions, this gives signal on whether think calls at certain kinds of decision points actually helped.
 
 **Usage pattern analysis.** What `goal` strings come up repeatedly? What kinds of `context` descriptions precede a think call? Are there patterns that suggest the tool is being used well (genuine gaps, novel constraints) vs. used reflexively (restating things already in context)?
 
@@ -29,8 +29,8 @@ Elasticsearch is the natural home — the project already uses it to store and s
 
 ### Relationship to existing infrastructure
 
-- `prokaryotes/search_v1/` — add a `ThinkCallSearcher` or extend `ContextPartitionSearcher` to index think call records alongside partition data.
-- `prokaryotes/tools_v1/think.py` — `call()` writes to the store after assembling perspective output, before returning the `ContextPartitionItem`.
+- `prokaryotes/search_v1/` — add a `ThinkCallSearcher` or extend `ConversationSearcher` to index think call records alongside conversation data.
+- `prokaryotes/tools_v1/think.py` — `call()` writes to the store after assembling perspective output, before returning the `TurnItem`.
 - The store write should be fire-and-forget (non-blocking) so it does not add latency to the tool-call loop.
 
 ## Phase 2: Thinking frameworks and cross-domain generalization

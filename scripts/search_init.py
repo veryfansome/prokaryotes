@@ -1,10 +1,21 @@
+"""ES bootstrap.
+
+Creates the `conversations`, `turn-executions`, and `topics` indices. The
+stop-word filter and `custom_query_analyzer` exist index-wide; `topics` uses
+them, `conversations` and `turn-executions` use the standard analyzer.
+"""
 import asyncio
 import logging
 
 from dotenv import load_dotenv
 
 from prokaryotes.search_v1 import get_elastic_search
-from prokaryotes.search_v1.context_partitions import context_partition_mappings
+from prokaryotes.search_v1.conversations import (
+    CONVERSATIONS_INDEX,
+    TURN_EXECUTIONS_INDEX,
+    conversation_mappings,
+    turn_execution_mappings,
+)
 from prokaryotes.search_v1.topics import topic_mappings
 from prokaryotes.utils_v1.logging_utils import setup_logging
 
@@ -16,7 +27,8 @@ setup_logging()
 
 async def sync_mappings(replicas: int = 0):
     schemas = {
-        "context-partitions": context_partition_mappings,
+        CONVERSATIONS_INDEX: conversation_mappings,
+        TURN_EXECUTIONS_INDEX: turn_execution_mappings,
         "topics": topic_mappings,
     }
     es = get_elastic_search()

@@ -1,11 +1,13 @@
 # Issue: Ancestor Summary Injection Is Asymmetric Across Providers
 
-## Location
+> **Status: Resolved** by the `ContextPartition` → `Conversation` migration. `WebHarness._build_instruction_parts` now appends `conversation.ancestor_summary_block()` for both providers, and the providers receive the unified `instruction` string via `llm_client.stream_turn(items=..., instruction=..., ...)`. There is no provider-specific summary injection on the data-model side anymore.
 
-- `prokaryotes/harness_v1/web.py` — `WebHarness._build_instruction_parts()` manually appends summaries only for `impl="openai"`
-- `prokaryotes/api_v1/models.py:133` — `to_anthropic_messages()` folds in `ancestor_summaries`
+## Location (historical)
 
-## Problem
+- `prokaryotes/harness_v1/web.py` — `WebHarness._build_instruction_parts()` manually appended summaries only for `impl="openai"`
+- `prokaryotes/api_v1/models.py` — the old `ContextPartition.to_anthropic_messages()` folded in `ancestor_summaries`
+
+## Problem (historical)
 
 Ancestor summaries need to reach the model as part of the system/developer context on every request. The consolidated web harness handles the two providers differently:
 

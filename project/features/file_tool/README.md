@@ -46,7 +46,7 @@ A `read_lines` result is a **live window**. It contains:
 - the requested starting line
 - a bounded, line-numbered view of the file
 
-Live windows are mutable partition items. On a later turn, the harness may rewrite:
+Live windows are mutable `TurnItem`s in the active turn's unified view. On a later turn, the harness may rewrite:
 
 - `output`
 - `file_tool.revision`
@@ -112,7 +112,7 @@ This distinction is important:
 
 ### Tracked Metadata
 
-Tracked state lives in `ContextPartitionItem.prokaryotes_annotations`.
+Tracked state lives in `TurnItem.prokaryotes_annotations`.
 
 Common keys:
 
@@ -125,30 +125,30 @@ Common keys:
 | `file_tool.view_end_line` | 1-based inclusive last line of the live window |
 | `file_tool.requested_end_line` | Optional inclusive end line for an exact-span `read_lines`; omitted for open-ended paging reads |
 
-These annotations are internal harness metadata. They round-trip through partition serialization, but provider payload serialization excludes them.
+These annotations are internal harness metadata. They round-trip through `TurnExecution` serialization, but provider payload serialization (the LLM-facing `ProjectedItem` projection) excludes them.
 During live-window refresh, `file_tool.revision` and `file_tool.view_end_line` may change in place, while `file_tool.view_start_line` and `file_tool.requested_end_line` remain stable identity fields for that window.
 
 `REDUNDANT_READ` items carry only `file_tool.path` — no `file_tool.status`, no `file_tool.revision`, no view-range annotations — so live-window refresh and tombstoning skip them (both gate on `status=live`) while compaction's path-activity check still treats their path as active.
 
 ### Reconciliation
 
-Before each web-harness turn, the server calls:
+Before each web-harness turn, the server builds the unified view of `TurnItem`s (lifted + historical-turn items + active-turn items) via `current_turn_items(conversation, historical_turns, active_turn)` and calls:
 
 ```python
-await reconcile_tracked_files(context_partition, workspace_root=Path.cwd())
+await reconcile_tracked_files(items, workspace_root=Path.cwd())
 ```
 
 That pass:
 
-- finds every live window in the active partition
+- finds every live window in the items list
 - re-validates the stored path against the workspace root
 - re-reads the current file contents
 - refreshes any live windows whose revision is outdated
 - tombstones windows whose files are no longer accessible
 
-This is what lets the next turn see current file state even when the previous turn did not itself perform the edit.
+This is what lets the next turn see current file state even when the previous turn did not itself perform the edit. The refresh mutates the in-memory items in place; the `TurnExecution` documents persisted in Elasticsearch are immutable post-commit and remain at their original revisions.
 
-It is also the portability contract for tracked files: any code path that loads a `ContextPartition` from Redis or Elasticsearch and wants current file state must run `reconcile_tracked_files(...)` before consuming live windows. The web harnesses already do this; future harnesses, search rendering, and debug tooling need to do the same or accept that tracked file views may lag disk state.
+It is also the portability contract for tracked files: any code path that loads `TurnExecution`s from Elasticsearch and wants current file state must run `reconcile_tracked_files(...)` over the resulting items before consuming live windows. The web harness already does this; future harnesses, search rendering, and debug tooling need to do the same or accept that tracked file views may lag disk state.
 
 ### Tombstones
 
@@ -246,7 +246,7 @@ The write transaction:
 5. rejects the edit if the revision no longer matches
 6. validates the requested line range
 7. applies the edit and writes the new content
-8. refreshes older live windows for that path in the current partition
+8. refreshes older live windows for that path in the active turn's view
 9. adds the actual refreshed live-window count to successful `EDITED` outputs
 
 Two special non-success results also carry live windows:
@@ -279,13 +279,13 @@ Common function-call output shapes:
 
 ## Request Lifecycle in the Web Harness
 
-### 1. Partition Sync
+### 1. Conversation Sync
 
-The harness first resolves the active `ContextPartition` for the request using the normal conversation and compaction machinery.
+The harness first resolves the active `Conversation` snapshot for the request and loads the `TurnExecution`s for every bot message in the raw window (the same set the projection will interleave). It exposes the unified view of `TurnItem`s — lifted + historical + the in-flight active turn — through a `view_provider()` closure.
 
 ### 2. Tracked-File Reconciliation
 
-Once the partition is loaded, the harness runs `reconcile_tracked_files(...)`.
+Once the unified view is available, the harness runs `reconcile_tracked_files(view_provider(), workspace_root=...)`.
 
 This is the point where:
 
@@ -298,10 +298,10 @@ This is the point where:
 The web harness then constructs:
 
 ```python
-file_tool = FileTool(context_partition, workspace_root=Path.cwd())
+file_tool = FileTool(view_provider, workspace_root=Path.cwd())
 ```
 
-The active partition is passed by reference so same-turn writes can refresh earlier live windows in place before the provider serializes the next round.
+The `view_provider` is called by `FileTool` on every action so same-turn writes can refresh earlier live windows in place before the provider serializes the next round. The unified view contains lifted items, historical-turn items, and the active turn's accumulating items.
 
 ### 4. Tool Guidance to the Model
 
@@ -318,7 +318,7 @@ That guidance tells the model to:
 
 ### 5. Same-Turn Refresh
 
-Provider SDKs may batch multiple tool calls in one round. `FileTool` keeps references to pending output items that have been returned but not yet appended to the partition, so a later file-tool call in the same round can still refresh them.
+Provider SDKs may batch multiple tool calls in one round. `FileTool` keeps references to pending output items that have been returned but not yet appended to the active turn's items, so a later file-tool call in the same round can still refresh them.
 
 This matters for patterns like:
 
@@ -415,7 +415,7 @@ If a live window body were copied into an ancestor summary, the file contents in
 
 ### Stripping Live-Window Bodies from Summary Input
 
-Before summarization, compaction deep-copies the partition and rewrites live-window outputs:
+Before summarization, compaction deep-copies the pre-tail bot turns' items and rewrites live-window outputs:
 
 - canonical live windows are replaced with a path-only placeholder
 - `ALREADY_EXISTS`, `CONFLICT`, `RANGE_ERROR`, and `RANGE_TRUNCATED` keep their diagnostic headers, but the embedded current-view body is replaced with the same placeholder
@@ -430,28 +430,23 @@ Example placeholder:
 
 ### Lifting Active Live Windows into the New Tail
 
-When compaction creates a child partition, it lifts older live windows for any path that is still active in the recency tail.
+When compaction creates a child `Conversation` snapshot, it lifts older live windows for any path that is still active in the recency tail. The lift step populates the child snapshot's `lifted_turn_items` field and anchors them at the first bot message in the raw tail that touched a relevant path (`lifted_anchor_source_id`).
 
 Activity is keyed by `file_tool.path` annotations, including the frozen edit records produced by successful creates and edits and any `REDUNDANT_READ` diagnostics for the path. That lets a recent write or covered-read keep the relevant older live windows nearby even though the activity item itself is not refreshable.
 
 Practical effect:
 
-- if the model recently edited or referenced a file, the next active partition keeps the relevant live windows close to that activity
+- if the model recently edited or referenced a file, the next active snapshot keeps the relevant live windows close to that activity
 - the model does not have to rely only on old edit records with shifted line numbers
+- lifted live windows carry their commit-time `file_tool.revision`; the next turn's `reconcile_tracked_files(...)` refreshes them in memory before projection
 
-### Prefix Comparison Ignores Mutable Live-Window Fields
+### Pending and Committed Child Snapshots
 
-The compaction swap checks whether the cached Redis partition still matches the snapshot prefix. Live-window refreshes are treated specially: mutable fields like `output` and `file_tool.revision` do not count as structural divergence for that comparison.
-
-This prevents a benign live-window refresh from blocking the compaction swap.
-
-### Pending and Committed Child Partitions
-
-Compaction writes child partitions through explicit `pending` and `committed` states with a `compaction_attempt_uuid`. That is primarily compaction infrastructure, but it matters for FileTool because tracked live windows and edit-record annotations are part of the active partition state that must survive the swap safely.
+Compaction writes child snapshots through explicit `pending` and `committed` states with a `compaction_attempt_uuid`. That is primarily compaction infrastructure, but it matters for FileTool because `lifted_turn_items` (live windows + their paired `function_call`s) are part of the child snapshot state that must survive the CAS swap safely.
 
 ### Client Relabeling After Compaction
 
-When a compaction swap commits, the compaction-status endpoint can return the child `partition_uuid`. The browser UI rewrites stored message-tree nodes from the old partition UUID to the child UUID so later follow-up turns and session resumes continue from the compacted child rather than an outdated parent pointer.
+When a compaction swap commits, the compaction-status endpoint can return the child `snapshot_uuid`. The browser UI rewrites stored message-tree nodes from the old snapshot UUID to the child UUID so later follow-up turns and session resumes continue from the compacted child rather than an outdated parent pointer.
 
 For deeper compaction details, see [Conversation Compaction](../compaction/README.md).
 
@@ -494,9 +489,10 @@ Key areas covered:
 Primary files:
 
 - `tests/unit_tests/test_file_tool.py`
-- `tests/unit_tests/test_api_v1_models_annotations.py`
-- `tests/unit_tests/test_compaction_file_tool_lift.py`
+- `tests/unit_tests/test_turn_item_annotations.py`
+- `tests/unit_tests/test_compaction_lift_plan.py`
 - `tests/unit_tests/test_compaction_swap.py`
+- `tests/unit_tests/test_strip_live_window_bodies.py`
 - `tests/unit_tests/test_anthropic_v1.py`
 
 ### Integration Tests
@@ -543,16 +539,17 @@ Tier A passes with FileTool enabled in both the Anthropic and OpenAI web harness
 
 | File | Role |
 |---|---|
-| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` class, the public `reconcile_tracked_files` entry, and back-compat wrappers (`_locked_read_text`, `_read_text_under_file_tool_lock`, `_refresh_live_windows`) that read `FileTool.max_*` and forward to the parameterized sibling impls |
-| `prokaryotes/tools_v1/file_tool/live_windows.py` | Helpers operating on `file_tool.*` annotations: live-window detection, refresh, tombstoning, identity-tuple equality, recency-tail extraction, summary-input stripping, pre-tail lifting |
-| `prokaryotes/tools_v1/file_tool/paths.py` | Workspace sandboxing — `_resolve_path`, `_open_text_file_no_follow`, `_raise_if_file_too_large`, `FileToolFileTooLargeError` |
-| `prokaryotes/tools_v1/file_tool/reads.py` | Locked-read primitives (`_locked_read_text`, `_read_text_under_file_tool_lock`) and the shared per-path `asyncio.Lock` registry |
-| `prokaryotes/tools_v1/file_tool/reconciliation.py` | `_reconcile_one_tracked_path` — per-path reconcile helper invoked by `reconcile_tracked_files` |
-| `prokaryotes/tools_v1/file_tool/rendering.py` | `render_create_record`, `render_edit_record`, `render_live_window`, `render_tombstone`, `render_view`, line-edit text mutation, and the `CURRENT_VIEW_MARKER_PREFIX` constant |
-| `prokaryotes/tools_v1/file_tool/validation.py` | Payload field validation for `read_lines`, `create_file`, and the write actions |
-| `prokaryotes/api_v1/models.py` | `ContextPartitionItem.prokaryotes_annotations`, provider serialization |
-| `prokaryotes/harness_v1/web.py` | Web-harness `FileTool` registration and per-turn reconciliation |
-| `prokaryotes/web_v1/compaction.py` | `_compact_partition` — the consumer that calls into `live_windows.py` to strip, lift, and live-window-aware-compare partitions |
+| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` class and the public `reconcile_tracked_files(items, workspace_root=...)` entry point. Delegates locked file I/O to `reads.py`, refresh/tombstoning to `live_windows.py`, path sandboxing to `paths.py`, and per-path reconciliation to `reconciliation.py`. |
+| `prokaryotes/tools_v1/file_tool/live_windows.py` | Helpers operating on `file_tool.*` annotations: live-window detection, refresh, tombstoning, identity-tuple equality, recency-tail extraction, and summary-input stripping. |
+| `prokaryotes/tools_v1/file_tool/paths.py` | Workspace sandboxing — `_resolve_path`, `_open_text_file_no_follow`, `_raise_if_file_too_large`, `FileToolFileTooLargeError`. |
+| `prokaryotes/tools_v1/file_tool/reads.py` | Locked-read primitives (`_locked_read_text`, `_read_text_under_file_tool_lock`) and the shared per-path `asyncio.Lock` registry. |
+| `prokaryotes/tools_v1/file_tool/reconciliation.py` | `_reconcile_one_tracked_path` — per-path reconcile helper invoked by `reconcile_tracked_files`. |
+| `prokaryotes/tools_v1/file_tool/rendering.py` | `render_create_record`, `render_edit_record`, `render_live_window`, `render_tombstone`, `render_view`, line-edit text mutation, and the `CURRENT_VIEW_MARKER_PREFIX` constant. |
+| `prokaryotes/tools_v1/file_tool/validation.py` | Payload field validation for `read_lines`, `create_file`, and the write actions. |
+| `prokaryotes/conversation_v1/models.py` | `TurnItem.prokaryotes_annotations`. |
+| `prokaryotes/conversation_v1/project.py` | `current_turn_items` — the unified `TurnItem` view (lifted + historical + active) consumed by `FileTool.view_provider`. |
+| `prokaryotes/harness_v1/web.py` | Web-harness `FileTool` registration, `view_provider` wiring, and per-turn reconciliation. |
+| `prokaryotes/context_v1/compaction.py` | `_compute_lift_plan` — module-level helper (run by `ConversationCompactor._prepare_compaction`) that lifts active live windows into the child snapshot's `lifted_turn_items`. |
 | `scripts/static/ui.js` | Client-side rendering of `file_tool` activity entries |
 | `tests/unit_tests/test_file_tool.py` | Core unit coverage |
 | `tests/integration_tests/tier_b/test_file_tool_flow.py` | End-to-end Tier B regression coverage |

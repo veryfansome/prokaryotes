@@ -41,10 +41,9 @@ topic_mappings = {
 class TopicSearcher(ABC):
     """ES-backed search for normalized name + embedding records.
 
-    Records are tagged with `is_named_entity` so queries can scope to topics (generic
-    concepts) or to named entities (specific people/places/things) or both. Pass
-    `is_named_entity=True/False` to `search_topics()` to filter; leave it as `None` (the
-    default) for an un-scoped query.
+    Records are tagged with `is_named_entity` so queries can scope to topics (generic concepts) or to named entities
+    (specific people/places/things) or both. Pass `is_named_entity=True/False` to `search_topics()` to filter; leave
+    it as `None` (the default) for an un-scoped query.
     """
 
     @property

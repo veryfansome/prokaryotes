@@ -40,5 +40,5 @@ This creates a lightweight recursive structure: think → act or think again →
 ## Relationship to the codebase
 
 - `prokaryotes/tools_v1/think.py` — the implementation. `ThinkTool` requires an `LLMClient` and model at construction; `reasoning_effort` defaults to `low` or the `THINK_TOOL_REASONING_EFFORT` env var.
-- `prokaryotes/api_v1/models.py` — `FunctionToolCallback` contract is unchanged; `call()` returns a `ContextPartitionItem` with `type="function_call_output"` carrying the assembled analysis.
-- Both LLM clients (`anthropic_v1/`, `openai_v1/`) are unchanged. They route the think call to `ThinkTool.call()` and feed the returned `ContextPartitionItem` back into the tool-call loop.
+- `prokaryotes/api_v1/models.py` — `FunctionToolCallback` contract: `call()` returns a `TurnItem` with `type="function_call_output"` carrying the assembled analysis.
+- Both LLM clients (`anthropic_v1/`, `openai_v1/`) route the think call to `ThinkTool.call()` and feed the returned `TurnItem` back into the tool-call loop.

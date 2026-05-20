@@ -4,10 +4,10 @@ This directory is for design work around **post-compaction repair**.
 
 The immediate motivation is the current compaction path for tracked file context:
 
-1. persist a child partition in Elasticsearch as `compaction_state="pending"`
+1. persist a child snapshot in Elasticsearch as `compaction_state="pending"`
 2. swing the Redis head to that child with CAS
 3. promote the child to `compaction_state="committed"`
-4. mark the parent partition compacted with the same `compaction_attempt_uuid`
+4. mark the parent snapshot compacted with the same `compaction_attempt_uuid`
 
 That order avoids publishing a Redis head that Elasticsearch cannot load, but it still leaves two classes of unfinished state that we may want to repair later:
 
@@ -18,14 +18,14 @@ This matters for file-tool state because the compacted child can carry the lifte
 
 ## Current contract
 
-The codebase now records two pieces of compaction metadata on context-partition docs:
+The codebase records two pieces of compaction metadata on conversation snapshot docs:
 
 - `compaction_state`: `pending` or `committed`
 - `compaction_attempt_uuid`: a per-attempt correlation id shared by the child and, on success, the parent update
 
 Normal discovery paths already treat `pending` docs as non-canonical:
 
-- exact `get_partition(partition_uuid)` loads still work
+- exact `get_conversation(snapshot_uuid)` loads still work
 - search and tail-hash lookup filter to `committed` or legacy docs with no state field
 
 That means a future worker can safely inspect `pending` docs without them showing up in normal search results.
@@ -77,20 +77,20 @@ The current schema is almost enough for a first pass.
 
 Existing signals we can already use:
 
-- `partition_uuid`
+- `snapshot_uuid`
 - `conversation_uuid`
-- `parent_partition_uuid`
+- `parent_snapshot_uuid`
 - `compaction_state`
 - `compaction_attempt_uuid`
 - `dt_created` / `dt_modified`
 - parent `is_compacted`, `summary`, `boundary_*`, and `compaction_attempt_uuid`
-- the current Redis head for `context_partition:{conversation_uuid}`
+- the current Redis head for `conversation:{conversation_uuid}`
 
 The key runtime capability the worker needs is:
 
-- given a conversation head UUID, walk the ES ancestor chain by `parent_partition_uuid`
+- given a conversation head UUID, walk the ES ancestor chain by `parent_snapshot_uuid`
 
-That ancestry walk must use exact partition loads, not search, because search intentionally hides `pending` docs.
+That ancestry walk must use exact snapshot loads, not search, because search intentionally hides `pending` docs.
 
 ## Decision procedure
 

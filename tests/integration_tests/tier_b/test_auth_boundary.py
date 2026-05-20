@@ -1,4 +1,8 @@
-"""Tier B scenario 8 (split): auth and validation boundaries on /chat."""
+"""Tier B scenario 8 (split): auth and validation boundaries on /chat.
+
+No model dependency.
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager

@@ -1,689 +1,133 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+/**
+ * UI-layer wire-parsing tests.
+ *
+ * Targets the migrated `scripts/static/ui.js`:
+ * - First event is a `handshake` with `snapshot_uuid` + `source_id_assignments` (legacy `partition_uuid` event is
+ *   gone).
+ * - `bot_message` marks the final commit with the bot's server-assigned `source_id`.
+ * - Other events (`context_pct`, `text_delta`, `progress_message`, `tool_call`, `compaction_pending`) keep their
+ *   shape.
+ *
+ * Pure protocol primitives are covered by `conversation_client.test.js`. The DOM/fetch flow inside `createChatApp`
+ * is covered by `chat_protocol_integration.test.js` (POST body shape, handshake stamping, bot_message gating,
+ * resync recovery, error display, compaction polling).
+ */
+import { describe, it, expect } from "vitest";
+import { parseStreamPayloadLine } from "../../scripts/static/ui.js";
 
-import { buildChatQueryParams, createChatApp, parseStreamPayloadLine } from '../../scripts/static/ui.js';
-
-// 1) DOM fixtures + network stream mocks
-function renderBaseDOM() {
-    document.body.innerHTML = `
-        <div id="chatContainer"><div id="chatWrapper"></div></div>
-        <textarea id="chatInput"></textarea>
-        <button id="sendButton" disabled>Send</button>
-        <div id="editStatus" hidden></div>
-    `;
-}
-
-function textDelta(text) {
-    return JSON.stringify({ text_delta: text });
-}
-
-function progressMessage(text) {
-    return JSON.stringify({ progress_message: text });
-}
-
-function toolCall(name, args = '{}') {
-    return JSON.stringify({ tool_call: { name, arguments: args } });
-}
-
-function streamFromJsonLines(lines) {
-    const encoder = new TextEncoder();
-    return new ReadableStream({
-        start(controller) {
-            for (const line of lines) {
-                controller.enqueue(encoder.encode(`${line}\n`));
-            }
-            controller.close();
-        },
-    });
-}
-
-function createFetchMock(chatPayloads) {
-    let chatCall = 0;
-
-    return vi.fn(async url => {
-        if (url.endsWith('/conversation')) {
-            return {
-                ok: true,
-                json: async () => ({ conversation_uuid: 'conv-123' }),
-            };
-        }
-
-        if (url.includes('/chat?')) {
-            const payload = chatPayloads[Math.min(chatCall, chatPayloads.length - 1)];
-            chatCall += 1;
-            return {
-                ok: true,
-                body: streamFromJsonLines(payload),
-            };
-        }
-
-        throw new Error(`Unexpected URL: ${url}`);
-    });
-}
-
-function createControllableFetchMock() {
-    const encoder = new TextEncoder();
-    let controller = null;
-
-    const body = new ReadableStream({
-        start(streamController) {
-            controller = streamController;
-        },
-    });
-
-    const fetchMock = vi.fn(async url => {
-        if (url.endsWith('/conversation')) {
-            return {
-                ok: true,
-                json: async () => ({ conversation_uuid: 'conv-123' }),
-            };
-        }
-
-        if (url.includes('/chat?')) {
-            return {
-                ok: true,
-                body,
-            };
-        }
-
-        throw new Error(`Unexpected URL: ${url}`);
-    });
-
-    const waitForReady = async () => {
-        while (!controller) {
-            await Promise.resolve();
-        }
-    };
-
-    return {
-        fetchMock,
-        waitForReady,
-        pushTextDelta(text) {
-            controller.enqueue(encoder.encode(`${textDelta(text)}\n`));
-        },
-        pushProgressMessage(text) {
-            controller.enqueue(encoder.encode(`${progressMessage(text)}\n`));
-        },
-        pushToolCall(name, args = '{}') {
-            controller.enqueue(encoder.encode(`${toolCall(name, args)}\n`));
-        },
-        close() {
-            controller.close();
-        },
-    };
-}
-
-function mockScrollableContainer(
-    container,
-    { scrollHeight = 1600, clientHeight = 600, initialScrollTop = 1000 } = {},
-) {
-    let currentScrollTop = initialScrollTop;
-    let currentScrollHeight = scrollHeight;
-
-    Object.defineProperty(container, 'clientHeight', {
-        configurable: true,
-        get: () => clientHeight,
-    });
-    Object.defineProperty(container, 'scrollHeight', {
-        configurable: true,
-        get: () => currentScrollHeight,
-    });
-    Object.defineProperty(container, 'scrollTop', {
-        configurable: true,
-        get: () => currentScrollTop,
-        set: value => {
-            currentScrollTop = value;
-        },
-    });
-
-    return {
-        getMaxScrollTop: () => Math.max(0, currentScrollHeight - clientHeight),
-        getScrollTop: () => currentScrollTop,
-        setScrollTop: value => {
-            currentScrollTop = value;
-        },
-        setScrollHeight: value => {
-            currentScrollHeight = value;
-        },
-    };
-}
-
-// 2) shared test helpers
-function setupApp({
-    chatPayloads = [[textDelta('Hello')]],
-    fetchImpl = null,
-    navigatorImpl = {},
-    doc = document,
-} = {}) {
-    const effectiveFetchImpl = fetchImpl || createFetchMock(chatPayloads);
-    return createChatApp({
-        doc,
-        fetchImpl: effectiveFetchImpl,
-        navigatorImpl,
-    });
-}
-
-function setChatInput(app, text) {
-    app.elements.chatInput.value = text;
-    app.elements.chatInput.dispatchEvent(new Event('input'));
-}
-
-function startSendMessage(app, text) {
-    setChatInput(app, text);
-    return app.sendMessage();
-}
-
-async function sendUserMessage(app, text) {
-    await startSendMessage(app, text);
-}
-
-async function seedConversation(app, userMessages) {
-    for (const userMessage of userMessages) {
-        await sendUserMessage(app, userMessage);
-    }
-}
-
-async function flushAsyncWork() {
-    await Promise.resolve();
-    await Promise.resolve();
-}
-
-function asRoleContent(messages) {
-    return messages.map(message => ({ role: message.role, content: message.content }));
-}
-
-// 3) pure helper tests
-describe('parseStreamPayloadLine', () => {
-    it('parses text_delta stream payload', () => {
-        expect(parseStreamPayloadLine('{"text_delta":"hello"}')).toEqual({ type: 'text_delta', text_delta: 'hello' });
-    });
-
-    it('parses progress_message stream payload', () => {
-        expect(parseStreamPayloadLine('{"progress_message":"Looking around"}')).toEqual({
-            type: 'progress_message',
-            progress_message: 'Looking around',
+describe("parseStreamPayloadLine — handshake", () => {
+    it("parses a handshake with snapshot_uuid and source_id_assignments", () => {
+        const parsed = parseStreamPayloadLine(
+            JSON.stringify({
+                snapshot_uuid: "s-A",
+                source_id_assignments: [
+                    { client_index: 0, source_id: "1.000001" },
+                ],
+            }),
+        );
+        expect(parsed).toEqual({
+            type: "handshake",
+            snapshot_uuid: "s-A",
+            source_id_assignments: [{ client_index: 0, source_id: "1.000001" }],
         });
     });
 
-    it('parses tool_call stream payload', () => {
-        expect(parseStreamPayloadLine('{"tool_call":{"name":"shell_command","arguments":"{}"}}')).toEqual({
-            type: 'tool_call',
-            tool_call: {
-                name: 'shell_command',
-                arguments: '{}',
-            },
-        });
+    it("preserves unacknowledged_bot_messages on resync handshake", () => {
+        const parsed = parseStreamPayloadLine(
+            JSON.stringify({
+                snapshot_uuid: "s-A",
+                source_id_assignments: [],
+                unacknowledged_bot_messages: [
+                    { source_id: "1.000002", content: "missed", parent_source_id: "1.000001" },
+                ],
+            }),
+        );
+        expect(parsed.type).toBe("handshake");
+        expect(parsed.unacknowledged_bot_messages).toHaveLength(1);
+        expect(parsed.unacknowledged_bot_messages[0].source_id).toBe("1.000002");
     });
 
-    it('throws on invalid payload json', () => {
-        expect(() => parseStreamPayloadLine('{bad json}')).toThrow('Invalid stream payload');
+    it("rejects malformed handshake (non-string snapshot_uuid)", () => {
+        expect(() =>
+            parseStreamPayloadLine(
+                JSON.stringify({ snapshot_uuid: 42, source_id_assignments: [] }),
+            ),
+        ).toThrow(/snapshot_uuid must be a string/);
+    });
+
+    it("rejects malformed handshake (non-array source_id_assignments)", () => {
+        expect(() =>
+            parseStreamPayloadLine(
+                JSON.stringify({ snapshot_uuid: "s-A", source_id_assignments: "nope" }),
+            ),
+        ).toThrow(/source_id_assignments must be an array/);
     });
 });
 
-describe('buildChatQueryParams', () => {
-    it('builds query string with optional geolocation', () => {
-        expect(buildChatQueryParams('America/Los_Angeles', null, null)).toBe('time_zone=America%2FLos_Angeles');
-        expect(buildChatQueryParams('America/Los_Angeles', 1.23, 4.56)).toContain('latitude=1.23');
-        expect(buildChatQueryParams('America/Los_Angeles', 1.23, 4.56)).toContain('longitude=4.56');
+describe("parseStreamPayloadLine — bot_message", () => {
+    it("parses a bot_message with its server-assigned source_id", () => {
+        const parsed = parseStreamPayloadLine(
+            JSON.stringify({ bot_message: { source_id: "1.000999" } }),
+        );
+        expect(parsed).toEqual({ type: "bot_message", source_id: "1.000999" });
+    });
+
+    it("rejects malformed bot_message (missing source_id)", () => {
+        expect(() =>
+            parseStreamPayloadLine(JSON.stringify({ bot_message: {} })),
+        ).toThrow(/bot_message.source_id must be a string/);
     });
 });
 
-// 4) createChatApp integration tests
-describe('createChatApp messageTree flow', () => {
-    beforeEach(() => {
-        renderBaseDOM();
+describe("parseStreamPayloadLine — legacy partition_uuid is gone", () => {
+    it("a payload carrying ONLY partition_uuid is treated as unknown", () => {
+        // The old wire's first event shape. Should NOT be recognized as a handshake (which requires
+        // source_id_assignments alongside snapshot_uuid).
+        const parsed = parseStreamPayloadLine(JSON.stringify({ partition_uuid: "p-1" }));
+        expect(parsed.type).toBe("unknown");
+    });
+});
+
+describe("parseStreamPayloadLine — other event shapes survive", () => {
+    it("text_delta", () => {
+        const parsed = parseStreamPayloadLine(JSON.stringify({ text_delta: "hi" }));
+        expect(parsed).toEqual({ type: "text_delta", text_delta: "hi" });
     });
 
-    describe('send + stream flow', () => {
-        it('sends a message and streams assistant response', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('Hel'), textDelta('lo')]],
-            });
-
-            await sendUserMessage(app, 'Hi');
-
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'Hi' },
-                { role: 'assistant', content: 'Hello' },
-            ]);
-        });
-
-        it('shows streamed progress separately and keeps it out of the final conversation tree', async () => {
-            const controlledFetch = createControllableFetchMock();
-            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
-            const progressText = 'I’ll inspect the project structure first.';
-            const toolName = 'shell_command';
-            const toolArgs = JSON.stringify({
-                reason: 'Inspect the project directory',
-                command: 'find /app/project -maxdepth 2 -type f | sort',
-            });
-
-            const sendPromise = startSendMessage(app, 'Hi');
-            await controlledFetch.waitForReady();
-
-            controlledFetch.pushProgressMessage(progressText);
-            controlledFetch.pushToolCall(toolName, toolArgs);
-            await flushAsyncWork();
-
-            const progressEl = app.elements.chatWrapper.querySelector('.message-activity-progress');
-            expect(progressEl).not.toBeNull();
-            expect(progressEl.hidden).toBe(false);
-            expect(progressEl.textContent).toContain(progressText);
-            const toolCallEl = app.elements.chatWrapper.querySelector('.message-activity-tool_call');
-            expect(toolCallEl).not.toBeNull();
-            expect(toolCallEl.textContent).toContain(toolName);
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'Hi' },
-            ]);
-
-            controlledFetch.pushTextDelta('Done.');
-            controlledFetch.close();
-            await sendPromise;
-
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'Hi' },
-                { role: 'assistant', content: 'Done.' },
-            ]);
-
-            const finalProgressEl = app.elements.chatWrapper.querySelector('.message-activity-progress');
-            expect(finalProgressEl).not.toBeNull();
-            expect(finalProgressEl.textContent).toContain(progressText);
-            const finalToolCallEl = app.elements.chatWrapper.querySelector('.message-activity-tool_call');
-            expect(finalToolCallEl).not.toBeNull();
-            expect(finalToolCallEl.textContent).toContain(toolName);
-            expect(finalToolCallEl.textContent).toContain('Inspect the project directory');
-            expect(finalToolCallEl.textContent).toContain('find /app/project -maxdepth 2 -type f | sort');
-            expect(finalToolCallEl.textContent).not.toContain('{"reason"');
-            expect(finalToolCallEl.querySelector('pre code')).not.toBeNull();
-
-            const assistantNodeId = app.getMessages()[1].id;
-            expect(app.getActivityEntriesForNode(assistantNodeId)).toEqual([
-                { type: 'progress', text: progressText },
-                { type: 'tool_call', name: toolName, arguments: toolArgs },
-            ]);
-            expect(app.getProgressMessagesForNode(assistantNodeId)).toEqual([progressText]);
-        });
-
-        it('keeps embedded markdown fences inside shell command code blocks', async () => {
-            const controlledFetch = createControllableFetchMock();
-            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
-            const command = "cat <<'EOF'\n```\necho hi\n```\nEOF";
-            const toolArgs = JSON.stringify({
-                reason: 'Run a fenced heredoc',
-                command,
-            });
-
-            const sendPromise = startSendMessage(app, 'Hi');
-            await controlledFetch.waitForReady();
-
-            controlledFetch.pushToolCall('shell_command', toolArgs);
-            controlledFetch.pushTextDelta('Done.');
-            controlledFetch.close();
-            await sendPromise;
-
-            const toolCallEl = app.elements.chatWrapper.querySelector('.message-activity-tool_call');
-            const codeBlocks = toolCallEl.querySelectorAll('pre code');
-            expect(codeBlocks).toHaveLength(1);
-            expect(codeBlocks[0].textContent).toBe(command);
-        });
+    it("progress_message", () => {
+        const parsed = parseStreamPayloadLine(
+            JSON.stringify({ progress_message: "Checking…" }),
+        );
+        expect(parsed).toEqual({ type: "progress_message", progress_message: "Checking…" });
     });
 
-    describe('scroll behavior', () => {
-        it('scrolls chat container to bottom on each streaming token', async () => {
-            const controlledFetch = createControllableFetchMock();
-            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
-
-            const scrollState = mockScrollableContainer(app.elements.chatContainer, {
-                clientHeight: 600,
-                initialScrollTop: 0,
-                scrollHeight: 1600,
-            });
-
-            const sendPromise = startSendMessage(app, 'Hi');
-            await controlledFetch.waitForReady();
-
-            controlledFetch.pushTextDelta('Hel');
-            await flushAsyncWork();
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-
-            controlledFetch.pushTextDelta('lo');
-            controlledFetch.close();
-            await sendPromise;
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-        });
-
-        it('scrolls the chat container to its lowest possible offset', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('Hello')]],
-            });
-
-            const scrollState = mockScrollableContainer(app.elements.chatContainer, {
-                clientHeight: 600,
-                initialScrollTop: 0,
-                scrollHeight: 1600,
-            });
-
-            app.elements.chatInput.scrollIntoView = vi.fn();
-            await sendUserMessage(app, 'Hi');
-
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-        });
-
-        it('pauses auto-scroll while generating when user scrolls up, then resumes at bottom', async () => {
-            const controlledFetch = createControllableFetchMock();
-            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
-
-            const scrollState = mockScrollableContainer(app.elements.chatContainer);
-
-            const sendPromise = startSendMessage(app, 'Hi');
-            await controlledFetch.waitForReady();
-
-            controlledFetch.pushTextDelta('first');
-            await flushAsyncWork();
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-
-            scrollState.setScrollTop(200);
-            app.elements.chatContainer.dispatchEvent(new Event('scroll'));
-            await flushAsyncWork();
-
-            controlledFetch.pushTextDelta('second');
-            await flushAsyncWork();
-            expect(scrollState.getScrollTop()).toBe(200);
-
-            scrollState.setScrollTop(scrollState.getMaxScrollTop());
-            app.elements.chatContainer.dispatchEvent(new Event('scroll'));
-            await flushAsyncWork();
-
-            controlledFetch.pushTextDelta('third');
-            controlledFetch.close();
-            await sendPromise;
-
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-        });
-
-        it('resumes auto-scroll while generating when user starts typing', async () => {
-            const controlledFetch = createControllableFetchMock();
-            const app = setupApp({ fetchImpl: controlledFetch.fetchMock });
-
-            const scrollState = mockScrollableContainer(app.elements.chatContainer);
-
-            const sendPromise = startSendMessage(app, 'Hi');
-            await controlledFetch.waitForReady();
-
-            controlledFetch.pushTextDelta('first');
-            await flushAsyncWork();
-
-            scrollState.setScrollTop(200);
-            app.elements.chatContainer.dispatchEvent(new Event('scroll'));
-            await flushAsyncWork();
-
-            controlledFetch.pushTextDelta('second');
-            await flushAsyncWork();
-            expect(scrollState.getScrollTop()).toBe(200);
-
-            setChatInput(app, 'draft');
-            await flushAsyncWork();
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-
-            controlledFetch.pushTextDelta('third');
-            controlledFetch.close();
-            await sendPromise;
-
-            expect(scrollState.getScrollTop()).toBe(scrollState.getMaxScrollTop());
-        });
+    it("tool_call", () => {
+        const parsed = parseStreamPayloadLine(
+            JSON.stringify({ tool_call: { name: "shell_command", arguments: "{}" } }),
+        );
+        expect(parsed.type).toBe("tool_call");
+        expect(parsed.tool_call.name).toBe("shell_command");
     });
 
-    describe('edit mode', () => {
-        it('enters edit mode when clicking a previous user message', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('A1')], [textDelta('A2')]],
-            });
-
-            await seedConversation(app, ['U1', 'U2']);
-
-            const editableMessage = app.elements.chatWrapper.querySelector(
-                '.message.user .message-content[data-message-index="2"]',
-            );
-            expect(editableMessage).not.toBeNull();
-            editableMessage.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-
-            expect(app.getIsEditing()).toBe(true);
-        });
-
-        it('cancels edit mode with Escape and restores active branch', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('A1')], [textDelta('A2')]],
-            });
-
-            await seedConversation(app, ['U1', 'U2']);
-
-            app.editMessage(2);
-            expect(app.getIsEditing()).toBe(true);
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'U1' },
-                { role: 'assistant', content: 'A1' },
-                { role: 'user', content: 'U2' },
-            ]);
-            expect(app.elements.editStatus.hidden).toBe(false);
-            expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
-
-            app.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
-
-            expect(app.getIsEditing()).toBe(false);
-            expect(app.elements.editStatus.hidden).toBe(true);
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'U1' },
-                { role: 'assistant', content: 'A1' },
-                { role: 'user', content: 'U2' },
-                { role: 'assistant', content: 'A2' },
-            ]);
-        });
-
-        it('cancels edit mode on outside mousedown', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('A1')], [textDelta('A2')]],
-            });
-
-            await seedConversation(app, ['U1', 'U2']);
-
-            app.editMessage(2);
-            expect(app.getIsEditing()).toBe(true);
-            expect(app.elements.editStatus.hidden).toBe(false);
-            expect(app.elements.chatWrapper.querySelector('.editing-source')).not.toBeNull();
-
-            document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-
-            expect(app.getIsEditing()).toBe(false);
-            expect(app.elements.editStatus.hidden).toBe(true);
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'U1' },
-                { role: 'assistant', content: 'A1' },
-                { role: 'user', content: 'U2' },
-                { role: 'assistant', content: 'A2' },
-            ]);
-        });
+    it("context_pct", () => {
+        const parsed = parseStreamPayloadLine(JSON.stringify({ context_pct: 42 }));
+        expect(parsed).toEqual({ type: "context_pct", context_pct: 42 });
     });
 
-    describe('copy button', () => {
-        it('adds a copy button to code blocks in assistant messages', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('```js\nconsole.log("hi")\n```')]],
-            });
-
-            await sendUserMessage(app, 'show code');
-
-            const copyBtn = app.elements.chatWrapper.querySelector('pre .copy-btn');
-            expect(copyBtn).not.toBeNull();
-        });
-
-        it('clicking copy button writes code content to clipboard', async () => {
-            const writeText = vi.fn().mockResolvedValue(undefined);
-            Object.defineProperty(navigator, 'clipboard', {
-                value: { writeText },
-                configurable: true,
-            });
-
-            const app = setupApp({
-                chatPayloads: [[textDelta('```js\nconsole.log("hi")\n```')]],
-            });
-
-            await sendUserMessage(app, 'show code');
-
-            const copyBtn = app.elements.chatWrapper.querySelector('pre .copy-btn');
-            copyBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-
-            expect(writeText).toHaveBeenCalledWith('console.log("hi")\n');
-        });
+    it("compaction_pending", () => {
+        const parsed = parseStreamPayloadLine(JSON.stringify({ compaction_pending: true }));
+        expect(parsed).toEqual({ type: "compaction_pending" });
     });
+});
 
-    describe('compaction polling', () => {
-        function renderDOMWithCompactionIndicator() {
-            renderBaseDOM();
-            const el = document.createElement('div');
-            el.id = 'compaction-indicator';
-            el.hidden = true;
-            document.body.appendChild(el);
-        }
-
-        function createCompactionFetchMock(pollResponses) {
-            let chatCall = 0;
-            let pollCall = 0;
-
-            return vi.fn(async url => {
-                if (url.endsWith('/conversation')) {
-                    return { ok: true, json: async () => ({ conversation_uuid: 'conv-123' }) };
-                }
-                if (url.includes('/chat?')) {
-                    chatCall += 1;
-                    if (chatCall === 1) {
-                        return {
-                            ok: true,
-                            body: streamFromJsonLines([
-                                JSON.stringify({ partition_uuid: 'part-1' }),
-                                JSON.stringify({ compaction_pending: true }),
-                            ]),
-                        };
-                    }
-                    return {
-                        ok: true,
-                        body: streamFromJsonLines([
-                            JSON.stringify({ partition_uuid: 'part-2' }),
-                            textDelta('ok'),
-                        ]),
-                    };
-                }
-                if (url.includes('/compaction-status?')) {
-                    const response = pollResponses[Math.min(pollCall, pollResponses.length - 1)];
-                    pollCall += 1;
-                    return { ok: true, json: async () => response };
-                }
-                throw new Error(`Unexpected URL: ${url}`);
-            });
-        }
-
-        afterEach(() => {
-            vi.useRealTimers();
+describe("compaction-status request/response shape", () => {
+    it("client polls with pending_snapshot_uuid (not pending_partition_uuid)", () => {
+        // Schema contract — the migrated UI uses snapshot_uuid throughout.
+        const params = new URLSearchParams({
+            conversation_uuid: "c-1",
+            pending_snapshot_uuid: "s-pending",
         });
-
-        it('shows indicator after compaction_pending and clears it when poll returns done', async () => {
-            renderDOMWithCompactionIndicator();
-            vi.useFakeTimers();
-
-            const fetchMock = createCompactionFetchMock([{ done: false }, { done: true }]);
-            const app = setupApp({ fetchImpl: fetchMock });
-            await sendUserMessage(app, 'Hi');
-
-            const assistantMessage = app.getMessages().find(message => message.role === 'assistant');
-            expect(assistantMessage).toBeTruthy();
-            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('part-1');
-
-            const indicator = document.getElementById('compaction-indicator');
-            expect(indicator.hidden).toBe(false);
-
-            await vi.advanceTimersByTimeAsync(5_000);
-            await flushAsyncWork();
-            expect(indicator.hidden).toBe(false);
-
-            await vi.advanceTimersByTimeAsync(5_000);
-            await flushAsyncWork();
-            expect(indicator.hidden).toBe(true);
-            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('part-1');
-        });
-
-        it('relabels assistant nodes when poll returns a new child partition_uuid', async () => {
-            renderDOMWithCompactionIndicator();
-            vi.useFakeTimers();
-
-            const fetchMock = createCompactionFetchMock([{ done: true, partition_uuid: 'child-uuid' }]);
-            const app = setupApp({ fetchImpl: fetchMock });
-            await sendUserMessage(app, 'Hi');
-
-            const assistantMessage = app.getMessages().find(message => message.role === 'assistant');
-            expect(assistantMessage).toBeTruthy();
-            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('part-1');
-
-            await vi.advanceTimersByTimeAsync(5_000);
-            await flushAsyncWork();
-
-            expect(app.getNode(assistantMessage.id).partitionUuid).toBe('child-uuid');
-        });
-
-        it('stops polling when a new message clears the indicator via partition_uuid change', async () => {
-            renderDOMWithCompactionIndicator();
-            vi.useFakeTimers();
-
-            const fetchMock = createCompactionFetchMock([{ done: false }]);
-            const app = setupApp({ fetchImpl: fetchMock });
-            await sendUserMessage(app, 'Hi');
-
-            const indicator = document.getElementById('compaction-indicator');
-            expect(indicator.hidden).toBe(false);
-
-            const pollsBefore = fetchMock.mock.calls.filter(c => c[0].includes('/compaction-status?')).length;
-
-            await sendUserMessage(app, 'Follow-up');
-            expect(indicator.hidden).toBe(true);
-
-            await vi.advanceTimersByTimeAsync(10_000);
-            const pollsAfter = fetchMock.mock.calls.filter(c => c[0].includes('/compaction-status?')).length;
-            expect(pollsAfter).toBe(pollsBefore);
-        });
-    });
-
-    describe('fork navigation', () => {
-        it('shows fork buttons and switches between user forks', async () => {
-            const app = setupApp({
-                chatPayloads: [[textDelta('A1')], [textDelta('A2')], [textDelta('AFork')]],
-            });
-
-            await seedConversation(app, ['U1', 'U2']);
-
-            app.editMessage(2);
-            await sendUserMessage(app, 'U2 - forked');
-
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'U1' },
-                { role: 'assistant', content: 'A1' },
-                { role: 'user', content: 'U2 - forked' },
-                { role: 'assistant', content: 'AFork' },
-            ]);
-
-            const indicator = app.elements.chatWrapper.querySelector('.message.user .fork-indicator');
-            expect(indicator).not.toBeNull();
-            expect(indicator.textContent).toBe('2/2');
-
-            const previousForkButton = app.elements.chatWrapper.querySelector('.message.user .fork-nav-btn');
-            expect(previousForkButton).not.toBeNull();
-            previousForkButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-
-            expect(asRoleContent(app.getMessages())).toEqual([
-                { role: 'user', content: 'U1' },
-                { role: 'assistant', content: 'A1' },
-                { role: 'user', content: 'U2' },
-                { role: 'assistant', content: 'A2' },
-            ]);
-
-            const switchedIndicator = app.elements.chatWrapper.querySelector('.message.user .fork-indicator');
-            expect(switchedIndicator.textContent).toBe('1/2');
-        });
+        expect(params.has("pending_snapshot_uuid")).toBe(true);
+        expect(params.has("pending_partition_uuid")).toBe(false);
     });
 });

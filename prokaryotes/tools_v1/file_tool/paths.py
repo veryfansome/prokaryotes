@@ -31,8 +31,8 @@ def _raise_if_file_too_large(fd: int, path: Path, max_file_bytes: int) -> None:
 def _resolve_path(path_arg: str, workspace_root: Path) -> Path:
     """Resolve `path_arg` against `workspace_root` and verify it does not escape it.
 
-    Absolute paths are kept as-is; relative paths are joined against `workspace_root`. The
-    resolved path must lie within `workspace_root.resolve()`."""
+    Absolute paths are kept as-is; relative paths are joined against `workspace_root`. The resolved path must lie
+    within `workspace_root.resolve()`."""
     if not isinstance(path_arg, str) or not path_arg:
         raise ValueError("path is required and must be a non-empty string")
     candidate = Path(path_arg)

@@ -1,451 +1,546 @@
+"""ConversationSyncer._rebuild_from_chain + _walk_snapshot_chain.
+
+Tier-3 load step: walks the snapshot DAG from the client's snapshot_uuid back to a compacted ancestor whose
+boundary_hash matches a prefix of incoming, then builds a Conversation rooted there. Safety: chain walk stops on
+conversation_uuid mismatch, cycles, or missing intermediate docs.
+
+Also covers HarnessBase.stream_and_finalize's handshake + compaction_pending ordering and the
+duplicate-compaction-when-lock-held skip.
+"""
+
+from __future__ import annotations
+
 import json
+from typing import Any
 
 import pytest
 
-from prokaryotes.api_v1.models import (
-    ChatConversation,
-    ContextPartition,
-    ContextPartitionItem,
+from prokaryotes.context_v1.conversation_sync import (
+    SourceIdAssignment,
+    SyncResult,
+    _PartialMessage,
+)
+from prokaryotes.conversation_v1.models import (
+    ConversationMessage,
     compute_boundary_hash,
     compute_tail_hash,
 )
-from prokaryotes.web_v1 import WebBase
-from tests.unit_tests.context_partition_utils import (
+from prokaryotes.harness_v1.base import HarnessBase
+from tests.unit_tests._builders import BOT_ID, bot_msg, msg
+from tests.unit_tests._fakes import (
     FakeRedis,
     FakeSearchClient,
-    make_chat_messages,
-    make_doc,
-    make_message_items,
-    make_web_base,
+    make_syncer,
 )
 
 
-class TrackingWebBase(WebBase):
-    def background_and_forget(self, coro):
-        self.background_tasks.add(coro)
+def _make_partial(messages: list[ConversationMessage]) -> list[_PartialMessage]:
+    """Translate ConversationMessages → _PartialMessages preserving source_ids."""
+    return [
+        _PartialMessage(
+            author_id=m.author_id,
+            content=m.content,
+            client_index=i,
+            source_id=m.source_id,
+            display_name=m.display_name,
+        )
+        for i, m in enumerate(messages)
+    ]
 
 
-def make_compacted_doc(
-        boundary_items: list[ContextPartitionItem],
-        partition: ContextPartition,
-        summary: str,
-        **overrides,
-) -> dict:
-    return make_doc(
-        partition,
-        is_compacted=True,
-        summary=summary,
-        boundary_hash=compute_boundary_hash(boundary_items),
-        boundary_message_count=len(boundary_items),
-        boundary_user_count=sum(1 for item in boundary_items if item.role == "user"),
-        tail_hash=compute_tail_hash(boundary_items),
-        **overrides,
+def _compacted_doc(
+    *,
+    boundary: list[ConversationMessage],
+    snapshot_uuid: str,
+    parent_snapshot_uuid: str | None,
+    summary: str,
+    conversation_uuid: str = "conv",
+    bot_author_id: str = BOT_ID,
+    boundary_message_count_override: int | None = None,
+    boundary_hash_override: str | None = None,
+) -> dict[str, Any]:
+    """Build a FakeSearchClient-compatible compacted doc with valid boundary fields."""
+    return {
+        "snapshot_uuid": snapshot_uuid,
+        "conversation_uuid": conversation_uuid,
+        "parent_snapshot_uuid": parent_snapshot_uuid,
+        "bot_author_id": bot_author_id,
+        "compaction_state": "committed",
+        "is_compacted": True,
+        "summary": summary,
+        "ancestor_summaries": [],
+        "boundary_hash": boundary_hash_override or compute_boundary_hash(boundary),
+        "boundary_message_count": boundary_message_count_override or len(boundary),
+        "boundary_user_count": sum(1 for m in boundary if m.author_id != bot_author_id),
+        "tail_hash": compute_tail_hash(boundary, bot_author_id),
+        "messages_json": json.dumps({"messages": [m.model_dump() for m in boundary]}),
+        "lifted_turn_items_json": json.dumps({"items": []}),
+        "lifted_anchor_source_id": None,
+        "raw_message_start_index": 0,
+    }
+
+
+def _seed_doc(search: FakeSearchClient, doc: dict[str, Any]) -> None:
+    search.conversations[doc["snapshot_uuid"]] = doc
+
+
+# -----------------------------------------------------------------------------
+# _walk_snapshot_chain — safety tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_walk_snapshot_chain_stops_on_conversation_uuid_mismatch():
+    syncer, _, search = make_syncer()
+    _seed_doc(
+        search, _compacted_doc(boundary=[msg("1", "U1")], snapshot_uuid="p1", parent_snapshot_uuid="p0", summary="S1")
+    )
+    _seed_doc(
+        search,
+        _compacted_doc(
+            boundary=[msg("1", "U1")],
+            snapshot_uuid="p0",
+            parent_snapshot_uuid=None,
+            summary="S0",
+            conversation_uuid="OTHER",
+        ),
     )
 
+    chain = await syncer._walk_snapshot_chain(conversation_uuid="conv", snapshot_uuid="p1")
 
-def make_tracking_web_base(redis_data: dict | None = None, search_client=None) -> TrackingWebBase:
-    wb = object.__new__(TrackingWebBase)
-    wb.background_tasks = set()
-    wb._conversation_cache_ex = 3600
-    wb._redis_client = FakeRedis(redis_data)
-    wb._search_client = search_client or FakeSearchClient()
-    return wb
+    # The walk stops when the parent doc belongs to a different conversation_uuid.
+    assert [d["snapshot_uuid"] for d in chain] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_walk_snapshot_chain_stops_on_cycle():
+    syncer, _, search = make_syncer()
+    # p1 → p0 → p1 cycle.
+    _seed_doc(
+        search, _compacted_doc(boundary=[msg("1", "U1")], snapshot_uuid="p1", parent_snapshot_uuid="p0", summary="S1")
+    )
+    _seed_doc(
+        search, _compacted_doc(boundary=[msg("1", "U1")], snapshot_uuid="p0", parent_snapshot_uuid="p1", summary="S0")
+    )
+
+    chain = await syncer._walk_snapshot_chain(conversation_uuid="conv", snapshot_uuid="p1")
+
+    # Walk follows the cycle once and stops on seen-set hit.
+    assert [d["snapshot_uuid"] for d in chain] == ["p1", "p0"]
+
+
+@pytest.mark.asyncio
+async def test_walk_snapshot_chain_stops_when_intermediate_doc_missing():
+    syncer, _, search = make_syncer()
+    _seed_doc(
+        search,
+        _compacted_doc(boundary=[msg("1", "U1")], snapshot_uuid="p1", parent_snapshot_uuid="p0-missing", summary="S1"),
+    )
+    # p0-missing has no ES doc; the walk halts.
+
+    chain = await syncer._walk_snapshot_chain(conversation_uuid="conv", snapshot_uuid="p1")
+
+    assert [d["snapshot_uuid"] for d in chain] == ["p1"]
+
+
+# -----------------------------------------------------------------------------
+# _rebuild_from_chain — semantic tests
+# -----------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_rebuild_from_chain_assembles_two_generation_summaries_in_order():
-    p0_items = make_message_items(("user", "U1"), ("assistant", "A1"))
-    p1_boundary_items = make_message_items(
-        ("user", "U1"),
-        ("assistant", "A1"),
-        ("user", "U2"),
-        ("assistant", "A2"),
-    )
-    p0 = ContextPartition(conversation_uuid="conv", partition_uuid="p0", items=p0_items)
-    p1 = ContextPartition(
+    """Two compacted ancestors with valid boundaries → ancestor_summaries populated outer-first."""
+    syncer, _, search = make_syncer()
+    p0_boundary = [msg("1", "U1"), bot_msg("2", "A1")]
+    p1_boundary = p0_boundary + [msg("3", "U2"), bot_msg("4", "A2")]
+    _seed_doc(search, _compacted_doc(boundary=p0_boundary, snapshot_uuid="p0", parent_snapshot_uuid=None, summary="S0"))
+    _seed_doc(search, _compacted_doc(boundary=p1_boundary, snapshot_uuid="p1", parent_snapshot_uuid="p0", summary="S1"))
+
+    incoming = p1_boundary + [msg("5", "U3")]
+    rebuilt = await syncer._rebuild_from_chain(
         conversation_uuid="conv",
-        partition_uuid="p1",
-        parent_partition_uuid="p0",
-        ancestor_summaries=["S0"],
-        raw_message_start_index=2,
-        items=make_message_items(("user", "U2"), ("assistant", "A2")),
-    )
-    search = FakeSearchClient([
-        make_compacted_doc(p0_items, p0, summary="S0"),
-        make_compacted_doc(p1_boundary_items, p1, summary="S1"),
-    ])
-    wb = make_web_base(search_client=search)
-    conversation = ChatConversation(
-        conversation_uuid="conv",
-        partition_uuid="p1",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U2"),
-            ("assistant", "A2"),
-            ("user", "U3"),
-        ),
+        snapshot_uuid="p1",
+        bot_author_id=BOT_ID,
+        partial=_make_partial(incoming),
+        head_doc=None,
     )
 
-    partition = await wb._rebuild_from_chain(conversation)
-
-    assert partition.parent_partition_uuid == "p1"
-    assert partition.ancestor_summaries == ["S0", "S1"]
-    assert partition.raw_message_start_index == 4
-    assert partition.items == [ContextPartitionItem(role="user", content="U3")]
+    assert rebuilt.parent_snapshot_uuid == "p1"
+    assert rebuilt.ancestor_summaries == ["S0", "S1"]
+    assert rebuilt.raw_message_start_index == 4
+    assert [m.source_id for m in rebuilt.messages] == ["5"]
 
 
 @pytest.mark.asyncio
 async def test_rebuild_from_chain_does_not_inject_stale_summary_without_valid_boundary():
-    p0_items = make_message_items(("user", "U1"), ("assistant", "A1"))
-    p0 = ContextPartition(conversation_uuid="conv", partition_uuid="p0", items=p0_items)
-    wb = make_web_base(search_client=FakeSearchClient([
-        make_compacted_doc(p0_items, p0, summary="Stale summary"),
-    ]))
-    conversation = ChatConversation(
-        conversation_uuid="conv",
-        partition_uuid="p0",
-        messages=make_chat_messages(("user", "Edited U1"), ("assistant", "A1")),
+    """If an ancestor's boundary_hash doesn't match incoming, its summary is skipped. With no matching
+    ancestor, fall back to a fresh Conversation (no ancestors)."""
+    syncer, _, search = make_syncer()
+    _seed_doc(
+        search,
+        _compacted_doc(
+            boundary=[msg("1", "U1")],
+            snapshot_uuid="p1",
+            parent_snapshot_uuid=None,
+            summary="S1",
+            boundary_hash_override="bogus",
+        ),
     )
 
-    partition = await wb.sync_context_partition(conversation)
+    rebuilt = await syncer._rebuild_from_chain(
+        conversation_uuid="conv",
+        snapshot_uuid="p1",
+        bot_author_id=BOT_ID,
+        partial=_make_partial([msg("1", "U1")]),
+        head_doc=None,
+    )
 
-    assert partition.parent_partition_uuid is None
-    assert partition.ancestor_summaries == []
-    assert partition.items == make_message_items(("user", "Edited U1"), ("assistant", "A1"))
+    assert rebuilt.ancestor_summaries == []
+    assert rebuilt.parent_snapshot_uuid is None
+    assert rebuilt.raw_message_start_index == 0
 
 
 @pytest.mark.asyncio
 async def test_rebuild_from_chain_includes_only_summaries_up_to_matched_ancestor():
-    p0_items = make_message_items(("user", "U1"), ("assistant", "A1"))
-    p1_boundary_items = make_message_items(
-        ("user", "U1"),
-        ("assistant", "A1"),
-        ("user", "U2"),
-        ("assistant", "A2"),
-    )
-    p0 = ContextPartition(conversation_uuid="conv", partition_uuid="p0", items=p0_items)
-    p1 = ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="p1",
-        parent_partition_uuid="p0",
-        ancestor_summaries=["S0"],
-        raw_message_start_index=2,
-        items=make_message_items(("user", "U2"), ("assistant", "A2")),
-    )
-    search = FakeSearchClient([
-        make_compacted_doc(p0_items, p0, summary="S0"),
-        make_compacted_doc(p1_boundary_items, p1, summary="S1"),
-    ])
-    wb = make_web_base(search_client=search)
-    conversation = ChatConversation(
-        conversation_uuid="conv",
-        partition_uuid="p1",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U3-new"),
+    """Three-generation chain where only the middle ancestor's boundary matches: ancestor_summaries includes
+    the outer and middle, but NOT the inner (younger than the matched deepest-valid ancestor)."""
+    syncer, _, search = make_syncer()
+    p0_boundary = [msg("1", "U1"), bot_msg("2", "A1")]
+    p1_boundary = p0_boundary + [msg("3", "U2"), bot_msg("4", "A2")]
+    p2_boundary = p1_boundary + [msg("5", "U3"), bot_msg("6", "A3")]
+
+    _seed_doc(search, _compacted_doc(boundary=p0_boundary, snapshot_uuid="p0", parent_snapshot_uuid=None, summary="S0"))
+    _seed_doc(search, _compacted_doc(boundary=p1_boundary, snapshot_uuid="p1", parent_snapshot_uuid="p0", summary="S1"))
+    # p2's boundary_hash points at a different set — doesn't match incoming.
+    _seed_doc(
+        search,
+        _compacted_doc(
+            boundary=p2_boundary,
+            snapshot_uuid="p2",
+            parent_snapshot_uuid="p1",
+            summary="S2",
+            boundary_hash_override="bogus",
         ),
     )
 
-    partition = await wb._rebuild_from_chain(conversation)
+    incoming = p1_boundary + [msg("7", "U4")]
+    rebuilt = await syncer._rebuild_from_chain(
+        conversation_uuid="conv",
+        snapshot_uuid="p2",
+        bot_author_id=BOT_ID,
+        partial=_make_partial(incoming),
+        head_doc=None,
+    )
 
-    assert partition.parent_partition_uuid == "p0"
-    assert partition.ancestor_summaries == ["S0"]
-    assert partition.raw_message_start_index == 2
-    assert partition.items == [ContextPartitionItem(role="user", content="U3-new")]
+    assert rebuilt.ancestor_summaries == ["S0", "S1"]
+    assert rebuilt.parent_snapshot_uuid == "p1"
 
 
 @pytest.mark.asyncio
 async def test_rebuild_from_chain_uses_deepest_valid_compacted_ancestor():
-    p0_items = make_message_items(("user", "U1"), ("assistant", "A1"))
-    p0 = ContextPartition(conversation_uuid="conv", partition_uuid="p0", items=p0_items)
-    p1 = ContextPartition(
+    """When multiple ancestors have matching boundary_hashes, prefer the deepest (most-recent) — its
+    raw_message_start_index is later, so less is replayed as raw window."""
+    syncer, _, search = make_syncer()
+    p0_boundary = [msg("1", "U1"), bot_msg("2", "A1")]
+    p1_boundary = p0_boundary + [msg("3", "U2"), bot_msg("4", "A2")]
+
+    _seed_doc(search, _compacted_doc(boundary=p0_boundary, snapshot_uuid="p0", parent_snapshot_uuid=None, summary="S0"))
+    _seed_doc(search, _compacted_doc(boundary=p1_boundary, snapshot_uuid="p1", parent_snapshot_uuid="p0", summary="S1"))
+
+    incoming = p1_boundary + [msg("5", "U3")]
+    rebuilt = await syncer._rebuild_from_chain(
         conversation_uuid="conv",
-        partition_uuid="p1",
-        parent_partition_uuid="p0",
-        ancestor_summaries=["Summary P0"],
-        raw_message_start_index=2,
-        items=make_message_items(("user", "U2")),
-    )
-    search = FakeSearchClient([
-        make_compacted_doc(p0_items, p0, summary="Summary P0"),
-        make_doc(p1),
-    ])
-    wb = make_web_base(search_client=search)
-    conversation = ChatConversation(
-        conversation_uuid="conv",
-        partition_uuid="p1",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U2-new"),
-        ),
+        snapshot_uuid="p1",
+        bot_author_id=BOT_ID,
+        partial=_make_partial(incoming),
+        head_doc=None,
     )
 
-    partition = await wb.sync_context_partition(conversation)
-
-    assert partition.parent_partition_uuid == "p0"
-    assert partition.ancestor_summaries == ["Summary P0"]
-    assert partition.raw_message_start_index == 2
-    assert partition.items == [ContextPartitionItem(role="user", content="U2-new")]
+    # Deepest match (p1) is preferred — parent is p1, raw_start = p1's boundary count.
+    assert rebuilt.parent_snapshot_uuid == "p1"
+    assert rebuilt.raw_message_start_index == len(p1_boundary)
 
 
 @pytest.mark.asyncio
-async def test_stream_and_finalize_emits_partition_uuid_and_compaction_pending():
-    wb = make_tracking_web_base()
-    partition = ContextPartition(
-        conversation_uuid="abc",
-        items=[ContextPartitionItem(role="user", content="Hi")],
+async def test_rebuild_from_chain_restores_lifted_state_from_active_descendant():
+    """Cold rebuild against a compacted ancestor must restore the descendant's `lifted_turn_items` +
+    `lifted_anchor_source_id`. Without this, a Redis miss with the client anchored at the parent silently drops
+    the file-tool live windows carried forward by compaction."""
+    syncer, _, search = make_syncer()
+    p0_boundary = [msg("1", "U1"), bot_msg("2", "A1")]
+    p1_boundary = p0_boundary + [msg("3", "U2"), bot_msg("4", "A2")]
+
+    # Compacted ancestor (matched_ancestor in the rebuild path).
+    _seed_doc(
+        search,
+        _compacted_doc(boundary=p1_boundary, snapshot_uuid="p1", parent_snapshot_uuid=None, summary="S1"),
+    )
+    # Active descendant the compactor wrote with lifted state.
+    from prokaryotes.conversation_v1.models import TurnItem
+    lifted_items = [
+        TurnItem(type="function_call", call_id="c1", name="file_tool"),
+        TurnItem(type="function_call_output", call_id="c1", output="FILE ..."),
+    ]
+    _seed_doc(
+        search,
+        {
+            "snapshot_uuid": "child",
+            "conversation_uuid": "conv",
+            "parent_snapshot_uuid": "p1",
+            "bot_author_id": BOT_ID,
+            "compaction_state": "committed",
+            "is_compacted": False,
+            "lifted_turn_items_json": json.dumps({"items": [i.model_dump() for i in lifted_items]}),
+            "lifted_anchor_source_id": "4",
+            "raw_message_start_index": len(p1_boundary),
+            "messages_json": json.dumps({"messages": []}),
+            "dt_modified": "2024-01-01T00:00:00",
+        },
     )
 
-    async def fake_compact(snapshot):
+    incoming = p1_boundary + [msg("5", "U3")]
+    rebuilt = await syncer._rebuild_from_chain(
+        conversation_uuid="conv",
+        snapshot_uuid="p1",
+        bot_author_id=BOT_ID,
+        partial=_make_partial(incoming),
+        head_doc=None,
+    )
+
+    assert rebuilt.parent_snapshot_uuid == "p1"
+    assert len(rebuilt.lifted_turn_items) == 2
+    assert rebuilt.lifted_anchor_source_id == "4"
+
+
+@pytest.mark.asyncio
+async def test_rebuild_from_chain_lifted_state_empty_when_no_descendant():
+    """When the compacted ancestor has no active descendant (e.g. orphan parent), rebuilt lifted state is
+    empty — `anchor=None iff lifted_turn_items==[]`."""
+    syncer, _, search = make_syncer()
+    boundary = [msg("1", "U1"), bot_msg("2", "A1")]
+    _seed_doc(
+        search,
+        _compacted_doc(boundary=boundary, snapshot_uuid="p1", parent_snapshot_uuid=None, summary="S1"),
+    )
+
+    incoming = boundary + [msg("3", "U2")]
+    rebuilt = await syncer._rebuild_from_chain(
+        conversation_uuid="conv",
+        snapshot_uuid="p1",
+        bot_author_id=BOT_ID,
+        partial=_make_partial(incoming),
+        head_doc=None,
+    )
+
+    assert rebuilt.parent_snapshot_uuid == "p1"
+    assert rebuilt.lifted_turn_items == []
+    assert rebuilt.lifted_anchor_source_id is None
+
+
+@pytest.mark.asyncio
+async def test_rebuild_from_chain_returns_fresh_when_no_snapshot_uuid():
+    """A fresh conversation (no client-supplied snapshot_uuid) returns a fresh Conversation with no
+    ancestors."""
+    syncer, _, _ = make_syncer()
+
+    rebuilt = await syncer._rebuild_from_chain(
+        conversation_uuid="conv",
+        snapshot_uuid=None,
+        bot_author_id=BOT_ID,
+        partial=_make_partial([msg("1", "U1")]),
+        head_doc=None,
+    )
+
+    assert rebuilt.ancestor_summaries == []
+    assert rebuilt.parent_snapshot_uuid is None
+    assert rebuilt.messages == []
+
+
+# -----------------------------------------------------------------------------
+# stream_and_finalize handshake + compaction_pending
+# -----------------------------------------------------------------------------
+
+
+class _StubHarness(HarnessBase):
+    """Concrete HarnessBase for stream_and_finalize tests. Stubs out finalize_turn so we don't need to wire ES
+    persistence."""
+
+    def __init__(self, redis: FakeRedis, search: FakeSearchClient):
+        self._redis_client = redis
+        self._search_client = search
+        self.background_tasks = set()
+        self._finalize_calls: list[dict] = []
+
+    @property
+    def conversation_cache_ex(self) -> int:
+        return 3600
+
+    async def finalize_turn(self, *, conversation, bot_message_source_id, bot_message_content, turn_items):
+        self._finalize_calls.append(
+            {
+                "snapshot_uuid": conversation.snapshot_uuid,
+                "bot_message_source_id": bot_message_source_id,
+                "bot_message_content": bot_message_content,
+                "turn_items": list(turn_items),
+            }
+        )
+
+    def background_and_forget(self, coro):
+        self.background_tasks.add(coro)
+        coro.close()  # don't schedule — these tests only check emission ordering
+
+
+def _make_sync_result(snapshot_uuid: str = "snap") -> SyncResult:
+    from tests.unit_tests._builders import conversation
+
+    return SyncResult(
+        conversation=conversation(msg("1", "U1"), snapshot_uuid=snapshot_uuid),
+        source_id_assignments=[SourceIdAssignment(client_index=0, source_id="1")],
+        is_new_branch=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_and_finalize_emits_handshake_first_and_compaction_pending_last():
+    """First event = handshake carrying snapshot_uuid and source_id_assignments. Last event before completion
+    = compaction_pending (when lock acquired)."""
+    redis = FakeRedis()
+    search = FakeSearchClient()
+    harness = _StubHarness(redis, search)
+    sync_result = _make_sync_result()
+
+    async def factory(ctx):
+        ctx.final_assistant_text.append("Done.")
+        yield '{"text_delta": "Done."}\n'
+
+    async def compact_fn(_snapshot, _prep):
         return "Summary"
 
-    async def fake_generator():
-        yield json.dumps({"text_delta": "Hello"}) + "\n"
-
-    events = []
-    async for chunk in wb.stream_and_finalize(
-        context_partition=partition,
-        conversation_uuid="abc",
-        response_generator=fake_generator(),
+    chunks: list[str] = []
+    async for chunk in harness.stream_and_finalize(
+        sync_result=sync_result,
+        bot_message_source_id_provider=lambda c: "2.000000",
+        response_generator_factory=factory,
+        compact_fn=compact_fn,
         pending_compaction=[True],
-        compact_fn=fake_compact,
     ):
-        events.append(json.loads(chunk.strip()))
+        chunks.append(chunk)
 
-    try:
-        assert events[0] == {"partition_uuid": partition.partition_uuid}
-        assert {"compaction_pending": True} in events
-        assert len(wb.background_tasks) == 1
-    finally:
-        for coro in wb.background_tasks:
-            coro.close()
+    # First event: handshake.
+    first = json.loads(chunks[0])
+    assert first["snapshot_uuid"] == "snap"
+    assert first["source_id_assignments"] == [{"client_index": 0, "source_id": "1"}]
+    # Last event: compaction_pending.
+    last = json.loads(chunks[-1])
+    assert last == {"compaction_pending": True}
+    # bot_message arrives before compaction_pending.
+    parsed = [json.loads(c) for c in chunks]
+    bot_idx = next(i for i, p in enumerate(parsed) if "bot_message" in p)
+    pending_idx = next(i for i, p in enumerate(parsed) if "compaction_pending" in p)
+    assert bot_idx < pending_idx
 
 
 @pytest.mark.asyncio
 async def test_stream_and_finalize_skips_duplicate_compaction_when_lock_held():
-    wb = make_tracking_web_base(redis_data={"compaction_lock:abc": "1"})
-    partition = ContextPartition(
-        conversation_uuid="abc",
-        items=[ContextPartitionItem(role="user", content="Hi")],
-    )
+    """If `compaction_lock:` already exists (`nx=True` fails), no compaction_pending event and no background
+    compaction kicked off."""
+    redis = FakeRedis()
+    await redis.set("compaction_lock:c-1", "1")  # pre-acquired lock
+    search = FakeSearchClient()
+    harness = _StubHarness(redis, search)
+    sync_result = _make_sync_result()
 
-    async def fake_compact(snapshot):
+    async def factory(ctx):
+        ctx.final_assistant_text.append("Done.")
+        yield '{"text_delta": "Done."}\n'
+
+    async def compact_fn(_snapshot, _prep):
         return "Summary"
 
-    async def fake_generator():
-        yield json.dumps({"text_delta": "Hello"}) + "\n"
-
-    events = []
-    async for chunk in wb.stream_and_finalize(
-        context_partition=partition,
-        conversation_uuid="abc",
-        response_generator=fake_generator(),
+    chunks: list[str] = []
+    async for chunk in harness.stream_and_finalize(
+        sync_result=sync_result,
+        bot_message_source_id_provider=lambda c: "2.000000",
+        response_generator_factory=factory,
+        compact_fn=compact_fn,
         pending_compaction=[True],
-        compact_fn=fake_compact,
     ):
-        events.append(json.loads(chunk.strip()))
+        chunks.append(chunk)
 
-    assert len(wb.background_tasks) == 1
-    [finalize_coro] = list(wb.background_tasks)
-    try:
-        assert {"compaction_pending": True} not in events
-        assert finalize_coro.cr_code.co_name == "finalize"
-        assert wb.redis_client.sets == []
-    finally:
-        finalize_coro.close()
+    parsed = [json.loads(c) for c in chunks]
+    assert not any("compaction_pending" in p for p in parsed)
+    assert len(harness.background_tasks) == 0
 
 
 @pytest.mark.asyncio
-async def test_sync_context_partition_accepts_compacted_child_of_client_partition():
-    compacted_child = ContextPartition(
-        conversation_uuid="abc",
-        partition_uuid="new-active",
-        parent_partition_uuid="client-old",
-        ancestor_summaries=["Summary of U1/A1."],
-        raw_message_start_index=2,
-        items=make_message_items(("user", "U2"), ("assistant", "A2")),
-    )
-    wb = make_web_base({"context_partition:abc": compacted_child.model_dump_json()})
-    conversation = ChatConversation(
-        conversation_uuid="abc",
-        partition_uuid="client-old",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U2"),
-            ("assistant", "A2"),
-            ("user", "U3"),
-        ),
-    )
+async def test_stream_and_finalize_omits_bot_message_when_no_final_text():
+    """If the LLM stream aborts without producing final assistant text, no bot_message event is emitted and no
+    finalize_turn happens (the client must not create an assistant node)."""
+    redis = FakeRedis()
+    search = FakeSearchClient()
+    harness = _StubHarness(redis, search)
+    sync_result = _make_sync_result()
 
-    partition = await wb.sync_context_partition(conversation)
+    async def factory(ctx):
+        # No final_assistant_text appended.
+        yield '{"context_pct": 50}\n'
 
-    assert partition.partition_uuid == "new-active"
-    assert partition.parent_partition_uuid == "client-old"
-    assert partition.ancestor_summaries == ["Summary of U1/A1."]
-    assert partition.raw_message_start_index == 2
-    assert partition.items[-1] == ContextPartitionItem(role="user", content="U3")
+    chunks: list[str] = []
+    async for chunk in harness.stream_and_finalize(
+        sync_result=sync_result,
+        bot_message_source_id_provider=lambda c: "2.000000",
+        response_generator_factory=factory,
+        compact_fn=None,
+        pending_compaction=None,
+    ):
+        chunks.append(chunk)
+
+    parsed = [json.loads(c) for c in chunks]
+    assert not any("bot_message" in p for p in parsed)
+    assert harness._finalize_calls == []
 
 
 @pytest.mark.asyncio
-async def test_sync_context_partition_edit_within_raw_window_preserves_ancestor_summaries():
-    cached = ContextPartition(
-        conversation_uuid="abc",
-        partition_uuid="p1",
-        ancestor_summaries=["Summary P0"],
-        raw_message_start_index=2,
-        items=make_message_items(
-            ("user", "U2"),
-            ("assistant", "A2"),
-            ("user", "U3"),
-            ("assistant", "A3"),
-        ),
-    )
-    wb = make_web_base({"context_partition:abc": cached.model_dump_json()})
-    conversation = ChatConversation(
-        conversation_uuid="abc",
-        partition_uuid="p1",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U2"),
-            ("assistant", "A2"),
-            ("user", "U3-edited"),
-        ),
+async def test_stream_and_finalize_resync_closes_stream_after_handshake():
+    """On resync, the handshake carries unacknowledged_bot_messages and the stream closes without invoking the
+    LLM."""
+    from prokaryotes.context_v1.conversation_sync import UnacknowledgedBotMessage
+    from tests.unit_tests._builders import conversation
+
+    redis = FakeRedis()
+    search = FakeSearchClient()
+    harness = _StubHarness(redis, search)
+
+    sync_result = SyncResult(
+        conversation=conversation(msg("1", "U1"), snapshot_uuid="snap"),
+        source_id_assignments=[],
+        is_new_branch=False,
+        resync=True,
+        unacknowledged_bot_messages=[
+            UnacknowledgedBotMessage(source_id="2", content="A1", parent_source_id="1"),
+        ],
     )
 
-    partition = await wb.sync_context_partition(conversation)
+    factory_called = [False]
 
-    assert partition.ancestor_summaries == ["Summary P0"]
-    assert partition.raw_message_start_index == 2
-    assert partition.items == make_message_items(
-        ("user", "U2"),
-        ("assistant", "A2"),
-        ("user", "U3-edited"),
-    )
+    async def factory(ctx):
+        factory_called[0] = True
+        yield ""
 
+    chunks: list[str] = []
+    async for chunk in harness.stream_and_finalize(
+        sync_result=sync_result,
+        bot_message_source_id_provider=lambda c: "X",
+        response_generator_factory=factory,
+    ):
+        chunks.append(chunk)
 
-@pytest.mark.asyncio
-async def test_sync_context_partition_retry_before_raw_window_start_falls_back_to_fresh_partition():
-    cached = ContextPartition(
-        conversation_uuid="abc",
-        partition_uuid="p1",
-        ancestor_summaries=["Summary P0"],
-        raw_message_start_index=4,
-        items=make_message_items(
-            ("user", "U3"),
-            ("assistant", "A3"),
-            ("user", "U4"),
-            ("assistant", "A4"),
-        ),
-    )
-    wb = make_web_base({"context_partition:abc": cached.model_dump_json()})
-    conversation = ChatConversation(
-        conversation_uuid="abc",
-        partition_uuid="p1",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U2-edited"),
-        ),
-    )
-
-    partition = await wb.sync_context_partition(conversation)
-
-    assert partition.ancestor_summaries == []
-    assert partition.raw_message_start_index == 0
-    assert partition.items == make_message_items(
-        ("user", "U1"),
-        ("assistant", "A1"),
-        ("user", "U2-edited"),
-    )
-
-
-def test_sync_context_window_with_raw_message_start_index():
-    context_partition = ContextPartition(
-        conversation_uuid="test",
-        ancestor_summaries=["Earlier summary"],
-        raw_message_start_index=2,
-        items=make_message_items(("user", "U2"), ("assistant", "A2")),
-    )
-
-    context_partition.sync_from_conversation(ChatConversation(
-        conversation_uuid="abc",
-        messages=make_chat_messages(
-            ("user", "U1"),
-            ("assistant", "A1"),
-            ("user", "U2"),
-            ("assistant", "A2"),
-            ("user", "U3"),
-        ),
-    ))
-
-    assert context_partition.items == make_message_items(
-        ("user", "U2"),
-        ("assistant", "A2"),
-        ("user", "U3"),
-    )
-
-
-@pytest.mark.asyncio
-async def test_walk_partition_chain_stops_on_conversation_uuid_mismatch():
-    p0 = ContextPartition(
-        conversation_uuid="conv-b",
-        partition_uuid="p0",
-        items=make_message_items(("user", "U0")),
-    )
-    p1 = ContextPartition(
-        conversation_uuid="conv-a",
-        partition_uuid="p1",
-        parent_partition_uuid="p0",
-        items=make_message_items(("user", "U1")),
-    )
-    wb = make_web_base(search_client=FakeSearchClient([
-        make_doc(p0),
-        make_doc(p1),
-    ]))
-
-    chain = await wb._walk_partition_chain("conv-a", "p1")
-
-    assert [doc["partition_uuid"] for doc in chain] == ["p1"]
-
-
-@pytest.mark.asyncio
-async def test_walk_partition_chain_stops_on_cycle():
-    p2 = ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="p2",
-        parent_partition_uuid="p2",
-        items=make_message_items(("user", "U2")),
-    )
-    wb = make_web_base(search_client=FakeSearchClient([make_doc(p2)]))
-
-    chain = await wb._walk_partition_chain("conv", "p2")
-
-    assert [doc["partition_uuid"] for doc in chain] == ["p2"]
-
-
-@pytest.mark.asyncio
-async def test_walk_partition_chain_stops_when_intermediate_partition_missing():
-    p0 = ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="p0",
-        items=make_message_items(("user", "U0")),
-    )
-    p2 = ContextPartition(
-        conversation_uuid="conv",
-        partition_uuid="p2",
-        parent_partition_uuid="p1",
-        items=make_message_items(("user", "U2")),
-    )
-    wb = make_web_base(search_client=FakeSearchClient([
-        make_doc(p0),
-        make_doc(p2),
-    ]))
-
-    chain = await wb._walk_partition_chain("conv", "p2")
-
-    assert [doc["partition_uuid"] for doc in chain] == ["p2"]
+    assert len(chunks) == 1
+    handshake = json.loads(chunks[0])
+    assert handshake["snapshot_uuid"] == "snap"
+    assert handshake["unacknowledged_bot_messages"] == [
+        {"source_id": "2", "content": "A1", "parent_source_id": "1"},
+    ]
+    # Factory never called on resync.
+    assert factory_called[0] is False

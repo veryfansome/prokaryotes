@@ -1,135 +1,62 @@
 # Conversation Compaction
 
-## Overview
-
-Provider LLM APIs impose hard context-window limits. Without intervention, a long conversation eventually exceeds the limit and subsequent requests fail. Compaction allows conversations to continue indefinitely by periodically summarizing the oldest portion of the conversation history and replacing it with a compact, LLM-generated briefing. The rest of the system — branching, retries, Redis caching, Elasticsearch persistence — continues to function correctly across compaction boundaries.
+Compaction is a lifecycle operation on the [conversation model](../conversation/README.md): it lets a conversation run indefinitely past the provider's context-window limit by periodically summarizing the oldest history into a compact, LLM-generated briefing. This doc covers the compaction-specific machinery; the `Conversation` primitives, reconciliation, the wire protocol, and branching are documented in [conversation/README.md](../conversation/README.md).
 
 ---
 
 ## Core Concepts
 
-### Partition Chains
+### Snapshot chains
 
-Before compaction, a conversation is a single flat `ContextPartition`: an ordered list of items (messages, tool calls, tool outputs) keyed by `conversation_uuid` in Redis. Compaction introduces a **chain** of partitions:
+Before compaction a conversation is a single flat `Conversation` snapshot. Compaction introduces a **linear chain** within the snapshot DAG:
+
 ```
 [P0: compacted] → [P1: compacted] → [P2: active]
 ```
 
-Each partition carries a `partition_uuid` and an optional `parent_partition_uuid` that points to its predecessor. A compacted partition is sealed — its raw items are archived in Elasticsearch and it carries an LLM-generated summary of its contents. The active partition is the current working set and is the only one cached in Redis.
+A compacted snapshot is sealed (`is_compacted=True`) and carries an LLM-generated `summary`. The active snapshot is the working set and the only one cached in Redis at `conversation:{conversation_uuid}`. (The DAG also has *branch* edges from edit/regenerate — see [conversation/README.md](../conversation/README.md#branches-and-snapshots).)
 
 When the model is called, context is assembled as:
+
 ```
-[core instructions] + [summary block from P0/P1] + [raw items from P2]
+[core instructions] + [summary block from compacted ancestors] + [projected active snapshot]
 ```
 
-Summaries are injected into the system (Anthropic) or developer (OpenAI) message as a trailing `# Compacted conversation summary` background-memory section after the core instructions. They are not injected as conversation turns, which means the model sees them as context rather than as attributed exchanges.
+Summaries enter via the system (Anthropic) / developer (OpenAI) `instruction` parameter as a trailing `# Compacted conversation summary` background-memory section — never as conversation turns, so they aren't conflated with real dialogue.
 
-### Ancestor Summaries
+### Ancestor summaries
 
-Each `ContextPartition` carries an `ancestor_summaries` list — the ordered (oldest-first) collection of summaries from all compacted ancestors. Because summaries are immutable once generated, they are cached in Redis alongside the raw items of the active partition. This means the chain walk through Elasticsearch is paid exactly once per branch: after a structural rebuild the partition written to Redis already includes all ancestor summaries, and subsequent requests on that branch take the Redis fast path with no further ES involvement.
+Each `Conversation` carries `ancestor_summaries` — ordered oldest-first, immutable, riding with the snapshot through Redis. The ES chain walk is paid once per branch reconstruction; subsequent requests take the Redis fast path.
 
-### Recency Tail
+### Recency tail
 
-When a partition is compacted, the most recent K user/assistant message turns are retained verbatim in the new active partition rather than being swept into the summary. This recency tail gives the model literal context for the exchanges most likely to be referenced in the next turn. The tail size K is configurable via `COMPACTION_RECENCY_TAIL` (default 6 messages).
+On compaction, the most recent K user/assistant messages stay verbatim in the new active snapshot (`COMPACTION_RECENCY_TAIL`, default 6). `raw_message_start_index` tracks the boundary — the count of non-deleted messages folded into the compacted ancestor chain. The child's `messages` holds only the recency tail plus anything appended while the summary was in flight; the compacted prefix is reconstructed from the parent chain when needed.
 
-The boundary between summarized history and verbatim recency tail is tracked by `raw_message_start_index` on the active partition: the integer offset into the full `ChatConversation.messages` list where the partition's raw span begins. A fresh partition always has `raw_message_start_index = 0`.
+### Boundary hashing
 
-### Boundary Hashing
+A summary is only valid if the branch that produced it is provably identical to the current branch. Each compacted snapshot stores a `boundary_hash` — a SHA-256 over the `(author_id, content)` sequence of every non-deleted message the summary covers. On chain reconstruction the server recomputes the hash over the corresponding prefix of incoming and compares; a mismatch means the branches diverged before the boundary and the summary is not used. A secondary `tail_hash` (last N user-message contents) is a lookup key for tail-based discovery.
 
-A compacted partition's summary is only valid if the conversation branch that produced it is provably identical to the current branch. To enforce this, each compacted partition stores a `boundary_hash` — a SHA-256 digest of the full role/content sequence of every user and assistant message covered by the summary.
+### Lifted items and the file-tool anchor
 
-When the server needs to determine whether a compacted ancestor's summary is applicable (e.g., on a retry that lands before the recency tail), it computes the same hash over the corresponding prefix of the incoming `ChatConversation.messages` and compares. A mismatch means the branches diverged before the compaction boundary and the summary must not be used. This prevents stale summaries from contaminating forked branches.
-
-A secondary `tail_hash` (hash of the last N user message contents) is stored as a lookup key for future use but is not sufficient on its own to prove applicability.
+When compaction commits, the child's `lifted_turn_items` carry forward file-tool live windows (and their paired `function_call`s) for any path still active in the recency tail. `lifted_anchor_source_id` is the recency-tail bot message that touched a relevant path — projection emits the lifted items immediately before that bot's tool round. Invariant: `anchor=None iff lifted_turn_items==[]`. The summary input has live-window bodies stripped (`strip_live_window_bodies`) so current file contents don't fossilize into the summary.
 
 ---
 
-## Data Model
+## Compaction-specific storage
 
-### ContextPartition
-
-The `ContextPartition` model gains the following fields to support compaction:
-
-| Field | Description |
-|---|---|
-| `partition_uuid` | Unique identifier for this partition. Auto-generated. |
-| `parent_partition_uuid` | UUID of the preceding compacted partition, or `null` for the root. |
-| `ancestor_summaries` | Ordered list of LLM-generated summaries from all compacted ancestors. |
-| `raw_message_start_index` | Offset into `ChatConversation.messages` where this partition's raw span begins. |
-
-The `items` list retains its existing semantics: messages, tool calls, and tool outputs for the raw (non-summarized) portion of the conversation.
-
-### Elasticsearch: `context-partitions` Index
-
-Every partition is persisted to Elasticsearch. Redis is the hot cache for the currently active branch; Elasticsearch is the durable store for all partitions — active, forked, and compacted. The ES document carries:
+The `conversations` ES index (defined in [conversation/README.md](../conversation/README.md#elasticsearch)) carries these compaction fields:
 
 | Field | Purpose |
 |---|---|
-| `partition_uuid` | Document `_id`; enables O(1) lookup by UUID. |
-| `conversation_uuid` | Scopes partitions to a conversation. |
-| `parent_partition_uuid` | Enables ancestor chain walking. |
-| `compaction_state` | Child-partition commit state. Normal documents are `committed`; a child written before the Redis CAS is `pending` until the CAS succeeds and the child is promoted. Search and tail-hash discovery ignore `pending` docs. |
-| `compaction_attempt_uuid` | Correlation UUID shared by the child partition and the parent update for a single compaction attempt. |
-| `is_compacted` | Boolean on the partition being summarized and sealed. Set `true` on the parent only after the child swap commits and the summary/boundary metadata are finalized. |
-| `summary` | LLM-generated summary of this partition's content. Full-text indexed. |
-| `items_json` | Serialized raw items. Stored but not indexed (excluded from the inverted index). |
-| `message_content` | Extracted user/assistant text. Full-text indexed for future search. |
-| `boundary_hash` | Hash of all messages covered by the summary; proves applicability. |
-| `boundary_message_count` | Message count at the compaction boundary. |
-| `boundary_user_count` | User-message count at the boundary (supplementary). |
-| `tail_hash` | Hash of the last N user messages; secondary lookup aid. |
-| `raw_message_start_index` | Mirrors the in-memory field for chain reconstruction. |
-| `ancestor_summaries` | Mirrors the in-memory field for chain reconstruction. |
-| `dt_created` / `dt_modified` | Timestamps. |
+| `compaction_state` | `committed` or `pending` (child written before the CAS). Search and tail-hash discovery ignore `pending`. |
+| `compaction_attempt_uuid` | Correlates the child + parent writes of one attempt. |
+| `is_compacted` | Set on the parent only after the child swap commits. |
+| `summary` | LLM-generated summary text; full-text indexed. |
+| `boundary_hash` / `tail_hash` | Branch-validation hash and tail lookup key. |
+| `boundary_message_count` / `boundary_user_count` | Counts at the compaction boundary. |
+| `ancestor_summaries` / `lifted_turn_items_json` / `lifted_anchor_source_id` | Mirrors of the in-memory fields. |
 
-The `items_json` field is intentionally excluded from the ES inverted index to keep the index size manageable. Raw items are rehydrated from this field when a partition must be reconstructed from ES. Storing `message_content` separately means conversation content is searchable without parsing `items_json`.
-
----
-
-## Stream Protocol
-
-Every response stream begins with a `partition_uuid` event and may end with a `compaction_pending` event. Between those, each LLM round emits `context_pct`; non-tool rounds then emit buffered `text_delta` events, while tool-call rounds may also emit `progress_message` and `tool_call` events with provider-specific ordering.
-
-**`partition_uuid`** — Emitted first in every response stream. The client records this UUID on the assistant tree node it creates for that response. On the next request, the client sends back the `partition_uuid` of the most recent node on the currently active path. This is how the server knows which branch is active.
-
-**`context_pct`** — An integer percentage of the model's context window consumed, emitted after each LLM round using the input token count from that round's usage data. Rendered as a fill indicator in the UI so the user can anticipate an upcoming compaction.
-
-**`compaction_pending`** — Emitted at the end of a response when a background compaction has been scheduled. The UI shows a non-blocking, pulsing indicator. The indicator clears in two ways: (1) when a subsequent stream arrives carrying a different `partition_uuid`, confirming the Redis swap completed and a new active partition is in use; or (2) automatically via background polling — the client issues `GET /compaction-status?conversation_uuid=…&pending_partition_uuid=…` every 5 seconds and clears the indicator as soon as the response returns `{"done": true}`. When the swap committed to a direct child of the pending partition, that polling response also carries `partition_uuid` so the client can relabel its stored branch node UUIDs to the child.
-
-On the request side, `ChatConversation` carries an optional `partition_uuid` field. The client sends back the UUID last received for the active branch, or `null` for a fresh conversation.
-
----
-
-## Request Reconciliation
-
-`sync_context_partition` in `WebBase` is responsible for producing the correct `ContextPartition` for each incoming request. It follows a strict priority order:
-
-### 1. Redis Fast Path
-
-Redis holds at most one partition per `conversation_uuid`. If the cached partition's `partition_uuid` matches the client's (or the client sent no UUID, or the cached partition is the direct parent of the client's UUID), the server attempts `sync_from_conversation`. This method reconciles the partition's raw items against the incoming `ChatConversation.messages` starting from `raw_message_start_index`:
-
-- If the conversation matches the partition exactly, a `ConversationMatchesPartitionError` is raised and the partition is returned unchanged.
-- If the conversation is longer, items are appended.
-- If there is a divergence (retry or edit), items are truncated at the divergence point and the new message is appended.
-- If the incoming message count falls below `raw_message_start_index`, a `ConversationOutsideRawWindowError` is raised and the fast path is abandoned.
-
-If the client's `partition_uuid` does not match the cached partition and the cached partition is not the direct parent of the client's UUID, the Redis partition is stale for this branch. The server falls through to ES.
-
-### 2. Exact ES Partition Load
-
-If the client supplied a `partition_uuid`, the server fetches that exact document from Elasticsearch by `_id`. If the document exists and is not marked `is_compacted`, the server attempts the same sync. Compacted partitions are skipped here because they are sealed and should not be resumed directly; they are only usable via chain reconstruction.
-
-### 3. Ancestor Chain Reconstruction
-
-If neither the Redis nor the exact ES partition can be reconciled, the server walks the ancestor chain from the client's `partition_uuid` by following `parent_partition_uuid` links through Elasticsearch. For each compacted ancestor (oldest-first), it validates applicability by computing `boundary_hash` over the corresponding prefix of `ChatConversation.messages` and comparing against the stored value. The deepest ancestor that passes validation becomes the reconstruction anchor:
-
-- `ancestor_summaries` are collected from all validated ancestors up to and including the anchor.
-- `raw_message_start_index` is set to the anchor's `boundary_message_count`.
-- `items` are populated from the conversation messages after that boundary.
-
-If no ancestor validates (e.g., the branch diverged before any compaction boundary), the server falls back to a fresh partition built directly from the incoming messages with no ancestor summaries. Stale summaries are never injected.
-
-After reconstruction, the new partition is written to both Redis and Elasticsearch so subsequent requests on this branch take the fast path.
+A compacted snapshot keeps its `messages_json` so the [assistant-message guardrail](../conversation/README.md#assistant-message-guardrail) can still read compacted ancestors' per-message identity.
 
 ---
 
@@ -137,121 +64,66 @@ After reconstruction, the new partition is written to both Redis and Elasticsear
 
 ### Trigger
 
-Each web harness registers an `on_usage` callback with the LLM client. After each LLM round, the client reports `input_tokens` and `output_tokens`. The callback computes the percentage of the model's context window consumed (using `MODEL_CONTEXT_WINDOWS`, a per-model lookup table) and sets a `pending_compaction` flag if the percentage meets or exceeds `COMPACTION_TOKEN_THRESHOLD_PCT` (default 80%). The flag is a request-local closure variable — it is never serialized to Redis or ES.
+`WebHarness._dispatch_turn` registers an `on_usage` callback. After each LLM round it computes `context_pct = input_tokens / context_window * 100` and sets the request-local `pending_compaction` flag once it meets `COMPACTION_TOKEN_THRESHOLD_PCT` (default 80%).
 
 ### Sequencing in `stream_and_finalize`
 
-`stream_and_finalize` orchestrates the handoff after the response generator is fully drained:
+After the final assistant message commits:
 
-1. Emit `partition_uuid` at the start of the stream.
-2. Yield all model events (`context_pct`, buffered `text_delta`, and any tool-round `progress_message` / `tool_call` events).
-3. If `pending_compaction` is set and the compaction lock can be acquired:
-   - Await `finalize()` **synchronously** to ensure the current partition is committed to Redis before the background compactor begins its WATCH loop.
-   - Emit `compaction_pending`.
-   - Deep-copy the finalized partition as a snapshot.
-   - Fire `_compact_partition` as a background task and return.
-4. Otherwise, background `finalize()` as normal.
+1. `finalize_turn` appends the bot `ConversationMessage`, persists `Conversation` + `TurnExecution`, and refreshes the assistant index.
+2. Emit `bot_message`.
+3. If `pending_compaction` is set, `SET NX EX` `compaction_lock:{conversation_uuid}`. On success: emit `compaction_pending`, deep-copy the snapshot, and fire `_compact_conversation` as a background task.
 
-The synchronous `finalize()` in step 3 is a deliberate departure from the default behaviour (where finalize is backgrounded). It closes the race where a background `finalize()` SET could overwrite the result of the compaction swap.
+### `_compact_conversation` — `prokaryotes/context_v1/compaction.py`
 
-### Compaction Lock
+1. **`_prepare_compaction`** — split `(pre_tail, recency_tail)`, load `TurnExecution`s for both windows, build the `_LiftPlan`. Pure read step.
+2. Return early if the recency tail is empty.
+3. **Summarize** via `compact_fn` — `_summarize_and_compact` projects the pre-tail with stripped live-window bodies, appends the summarization prompt, and calls `llm_client.complete(...)`. An empty summary aborts.
+4. **Compute boundary metadata** — `boundary_hash`, `tail_hash`, the counts.
+5. **`_cas_swap_child`** — under Redis `WATCH / MULTI / EXEC` on `conversation:{conversation_uuid}`: abort if the active `snapshot_uuid`, `ancestor_summaries`, or `raw_message_start_index` changed; build the child (`messages = recency_tail + post_snapshot_messages`, `ancestor_summaries + [summary]`, lift state from prep); persist it as `compaction_state="pending"` so Redis never points at a snapshot ES doesn't know; execute the swap, retry on `WatchError`.
+6. **Promote the child to `committed`** via `update_conversation`. This write uses `refresh="wait_for"` so a post-compaction cold-Redis `_rebuild_from_chain` can immediately find the new active child via `find_latest_active_child`. The wait runs on this background task — no interactive latency.
+7. **Mark the parent `is_compacted`** with the summary + boundary metadata.
+8. **Write `compaction_status:{pending_snapshot_uuid}`** to Redis — the child's `snapshot_uuid` as the relabel target, or an empty-string sentinel on abort/exception.
+9. **Release the lock** (always, via `finally`).
 
-Before firing `_compact_partition`, the server acquires `compaction_lock:{conversation_uuid}` via Redis `SET NX` with a TTL set slightly longer than expected summary latency. If the lock is already held by a running compaction, the new trigger is skipped — the in-flight compaction will produce a new active partition that already incorporates the current state. The lock is released unconditionally in the `finally` block of `_compact_partition`.
+The three ES writes are each wrapped in `_retry_compaction_search_write` (retry-with-backoff). The CAS swap guarantees messages sent during the summary call are carried forward as `post_snapshot_messages`.
 
-### `_compact_partition`
+### Compaction-status polling
 
-The background task performs the following steps:
+`compaction_pending` is the last stream event when a background compaction started; the UI shows a non-blocking indicator. The client polls `GET /compaction-status?conversation_uuid=...&pending_snapshot_uuid=...` every 5 seconds. On `{done: true, snapshot_uuid}` it runs `relabelSnapshotUuid` to move the affected `messageTree` nodes onto the child snapshot, then clears the indicator.
 
-1. **Prepare the summarization input** by deep-copying the snapshot and stripping any live-window file bodies to path-only placeholders. This prevents current tracked-file contents from fossilizing into `ancestor_summaries`.
-2. **Generate the summary** by calling the provider API directly with a structured summarization prompt. Existing `ancestor_summaries` are included so the summary reflects the full accumulated conversation history, not only the current partition's raw turns.
-3. **Compute deterministic boundary metadata** for the parent partition: `boundary_hash`, `boundary_message_count`, `boundary_user_count`, and `tail_hash`. Generate a fresh `compaction_attempt_uuid` and the child `partition_uuid`.
-4. **Enter the Redis `WATCH / MULTI / EXEC` loop**:
-   - Watch the Redis key for the conversation.
-   - Read the current active partition from Redis.
-   - If the current partition's `partition_uuid` differs from the snapshot's, abort: the user switched branches while compaction ran, and the summary should not be applied to a different branch.
-   - Verify that the current partition's prefix still matches the snapshot. This comparison is live-window-aware: mutable refresh fields on file-tool live windows (`output`, `file_tool.revision`, `file_tool.view_end_line`) do not count as divergence, but true structural changes still do.
-   - Identify any items appended to the current partition after the snapshot was taken.
-   - Construct the child partition. Its `ancestor_summaries` are extended with the new summary; its items are the recency tail plus any post-snapshot items; and, for file-tool-active paths, older live windows are lifted forward into the new tail so the child does not rely only on stale edit-record line numbers.
-5. **Persist the child partition to Elasticsearch as `pending`** using `put_partition(..., compaction_state="pending", compaction_attempt_uuid=...)`. This happens before the CAS so Redis never points at a child Elasticsearch does not know about.
-6. **Execute the Redis CAS swap atomically**. If `WatchError` fires, retry from the top of the WATCH loop.
-7. **Promote the child to `committed` in Elasticsearch** with the same `compaction_attempt_uuid`.
-8. **Mark the parent partition compacted** by setting `is_compacted=True`, attaching the generated summary, and storing the boundary metadata plus the same `compaction_attempt_uuid`.
-9. **Release the compaction lock**.
-
-The WATCH/MULTI/EXEC swap ensures that messages sent during the LLM summary call are never lost. Same-branch new messages accumulate in the Redis partition under the same `partition_uuid` (because the client echoes back the pre-compaction UUID until the swap completes). The compactor carries those items forward into the new partition.
-
-The three Elasticsearch writes in this flow — pending child create, child-commit update, and parent-compacted update — are each wrapped in `_retry_compaction_search_write`, a short retry-with-backoff helper that makes up to four attempts per write. This does not make the flow transactional across Redis and Elasticsearch, but it materially reduces the chance that a transient ES failure leaves the system in a degraded intermediate state.
+The indicator is **branch-scoped**: each pending compaction has its own poll loop keyed on the scheduling `snapshot_uuid`, so concurrent sibling-branch compactions don't interfere and switching branches mid-compaction never strands a relabel. Polling is the **only** clearing path — a transient poll failure keeps the loop alive, and there is no side-channel clear on subsequent stream handshakes (unsafe across branches).
 
 ---
 
-## Branch and Retry Handling
+## Compaction and branching
 
-The UI represents conversations as a message tree. Users can edit earlier messages or regenerate responses, creating branches. Compaction interacts with branching in three distinct ways:
+Each branch is independently compactable — the CAS is keyed on `snapshot_uuid`. How edit/retry interacts with the compaction boundary:
 
-### Retry Within the Active Partition
+- **Edit/regenerate within the recency tail** → Case A divergence: a new branch snapshot that inherits `ancestor_summaries` and recomputes lift state.
+- **Retry before the recency tail** → `_split_compacted_prefix` fails, the syncer routes to Case B: a fresh root branch with no ancestor summaries and `raw_message_start_index=0`.
 
-The most common case. `sync_from_conversation` truncates at the divergence point and appends the new message. No compaction logic is involved; the `partition_uuid` is unchanged.
-
-### Retry Before the Recency Tail
-
-The retry point falls within content that has been compacted away (before the recency tail boundary, i.e., before `raw_message_start_index` of the active partition). The incoming message count is smaller than `raw_message_start_index`, so `sync_from_conversation` raises `ConversationOutsideRawWindowError` immediately. The exact ES load returns `None` (the partition is `is_compacted`). The chain reconstruction then validates ancestry via `boundary_hash`; because the retry message count is less than the compacted ancestor's `boundary_message_count`, no ancestor validates. The result is a **clean partition with no ancestor summaries**, built from the incoming messages alone.
-
-### Retry Within the Recency Tail
-
-The retry point falls within the verbatim content retained in the active partition (between `raw_message_start_index` and the end of the recency tail). The Redis partition can be synced successfully (message count ≥ `raw_message_start_index`), so the active partition P2 is used — including its `ancestor_summaries`. The model therefore receives the compaction summary as context alongside the raw recency-tail messages. This is intentional: the recency-tail messages may reference content from the compacted region, and stripping the summary would deprive the model of the context needed to interpret them correctly.
-
-### Branch Switch (Navigation Between Forks)
-
-When the user navigates to a different branch via the ⟨/⟩ controls, the client sends the `partition_uuid` stored on the last node of the target branch. If that partition is in Redis (recently visited), the fast path applies. Otherwise the server cold-loads from ES or performs chain reconstruction. Only one branch is hot in Redis at a time; switching always pays the cold-load cost for the newly activated branch.
+See [conversation/README.md](../conversation/README.md#branches-and-snapshots) for the full divergence semantics.
 
 ---
 
 ## Key Design Decisions
 
-**Summaries in the system/developer message, not as conversation turns.**
-Injecting ancestor summaries as a leading user/assistant exchange would conflate them with the actual conversation and could confuse attribution. Placing them in the system or developer message keeps them clearly framed as background context.
+**Child snapshot persisted as `pending` before the CAS.** Redis never points at a snapshot ES doesn't know about; discovery filters out `pending` docs until they commit.
 
-**Child partition persisted as `pending` before the Redis CAS.**
-The child partition is written to Elasticsearch before the Redis swap, but only as `compaction_state="pending"`. This guarantees Redis never points at a child ES does not know about, while normal discovery paths still ignore staged children until they are promoted to `committed`.
+**`refresh="wait_for"` is scoped to the child-committed write only.** Conversation writes are otherwise eventually consistent for search — forcing a refresh on every turn's `put_conversation` would add ~1–2s of latency to every `/chat` turn. The find-after-write race only matters for `find_latest_active_child` on a post-compaction cold-Redis rebuild, so the one write that gates that search waits; it runs on the background compaction task at no interactive cost.
 
-**Synchronous `finalize()` when compaction is pending.**
-The default path backgrounds `finalize()`. When compaction is about to start, `finalize()` is awaited synchronously before the background task is fired. This eliminates the race where a delayed `finalize()` SET could overwrite the result of the compaction swap and lose the newly compacted partition.
+**Compaction-status relabel is the only indicator-clearing path.** An earlier design cleared on a subsequent stream handshake carrying a different snapshot UUID — unsafe once branches exist (a handshake on branch B would clear branch A's indicator).
 
-**Short retry-with-backoff around Elasticsearch writes.**
-The compaction write path is split across Redis and Elasticsearch, so there is no true cross-store transaction. `_retry_compaction_search_write` retries the pending-child create and the two post-CAS ES updates to make transient search failures degrade more gracefully.
-
-**Boundary hash over the full prefix, not just the tail.**
-`tail_hash` is stored as a lookup convenience but is not used alone to prove summary applicability. `boundary_hash` covers the entire role/content sequence up to the compaction boundary. This prevents a forked branch from inheriting a summary produced by a different history that happened to share the same recent user messages.
-
-**One Redis slot per conversation, not per partition.**
-Redis holds exactly one partition per `conversation_uuid`. Switching branches always evicts the previous branch. The cost of a branch switch (one or more ES GETs) is accepted in exchange for simpler cache semantics and bounded Redis memory usage. After a cold-load, the branch is promoted to Redis and subsequent requests on it are fast.
-
-**Compaction lock prevents duplicate concurrent compactions.**
-If two requests arrive near-simultaneously and both see a high `context_pct`, only the first to acquire `compaction_lock:{conversation_uuid}` fires a compaction. The second skips compaction entirely — the in-flight compaction will produce a new partition that incorporates both requests' content (because the atomic swap carries post-snapshot items forward).
-
-**Live-window-aware compaction for tracked files.**
-If the partition contains `file_tool` live windows, compaction strips their current file bodies before summarization, treats benign live-window refreshes as equivalent during prefix validation, and lifts older live windows for file-active paths into the new tail. Without that trio of behaviors, compaction would either summarize stale file contents or leave the child tail relying too heavily on historical edit records whose line numbers have drifted.
-
-**Ancestor summaries cached in Redis alongside raw items.**
-Because summaries are immutable, they can safely travel with the partition through Redis. This means the ES chain walk is paid once per branch reconstruction, not on every request.
-
-**Exact partition load skips compacted documents.**
-`_load_exact_partition` returns `None` for any document with `is_compacted=True`. This prevents the server from resuming a sealed partition directly and forces it to go through chain reconstruction, which correctly assembles summaries and sets `raw_message_start_index`.
-
-**Raw items preserved in ES indefinitely.**
-`items_json` is stored in ES for every partition, compacted or not. This enables future "deep rehydration" — deserializing the full original items instead of relying on the summary when branching into a compacted region, at the cost of a larger context window.
+**Compaction lock prevents duplicate concurrent compactions.** Only the first request to acquire `compaction_lock:{conversation_uuid}` compacts; the CAS swap carries the loser's messages forward regardless.
 
 ---
 
 ## Known Limitations and Deferred Work
 
-**Deep rehydration.** When a retry lands before the recency tail, the server currently builds a fresh partition from the incoming messages with no ancestor summaries. The full original context for that branch is available in `items_json` in ES but is not yet used. A future deep-rehydration mode could restore full fidelity at higher token cost.
-
-**Script and eval harnesses.** `ScriptHarness` and `EvalHarness` use `ContextPartition` without Redis or Elasticsearch. Compaction is not implemented for those harnesses. Long script or eval sessions that approach the context limit will fail. Simplified in-memory summarization at threshold could be added later.
-
-**Semantic search over history.** The `message_content` and `summary` fields in Elasticsearch are full-text indexed in preparation for conversational history search. `ContextPartitionSearcher.search_partitions` exists as the hook for this but is not yet wired into any harness endpoint.
-
-**Pending-child cleanup.** If the child partition is written to Elasticsearch as `pending` but the Redis CAS never commits, that staged child can remain in the index. Normal search and tail-hash discovery filter these documents out, but conservative recovery/sweeper work for stale `pending` children is still deferred.
+- **Deep rehydration.** Retries before the recency tail build a fresh branch with no ancestor summaries. The original message lists survive in ES (`messages_json` is kept) but aren't used to restore full fidelity.
+- **Script and eval harnesses don't compact.** Long non-interactive sessions that approach the context limit fail.
+- **Pending-child cleanup.** A `pending` child whose CAS never commits lingers in the index; discovery filters it out, but a sweeper is deferred.
 
 ---
 
@@ -259,28 +131,12 @@ Because summaries are immutable, they can safely travel with the partition throu
 
 | File | Role |
 |---|---|
-| `prokaryotes/api_v1/models.py` | `ContextPartition` (with new compaction fields), `ChatConversation`, `ContextPartitionItem`, `compute_boundary_hash`, `compute_tail_hash`, `conversation_message_items`, exception classes |
-| `prokaryotes/web_v1/__init__.py` | `WebBase` class composing `AuthHandler` and `PartitionCompactor`; lifecycle (`init`, `lifespan`, `on_start`, `on_stop`), `finalize`, `stream_and_finalize` (triggers `_compact_partition` after streaming) |
-| `prokaryotes/web_v1/partition_sync.py` | `PartitionSyncer` mixin: `sync_context_partition`, `_rebuild_from_chain`, `_walk_partition_chain`, `_load_exact_partition`, `_boundary_message_items_for_partition`, `_boundary_message_items_for_doc`, `_cache_and_persist_partition`, `_try_sync_partition` |
-| `prokaryotes/web_v1/compaction.py` | `PartitionCompactor(PartitionSyncer)` mixin: `_compact_partition`, `get_compaction_status`; module-level `_retry_compaction_search_write` |
-| `prokaryotes/search_v1/context_partitions.py` | `ContextPartitionSearcher` mixin: `get_partition`, `put_partition`, `update_partition`, `find_partition_by_tail_hash`, `search_partitions`; Elasticsearch index mapping |
-| `prokaryotes/search_v1/__init__.py` | `SearchClient` inheriting `ContextPartitionSearcher` |
-| `prokaryotes/harness_v1/web.py` | `WebHarness` chat route, provider-specific instruction role and ancestor-summary injection, `on_usage` closure, `pending_compaction` flag, `compact` closure, `_summarize_and_compact` |
-| `prokaryotes/anthropic_v1/__init__.py` | `context_pct` event emission after each LLM round |
-| `prokaryotes/openai_v1/__init__.py` | `context_pct` event emission |
-| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` tracked-file model that compaction integrates with via live-window stripping and lifting |
-| `prokaryotes/tools_v1/file_tool/live_windows.py` | Pure annotation-manipulation helpers (`strip_live_window_bodies`, `lift_active_live_windows`, `items_equal_mod_live_windows`, `recency_tail_items`) used during compaction |
-| `prokaryotes/utils_v1/llm_utils.py` | `MODEL_CONTEXT_WINDOWS`, `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS` |
-| `scripts/search_init.py` | Creates or updates the `context-partitions` Elasticsearch index |
-| `scripts/static/ui.js` | `getLastPartitionUuid`, `partition_uuid` event handling, `context_pct` fill indicator, compaction indicator show/clear logic, `startCompactionPolling`/`stopCompactionPolling` (5 s poll against `/compaction-status`), relabeling stored `partitionUuid` values when compaction returns a child UUID |
-| `tests/unit_tests/context_partition_utils.py` | Shared test infrastructure: `FakeRedis`, `FakeSearchClient`, `make_doc`, `make_web_base`, `make_message_items`, `make_chat_messages` |
-| `tests/unit_tests/test_compaction_swap.py` | `_compact_partition` internals: pending-child/committed-child flow, parent summary finalization, post-snapshot carry-forward, UUID/prefix/missing-Redis abort guards, retry behavior, and lock cleanup |
-| `tests/unit_tests/test_compaction_file_tool_lift.py` | Live-window-aware compaction behaviors: stripping summary input, lifting active live windows, live-window-stable prefix comparison, and compaction-status response-shape edge cases |
-| `tests/unit_tests/test_compaction_rebuild.py` | `sync_context_partition` compaction edge cases (retry-before-raw-window, edit-within-tail), `stream_and_finalize` (compaction events, duplicate-lock guard), `_walk_partition_chain` integrity (missing intermediate, UUID mismatch, cycle), `_rebuild_from_chain` single- and multi-generation reconstruction |
-| `tests/unit_tests/test_compaction_status.py` | `get_compaction_status` endpoint: lock-present returns not-done, no-lock returns done, compacted-child swaps include the new `partition_uuid`, partition evicted from Redis returns done |
-| `tests/unit_tests/test_compaction_provider.py` | `to_anthropic_messages` with ancestor summaries; Anthropic and OpenAI `_summarize_and_compact` ancestor-summary injection |
-| `tests/unit_tests/test_api_v1_models.py` | Unit tests for hash functions and `ContextPartition` sync (progress, retry, edit paths) |
-| `tests/unit_tests/test_web_v1.py` | `recency_tail_items`, `finalize`, basic `sync_context_partition` Redis-path tests |
-| `tests/unit_tests/test_search_v1_context_partitions.py` | Tests for `ContextPartitionSearcher`, including `compaction_state` / `compaction_attempt_uuid` handling |
-| `tests/unit_tests/test_anthropic_v1.py` | Tests for `context_pct` emission |
-| `tests/unit_tests/test_openai_v1.py` | Tests for `context_pct` emission |
+| `prokaryotes/context_v1/compaction.py` | `ConversationCompactor`: `_compact_conversation`, `_cas_swap_child`, `_prepare_compaction`, `_write_compaction_status`; `_compute_lift_plan`, `_recency_tail_messages`, `_retry_compaction_search_write`. |
+| `prokaryotes/context_v1/conversation_sync.py` | `_split_compacted_prefix`, `_rebuild_from_chain`, `find_latest_active_child` use — the chain-rebuild and compacted-prefix handling. |
+| `prokaryotes/harness_v1/web.py` | `on_usage` / `pending_compaction`, `_summarize_and_compact`. |
+| `prokaryotes/harness_v1/base.py` | `stream_and_finalize` compaction sequencing. |
+| `prokaryotes/web_v1/compaction.py` | `CompactionStatusHandler`: the `/compaction-status` endpoint. |
+| `prokaryotes/tools_v1/file_tool/live_windows.py` | Live-window strip/lift helpers used by the lift plan. |
+| `prokaryotes/utils_v1/llm_utils.py` | `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS`. |
+| `tests/unit_tests/test_compaction_*.py` | Lift plan, CAS swap, chain rebuild, status handler, summarization input. |
+| `tests/integration_tests/tier_b/test_compaction_flow.py` | End-to-end compaction against real ES + Redis. |
