@@ -11,6 +11,8 @@ from typing import Any
 import pytest
 
 from prokaryotes.conversation_v1.models import (
+    Conversation,
+    ConversationMessage,
     TurnExecution,
     compute_boundary_hash,
     compute_tail_hash,
@@ -24,7 +26,6 @@ from prokaryotes.search_v1.conversations import (
     _default_boundary_fields,
     _extract_message_content,
     conversation_from_doc,
-    messages_from_doc,
     turn_execution_from_doc,
 )
 from tests.unit_tests._builders import (
@@ -50,15 +51,6 @@ def test_extract_message_content_skips_deleted_messages():
     assert _extract_message_content(messages) == "alpha gamma"
 
 
-def test_conversation_from_doc_returns_none_for_missing_messages_json():
-    doc = {
-        "snapshot_uuid": "s1",
-        "conversation_uuid": "c1",
-        "bot_author_id": BOT_ID,
-    }
-    assert conversation_from_doc("c1", doc) is None
-
-
 def test_conversation_from_doc_logs_and_returns_none_for_wrong_conversation():
     doc = {
         "snapshot_uuid": "s1",
@@ -76,8 +68,7 @@ def test_conversation_from_doc_returns_conversation():
         "bot_author_id": BOT_ID,
         "parent_snapshot_uuid": "p1",
         "ancestor_summaries": ["S0"],
-        "lifted_turn_items_json": '{"items": []}',
-        "lifted_anchor_source_id": "1.000000",
+        "working_file_windows_json": '{"windows": []}',
         "messages_json": '{"messages": [{"source_id": "1", "author_id": "u", "content": "hi"}]}',
         "raw_message_start_index": 2,
     }
@@ -86,32 +77,10 @@ def test_conversation_from_doc_returns_conversation():
     assert conv.snapshot_uuid == "s1"
     assert conv.parent_snapshot_uuid == "p1"
     assert conv.ancestor_summaries == ["S0"]
-    assert conv.lifted_anchor_source_id == "1.000000"
+    assert conv.working_file_windows == []
     assert conv.raw_message_start_index == 2
     assert len(conv.messages) == 1
     assert conv.messages[0].source_id == "1"
-
-
-def test_conversation_from_doc_skips_conversation_check_when_key_absent():
-    """Legacy docs may lack `conversation_uuid` — treat as belonging to the
-    queried conversation rather than rejecting."""
-    doc = {
-        "snapshot_uuid": "s1",
-        # No conversation_uuid key.
-        "bot_author_id": BOT_ID,
-        "messages_json": '{"messages": []}',
-    }
-    conv = conversation_from_doc("c1", doc)
-    assert conv is not None
-    assert conv.conversation_uuid == "c1"
-
-
-def test_messages_from_doc_returns_empty_when_messages_json_absent():
-    assert messages_from_doc({}) == []
-
-
-def test_turn_execution_from_doc_returns_none_when_items_json_absent():
-    assert turn_execution_from_doc({}) is None
 
 
 def test_turn_execution_from_doc_round_trips():
@@ -122,7 +91,6 @@ def test_turn_execution_from_doc_round_trips():
         "completed": True,
     }
     te = turn_execution_from_doc(doc)
-    assert te is not None
     assert te.bot_message_source_id == "2"
     assert len(te.items) == 1
     assert te.items[0].type == "function_call"
@@ -144,7 +112,6 @@ def test_default_boundary_fields_per_snapshot_only():
 
     assert fields["raw_message_start_index"] == 2
     assert fields["boundary_message_count"] == 2 + 2  # parent baseline + own
-    assert fields["boundary_user_count"] == 1  # one user msg
     assert fields["boundary_hash"] == compute_boundary_hash(conv.messages)
     assert fields["tail_hash"] == compute_tail_hash(conv.messages, BOT_ID)
 
@@ -176,9 +143,7 @@ class _FakeES:
     async def delete(self, *, index: str, id: str) -> None:
         self._docs[index].pop(id, None)
 
-    async def update(
-        self, *, index: str, id: str, doc: dict[str, Any], refresh: str | bool | None = None
-    ) -> None:
+    async def update(self, *, index: str, id: str, doc: dict[str, Any], refresh: str | bool | None = None) -> None:
         self.update_calls.append((index, id, doc))
         if id in self._docs[index]:
             self._docs[index][id].update(doc)
@@ -212,8 +177,6 @@ class _FakeES:
         if "terms" in clause:
             field, vals = next(iter(clause["terms"].items()))
             return src.get(field) in vals
-        if "exists" in clause:
-            return clause["exists"]["field"] in src
         if "multi_match" in clause:
             mm = clause["multi_match"]
             q = mm["query"]
@@ -221,16 +184,6 @@ class _FakeES:
                 if q in (src.get(field) or ""):
                     return True
             return False
-        if "bool" in clause:
-            inner = clause["bool"]
-            if "should" in inner:
-                min_match = inner.get("minimum_should_match", 0)
-                hits = sum(1 for c in inner["should"] if self._evaluate_clause(src, c))
-                return hits >= min_match
-            if "must_not" in inner:
-                return not any(self._evaluate_clause(src, c) for c in inner["must_not"])
-            if "must" in inner:
-                return all(self._evaluate_clause(src, c) for c in inner["must"])
         return True
 
 
@@ -256,7 +209,7 @@ async def test_put_conversation_indexes_document_with_boundary_fields():
     assert doc["snapshot_uuid"] == "s1"
     assert doc["boundary_hash"] == compute_boundary_hash(conv.messages)
     assert doc["tail_hash"] == compute_tail_hash(conv.messages, BOT_ID)
-    assert doc["lifted_turn_items_json"]  # non-empty JSON
+    assert doc["working_file_windows_json"]  # non-empty JSON
     assert doc["messages_json"]
     assert doc["compaction_state"] == COMPACTION_STATE_COMMITTED
 
@@ -326,7 +279,7 @@ async def test_find_conversation_by_tail_hash_filters_to_compacted_docs():
 
 @pytest.mark.asyncio
 async def test_find_all_conversation_docs_returns_committed_dag():
-    """Returns committed-or-legacy conversation docs (pending excluded)."""
+    """Returns committed conversation docs (pending excluded)."""
     searcher = _FakeSearcher()
     from tests.unit_tests._builders import conversation
 
@@ -363,7 +316,6 @@ async def test_rekey_turn_execution_moves_doc():
     assert moved["bot_message_source_id"] == "new-id"
     # Items survive.
     revived = turn_execution_from_doc(moved)
-    assert revived is not None
     assert len(revived.items) == 2
 
 
@@ -395,7 +347,6 @@ async def test_rekey_turn_execution_no_op_when_old_and_new_ids_match():
     # The doc is untouched — still present with its items.
     assert "c-1:same-id" in searcher.es._docs[TURN_EXECUTIONS_INDEX]
     revived = turn_execution_from_doc(searcher.es._docs[TURN_EXECUTIONS_INDEX]["c-1:same-id"])
-    assert revived is not None
     assert len(revived.items) == 2
 
 
@@ -432,3 +383,109 @@ async def test_put_turn_execution_keys_doc_by_conversation_and_source_id():
     await searcher.delete_turn_execution("c-A", "1.000001")
     assert await searcher.get_turn_execution("c-A", "1.000001") is None
     assert await searcher.get_turn_execution("c-B", "1.000001") is not None
+
+
+# -----------------------------------------------------------------------------
+# Slack-harness find_latest_active_snapshot_uuid
+# -----------------------------------------------------------------------------
+
+
+BOT = "U_BOT"
+
+
+def _conv(snapshot_uuid: str, conversation_uuid: str = "c-1") -> Conversation:
+    return Conversation(
+        conversation_uuid=conversation_uuid,
+        snapshot_uuid=snapshot_uuid,
+        bot_author_id=BOT,
+        messages=[ConversationMessage(source_id="1", author_id="u", content="hi")],
+    )
+
+
+def _stamp(es: _FakeES, snapshot_uuid: str, dt_modified: str) -> None:
+    es._docs[CONVERSATIONS_INDEX][snapshot_uuid]["dt_modified"] = dt_modified
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_returns_none_when_empty():
+    searcher = _FakeSearcher()
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") is None
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_returns_only_active_snapshot():
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(_conv("s1"))
+
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") == "s1"
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_picks_most_recently_modified():
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(_conv("s_old"))
+    await searcher.put_conversation(_conv("s_new"))
+    _stamp(searcher.es, "s_old", "2026-01-01T00:00:00+00:00")
+    _stamp(searcher.es, "s_new", "2026-05-01T00:00:00+00:00")
+
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") == "s_new"
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_ignores_compacted_docs():
+    """An `is_compacted=true` snapshot is not the conversation head — it has a committed child."""
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(_conv("s_compacted"))
+    searcher.es._docs[CONVERSATIONS_INDEX]["s_compacted"]["is_compacted"] = True
+
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") is None
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_ignores_pending_docs():
+    """A `compaction_state=pending` snapshot is an in-flight compaction child, not a committed head."""
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(
+        _conv("s_pending"),
+        compaction_state=COMPACTION_STATE_PENDING,
+        compaction_attempt_uuid="attempt-1",
+    )
+
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") is None
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_skips_pending_for_committed_head():
+    """With a pending child and a committed snapshot present, the committed one is returned even though the
+    pending child is more recently modified — the query filters on `compaction_state=committed`."""
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(_conv("s_committed"))
+    await searcher.put_conversation(
+        _conv("s_pending"),
+        compaction_state=COMPACTION_STATE_PENDING,
+        compaction_attempt_uuid="attempt-1",
+    )
+    _stamp(searcher.es, "s_committed", "2026-01-01T00:00:00+00:00")
+    _stamp(searcher.es, "s_pending", "2026-05-01T00:00:00+00:00")
+
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") == "s_committed"
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_scoped_to_conversation():
+    """A snapshot from a different conversation is never returned."""
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(_conv("s_other", conversation_uuid="c-other"))
+
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") is None
+    assert await searcher.find_latest_active_snapshot_uuid("c-other") == "s_other"
+
+
+@pytest.mark.asyncio
+async def test_find_latest_active_snapshot_uuid_committed_stamp_is_explicit():
+    """`put_conversation` always stamps `compaction_state=committed`; the query's committed filter matches it."""
+    searcher = _FakeSearcher()
+    await searcher.put_conversation(_conv("s1"))
+
+    assert searcher.es._docs[CONVERSATIONS_INDEX]["s1"]["compaction_state"] == COMPACTION_STATE_COMMITTED
+    assert await searcher.find_latest_active_snapshot_uuid("c-1") == "s1"

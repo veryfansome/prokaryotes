@@ -183,6 +183,7 @@ async def test_finalize_turn_appends_bot_message_and_persists_conversation():
         bot_message_source_id="2",
         bot_message_content="Hello world",
         turn_items=[],
+        triggering_source_id="1",
     )
 
     # Bot message appended to conversation.
@@ -214,6 +215,7 @@ async def test_finalize_turn_persists_turn_execution_when_tool_items_exist():
         bot_message_source_id="2",
         bot_message_content="Done",
         turn_items=turn_items,
+        triggering_source_id="1",
     )
 
     assert len(search.put_turn_execution_calls) == 1
@@ -237,6 +239,7 @@ async def test_finalize_turn_refreshes_assistant_index():
         bot_message_source_id="2.000000",
         bot_message_content="Hello",
         turn_items=[],
+        triggering_source_id="1",
     )
 
     index_data = await redis.get(f"assistant_index:{conv.conversation_uuid}")
@@ -265,6 +268,7 @@ async def test_finalize_strips_system_message_and_persists_to_redis_and_es():
         bot_message_source_id="2",
         bot_message_content="Reply",
         turn_items=[],
+        triggering_source_id="1",
     )
 
     cached = Conversation.model_validate_json(await redis.get(f"conversation:{conv.conversation_uuid}"))

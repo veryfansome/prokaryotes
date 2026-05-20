@@ -168,6 +168,32 @@ services:
       elasticsearch:
         condition: service_healthy
 
+  slack:
+    networks: [prokaryotes]
+    container_name: prokaryotes-slack
+    image: "prokaryotes:latest"
+    pull_policy: build
+    working_dir: /app
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./project:/app/project:rw
+      - ./tests:/app/tests:ro
+    environment:
+      #SLACK_HARNESS_IMPL: "anthropic"
+      SLACK_HARNESS_IMPL: "openai"
+    command: ["python", "-m", "scripts.slack"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
+      integration-tests:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      unit-tests:
+        condition: service_completed_successfully
+
   web:
     networks: [prokaryotes]
     container_name: prokaryotes-web

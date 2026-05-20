@@ -9,12 +9,12 @@ from prokaryotes.conversation_v1.models import (
     ReconcileResult,
     TurnExecution,
     TurnItem,
+    WorkingFileWindow,
     compute_boundary_hash,
     compute_tail_hash,
     conversation_message_items,
 )
 from prokaryotes.conversation_v1.project import (
-    current_turn_items,
     project_for_llm,
 )
 from prokaryotes.conversation_v1.reconcile import reconcile
@@ -30,10 +30,10 @@ __all__ = [
     "ReconcileResult",
     "TurnExecution",
     "TurnItem",
+    "WorkingFileWindow",
     "compute_boundary_hash",
     "compute_tail_hash",
     "conversation_message_items",
-    "current_turn_items",
     "project_for_llm",
     "reconcile",
 ]

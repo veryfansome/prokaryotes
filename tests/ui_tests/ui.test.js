@@ -1,9 +1,8 @@
 /**
  * UI-layer wire-parsing tests.
  *
- * Targets the migrated `scripts/static/ui.js`:
- * - First event is a `handshake` with `snapshot_uuid` + `source_id_assignments` (legacy `partition_uuid` event is
- *   gone).
+ * Targets `scripts/static/ui.js`:
+ * - First event is a `handshake` with `snapshot_uuid` + `source_id_assignments`.
  * - `bot_message` marks the final commit with the bot's server-assigned `source_id`.
  * - Other events (`context_pct`, `text_delta`, `progress_message`, `tool_call`, `compaction_pending`) keep their
  *   shape.
@@ -79,15 +78,6 @@ describe("parseStreamPayloadLine — bot_message", () => {
     });
 });
 
-describe("parseStreamPayloadLine — legacy partition_uuid is gone", () => {
-    it("a payload carrying ONLY partition_uuid is treated as unknown", () => {
-        // The old wire's first event shape. Should NOT be recognized as a handshake (which requires
-        // source_id_assignments alongside snapshot_uuid).
-        const parsed = parseStreamPayloadLine(JSON.stringify({ partition_uuid: "p-1" }));
-        expect(parsed.type).toBe("unknown");
-    });
-});
-
 describe("parseStreamPayloadLine — other event shapes survive", () => {
     it("text_delta", () => {
         const parsed = parseStreamPayloadLine(JSON.stringify({ text_delta: "hi" }));
@@ -117,17 +107,5 @@ describe("parseStreamPayloadLine — other event shapes survive", () => {
     it("compaction_pending", () => {
         const parsed = parseStreamPayloadLine(JSON.stringify({ compaction_pending: true }));
         expect(parsed).toEqual({ type: "compaction_pending" });
-    });
-});
-
-describe("compaction-status request/response shape", () => {
-    it("client polls with pending_snapshot_uuid (not pending_partition_uuid)", () => {
-        // Schema contract — the migrated UI uses snapshot_uuid throughout.
-        const params = new URLSearchParams({
-            conversation_uuid: "c-1",
-            pending_snapshot_uuid: "s-pending",
-        });
-        expect(params.has("pending_snapshot_uuid")).toBe(true);
-        expect(params.has("pending_partition_uuid")).toBe(false);
     });
 });

@@ -148,7 +148,7 @@ class FakeSearchClient:
             if doc.get("conversation_uuid") == conversation_uuid
             and doc.get("parent_snapshot_uuid") == parent_snapshot_uuid
             and not doc.get("is_compacted")
-            and doc.get("compaction_state") in (None, "committed")
+            and doc.get("compaction_state") == "committed"
         ]
         if not candidates:
             return None
@@ -157,9 +157,7 @@ class FakeSearchClient:
     async def get_conversation(self, snapshot_uuid: str) -> dict[str, Any] | None:
         return self.conversations.get(snapshot_uuid)
 
-    async def get_turn_execution(
-        self, conversation_uuid: str, bot_message_source_id: str
-    ) -> TurnExecution | None:
+    async def get_turn_execution(self, conversation_uuid: str, bot_message_source_id: str) -> TurnExecution | None:
         from prokaryotes.search_v1.conversations import turn_execution_from_doc
 
         doc = self.turn_executions.get((conversation_uuid, bot_message_source_id))
@@ -226,9 +224,7 @@ class FakeSearchClient:
         self.turn_executions[(conversation_uuid, new_id)] = doc
         self.turn_executions.pop(old_key, None)
 
-    async def update_conversation(
-        self, snapshot_uuid: str, *, refresh: str | bool = False, **fields: Any
-    ) -> None:
+    async def update_conversation(self, snapshot_uuid: str, *, refresh: str | bool = False, **fields: Any) -> None:
         # `refresh` mirrors the production signature (the compactor passes `refresh="wait_for"` on the
         # child-committed write); the fake updates eagerly so it has no effect here.
         doc = self.conversations.get(snapshot_uuid)
@@ -245,7 +241,6 @@ class FakeSearchClient:
         summary: str | None = None,
         boundary_hash: str | None = None,
         boundary_message_count: int | None = None,
-        boundary_user_count: int | None = None,
         tail_hash: str | None = None,
     ) -> None:
         """Persist a Conversation as if produced by the compactor — `is_compacted=True`
@@ -261,8 +256,6 @@ class FakeSearchClient:
             doc["boundary_hash"] = boundary_hash
         if boundary_message_count is not None:
             doc["boundary_message_count"] = boundary_message_count
-        if boundary_user_count is not None:
-            doc["boundary_user_count"] = boundary_user_count
         if tail_hash is not None:
             doc["tail_hash"] = tail_hash
         self.conversations[conversation.snapshot_uuid] = doc
@@ -285,10 +278,9 @@ class FakeSearchClient:
             "is_compacted": False,
             "summary": None,
             "ancestor_summaries": list(conversation.ancestor_summaries),
-            "lifted_turn_items_json": json.dumps(
-                {"items": [item.model_dump() for item in conversation.lifted_turn_items]}
+            "working_file_windows_json": json.dumps(
+                {"windows": [w.model_dump() for w in conversation.working_file_windows]}
             ),
-            "lifted_anchor_source_id": conversation.lifted_anchor_source_id,
             "messages_json": json.dumps({"messages": [m.model_dump() for m in conversation.messages]}),
             "raw_message_start_index": conversation.raw_message_start_index,
             "dt_created": now,

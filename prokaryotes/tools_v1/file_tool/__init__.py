@@ -1,13 +1,17 @@
-"""FileTool — operates on a `TurnItem` view via `view_provider`.
+"""FileTool — first-class working-file state.
 
-The view is built by the harness using `conversation_v1.project.current_turn_items(conversation, historical_turns,
-active_turn)`, so the tool sees lifted live windows from prior compactions in addition to the current turn's items.
-
-Live-window refresh and tombstoning operate on the view + pending-result list. Lift selection lives in
-`ConversationCompactor._compute_lift_plan`, which operates on `TurnExecution`s rather than a flat item list.
+The tool mutates `Conversation.working_file_windows` directly via `working_file_provider`. Read-like outputs
+(read_lines, RANGE_TRUNCATED, ALREADY_EXISTS, CONFLICT, RANGE_ERROR, REDUNDANT_READ) are annotated
+`file_tool.persistence="working_file"` so projection drops them from later turns — their durable relevance lives
+in `working_file_windows`. Frozen edit records (CREATED, EDITED) are annotated `file_tool.persistence="history"`
+and ride the transcript forward as ordinary history.
 """
 
 from __future__ import annotations
+
+from pkgutil import extend_path
+
+__path__ = extend_path(__path__, __name__)
 
 import asyncio
 import fcntl
@@ -19,12 +23,13 @@ from hashlib import sha256
 from pathlib import Path
 
 from prokaryotes.api_v1.models import FunctionToolCallback, ToolParameters, ToolSpec
-from prokaryotes.conversation_v1.models import TurnItem
-from prokaryotes.tools_v1.file_tool import live_windows, reads, reconciliation
-from prokaryotes.tools_v1.file_tool.live_windows import (
-    _annotation_requested_end_line,
-    _is_unstable_coverage,
+from prokaryotes.conversation_v1.models import (
+    TurnItem,
+    WorkingFileSourceKind,
+    WorkingFileWindow,
+    coverage_eligible,
 )
+from prokaryotes.tools_v1.file_tool import live_windows, reads
 from prokaryotes.tools_v1.file_tool.paths import (
     FileToolFileTooLargeError,
     _open_text_file_no_follow,
@@ -51,19 +56,36 @@ from prokaryotes.tools_v1.file_tool.validation import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FileTool", "reconcile_tracked_files"]
+__all__ = ["FileTool"]
 
 
-ViewProvider = Callable[[], list[TurnItem]]
+WorkingFileProvider = Callable[[], list[WorkingFileWindow]]
+
+_PERSISTENCE_WORKING_FILE = "working_file"
+_PERSISTENCE_HISTORY = "history"
+_PERSISTENCE_ANNOTATION = "file_tool.persistence"
+_PATH_ANNOTATION = "file_tool.path"
+
+
+def _file_tool_annotations(path: Path, persistence: str) -> dict[str, str]:
+    """Annotations applied to every file-tool function_call_output.
+
+    `file_tool.persistence` drives projection's historical-output filter (working_file outputs are dropped on
+    later turns; history outputs ride forward). `file_tool.path` is the absolute resolved path the call acted on;
+    branch divergence and cold rebuild read it off kept TurnExecutions to compute active paths even when the call
+    didn't mint a new `WorkingFileWindow` (successful edits refresh existing windows in place; REDUNDANT_READ
+    points at an existing window without minting one).
+    """
+    return {_PERSISTENCE_ANNOTATION: persistence, _PATH_ANNOTATION: str(path)}
 
 
 class FileTool(FunctionToolCallback):
-    """Read / create / edit UTF-8 text files with tracked live-window context.
+    """Read / create / edit UTF-8 text files; persist live file context as `WorkingFileWindow`s.
 
-    The `view_provider` is invoked on every `_refreshable_items()` call and must return a flat list of `TurnItem`s
-    the tool may refresh — typically `current_turn_items(conversation, historical_turns, active_turn)`. Items just
-    produced by this `FileTool` instance (still in flight for the current round) live in `_pending_result_items`
-    until the LLM client commits them via `on_committed_turn_item`.
+    The `working_file_provider` callable returns the mutable backing list (typically
+    `conversation.working_file_windows`). The tool refreshes, normalizes, and mints windows in place. Subsequent
+    `FileTool` calls in the same turn see the updated state directly; the next turn's reconcile pass refreshes
+    everything against disk before any new call.
     """
 
     current_view_marker_prefix = CURRENT_VIEW_MARKER_PREFIX
@@ -73,17 +95,13 @@ class FileTool(FunctionToolCallback):
 
     def __init__(
         self,
-        view_provider: ViewProvider,
+        working_file_provider: WorkingFileProvider,
         workspace_root: Path | None = None,
     ):
-        self._view_provider = view_provider
+        self._working_file_provider = working_file_provider
         self._workspace_root = workspace_root or Path.cwd()
         # Serializes call() so the read → mutate → refresh sequence is atomic per request.
         self._lock = asyncio.Lock()
-        # Bridges "callback returned" → "view contains it". Concurrent tool calls in one provider round each append
-        # their result here before returning so later refreshes see prior in-flight results. Drained against the
-        # view at every _refreshable_items() call: any item now present in the view is discarded from pending.
-        self._pending_result_items: list[TurnItem] = []
 
     async def call(self, arguments: str, call_id: str) -> TurnItem:
         async with self._lock:
@@ -95,15 +113,12 @@ class FileTool(FunctionToolCallback):
                 action = payload["action"]
                 resolved = _resolve_path(payload["path"], self._workspace_root)
                 if action == "read_lines":
-                    result = await self._do_read_lines(call_id, resolved, payload)
-                elif action == "create_file":
-                    result = await self._do_create_file(call_id, resolved, payload)
-                elif action in ("replace_lines", "insert_lines", "delete_lines"):
-                    result = await self._do_write(call_id, resolved, action, payload)
-                else:
-                    result = _error_item(call_id, f"Unsupported action: {action!r}")
-                self._pending_result_items.append(result)
-                return result
+                    return await self._do_read_lines(call_id, resolved, payload)
+                if action == "create_file":
+                    return await self._do_create_file(call_id, resolved, payload)
+                if action in ("replace_lines", "insert_lines", "delete_lines"):
+                    return await self._do_write(call_id, resolved, action, payload)
+                return _error_item(call_id, f"Unsupported action: {action!r}")
             except Exception as exc:
                 logger.exception("FileTool[%s] failed", call_id)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
@@ -117,11 +132,11 @@ class FileTool(FunctionToolCallback):
         effective_requested_end_for_check = (
             start_line + self.max_lines - 1 if requested_end_line is None else requested_end_line
         )
-        covering_window = self._find_covering_window(str(path), start_line, effective_requested_end_for_check)
-        if covering_window is not None:
+        covering = self._find_covering_window(str(path), start_line, effective_requested_end_for_check)
+        if covering is not None:
             return self._build_redundant_read_item(
                 call_id=call_id,
-                covering_window=covering_window,
+                covering=covering,
                 path=path,
                 requested_end_line=effective_requested_end_for_check,
                 requested_start_line=start_line,
@@ -135,10 +150,12 @@ class FileTool(FunctionToolCallback):
             PermissionError,
             UnicodeDecodeError,
         ) as exc:
-            live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
+            live_windows.tombstone_windows_for_path(
+                self._windows(), str(path), type(exc).__name__
+            )
             return _error_item(call_id, f"{type(exc).__name__}: {exc}")
         revision = sha256(text.encode("utf-8")).hexdigest()
-        live_windows._refresh_live_windows(self._refreshable_items(), str(path), text, revision, self.max_lines)
+        live_windows.refresh_windows_for_path(self._windows(), str(path), text, revision, self.max_lines)
         cap_end_line = start_line + self.max_lines - 1
         effective_requested_end_line = (
             cap_end_line if requested_end_line is not None and requested_end_line > cap_end_line else requested_end_line
@@ -153,6 +170,7 @@ class FileTool(FunctionToolCallback):
                 current_revision=revision,
                 line_count=line_count,
                 view_start_line=start_line,
+                source_kind="range_truncated",
                 header_lines=[
                     (
                         f"RANGE_TRUNCATED path={path} requested_lines={start_line}-{requested_end_line}"
@@ -178,20 +196,24 @@ class FileTool(FunctionToolCallback):
             line_count=line_count,
             view_lines=view_lines,
         )
-        annotations = {
-            "file_tool.path": str(path),
-            "file_tool.revision": revision,
-            "file_tool.status": "live",
-            "file_tool.view_start_line": str(start_line),
-            "file_tool.view_end_line": str(end_line),
-        }
-        if effective_requested_end_line is not None:
-            annotations["file_tool.requested_end_line"] = str(effective_requested_end_line)
+        self._windows().append(
+            WorkingFileWindow(
+                window_id=call_id,
+                path=str(path),
+                status="live",
+                revision=revision,
+                rendered_output=output,
+                view_start_line=start_line,
+                view_end_line=end_line,
+                requested_end_line=effective_requested_end_line,
+                source_kind="read_lines",
+            )
+        )
         return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",
-            prokaryotes_annotations=annotations,
+            prokaryotes_annotations=_file_tool_annotations(path, _PERSISTENCE_WORKING_FILE),
         )
 
     async def _do_write(self, call_id: str, path: Path, action: str, payload: dict) -> TurnItem:
@@ -223,11 +245,18 @@ class FileTool(FunctionToolCallback):
                 PermissionError,
                 UnicodeDecodeError,
             ) as exc:
-                live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
+                live_windows.tombstone_windows_for_path(
+                    self._windows(), str(path), type(exc).__name__
+                )
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
-        refreshed_count = live_windows._refresh_live_windows(
-            self._refreshable_items(), str(path), current_text, current_revision, self.max_lines
+        refreshed_count = live_windows.refresh_windows_for_path(
+            self._windows(),
+            str(path),
+            current_text,
+            current_revision,
+            self.max_lines,
+            exclude_window_ids={call_id},
         )
         if result_item.output and result_item.output.startswith("EDITED "):
             result_item.output = _append_live_window_refresh_note(result_item.output, refreshed_count)
@@ -260,46 +289,35 @@ class FileTool(FunctionToolCallback):
                 PermissionError,
                 UnicodeDecodeError,
             ) as exc:
-                live_windows._tombstone_live_windows(self._refreshable_items(), str(path), type(exc).__name__)
+                live_windows.tombstone_windows_for_path(
+                    self._windows(), str(path), type(exc).__name__
+                )
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
-        live_windows._refresh_live_windows(
-            self._refreshable_items(), str(path), current_text, current_revision, self.max_lines
+        live_windows.refresh_windows_for_path(
+            self._windows(),
+            str(path),
+            current_text,
+            current_revision,
+            self.max_lines,
+            exclude_window_ids={call_id},
         )
         return result_item
 
-    def _find_covering_window(self, path: str, requested_start_line: int, requested_end_line: int) -> TurnItem | None:
-        for item in self._refreshable_items():
-            ann = item.prokaryotes_annotations
-            if not ann:
+    def _find_covering_window(
+        self, path: str, requested_start_line: int, requested_end_line: int
+    ) -> WorkingFileWindow | None:
+        for window in self._windows():
+            if window.path != path:
                 continue
-            if ann.get("file_tool.path") != path:
+            if not coverage_eligible(window):
                 continue
-            if ann.get("file_tool.status") != "live":
-                continue
-            if _is_unstable_coverage(item):
-                continue
-            try:
-                view_start_line = int(ann["file_tool.view_start_line"])
-            except (KeyError, ValueError):
-                continue
-            intended_coverage_end = _annotation_requested_end_line(ann)
-            if intended_coverage_end is None:
-                intended_coverage_end = view_start_line + self.max_lines - 1
-            if view_start_line <= requested_start_line and intended_coverage_end >= requested_end_line:
-                return item
+            intended_coverage_end = window.requested_end_line or (window.view_start_line + self.max_lines - 1)
+            if window.view_start_line <= requested_start_line and intended_coverage_end >= requested_end_line:
+                return window
         return None
 
-    def _refreshable_items(self) -> list[TurnItem]:
-        """Return the unified view + any in-flight tool results not yet in the view.
-
-        Reads from `view_provider()` each call so the FileTool always sees the freshest snapshot of
-        `current_turn_items` (lifted + historical + active turn). Pending results that have since been committed to
-        the view are dropped.
-        """
-        view = self._view_provider()
-        view_ids = {id(item) for item in view}
-        self._pending_result_items = [item for item in self._pending_result_items if id(item) not in view_ids]
-        return [*view, *self._pending_result_items]
+    def _windows(self) -> list[WorkingFileWindow]:
+        return self._working_file_provider()
 
     def _locked_write_transaction(
         self, call_id: str, path: Path, action: str, payload: dict, expected_revision: str
@@ -318,6 +336,7 @@ class FileTool(FunctionToolCallback):
                     current_revision=current_revision,
                     line_count=line_count,
                     view_start_line=payload.get("start_line") or 1,
+                    source_kind="conflict",
                     header_lines=[
                         (
                             f"CONFLICT path={path} expected_revision={expected_revision}"
@@ -338,6 +357,7 @@ class FileTool(FunctionToolCallback):
                     current_revision=current_revision,
                     line_count=line_count,
                     view_start_line=payload.get("start_line") or 1,
+                    source_kind="range_error",
                     header_lines=[
                         f"RANGE_ERROR path={path} action={action} current_revision={current_revision}",
                         f"Requested line range is out of bounds for line_count={line_count}.",
@@ -377,7 +397,7 @@ class FileTool(FunctionToolCallback):
             call_id=call_id,
             output=edit_output,
             type="function_call_output",
-            prokaryotes_annotations={"file_tool.path": str(path)},
+            prokaryotes_annotations=_file_tool_annotations(path, _PERSISTENCE_HISTORY),
         )
         return item, updated_text, new_revision
 
@@ -402,6 +422,7 @@ class FileTool(FunctionToolCallback):
                 current_revision=current_revision,
                 line_count=line_count,
                 view_start_line=1,
+                source_kind="already_exists",
                 header_lines=[
                     f"ALREADY_EXISTS path={path} current_revision={current_revision}",
                     "The file already exists. Read or edit the existing file instead.",
@@ -415,7 +436,7 @@ class FileTool(FunctionToolCallback):
                 path=str(path), new_revision=current_revision, new_text=new_text, max_lines=self.max_lines
             ),
             type="function_call_output",
-            prokaryotes_annotations={"file_tool.path": str(path)},
+            prokaryotes_annotations=_file_tool_annotations(path, _PERSISTENCE_HISTORY),
         )
         return item, new_text, current_revision
 
@@ -423,24 +444,20 @@ class FileTool(FunctionToolCallback):
         self,
         *,
         call_id: str,
-        covering_window: TurnItem,
+        covering: WorkingFileWindow,
         path: Path,
         requested_end_line: int,
         requested_start_line: int,
     ) -> TurnItem:
-        ann = covering_window.prokaryotes_annotations or {}
-        view_start_line = int(ann["file_tool.view_start_line"])
-        view_end_line = int(ann["file_tool.view_end_line"])
-        intended_coverage_end = _annotation_requested_end_line(ann) or (view_start_line + self.max_lines - 1)
-        revision = ann.get("file_tool.revision", "")
+        intended_coverage_end = covering.requested_end_line or (covering.view_start_line + self.max_lines - 1)
         output = "\n".join(
             [
                 f"REDUNDANT_READ path={path} requested_lines={requested_start_line}-{requested_end_line}",
                 (
                     "An existing live window already covers this span"
-                    f" (rendered lines {view_start_line}-{view_end_line},"
-                    f" intended coverage {view_start_line}-{intended_coverage_end},"
-                    f" revision {revision}). Use that window."
+                    f" (rendered lines {covering.view_start_line}-{covering.view_end_line},"
+                    f" intended coverage {covering.view_start_line}-{intended_coverage_end},"
+                    f" revision {covering.revision or ''}). Use that window."
                     f" To extend coverage, page forward from start_line={intended_coverage_end + 1}."
                 ),
             ]
@@ -449,7 +466,7 @@ class FileTool(FunctionToolCallback):
             call_id=call_id,
             output=output,
             type="function_call_output",
-            prokaryotes_annotations={"file_tool.path": str(path)},
+            prokaryotes_annotations=_file_tool_annotations(path, _PERSISTENCE_WORKING_FILE),
         )
 
     def _build_view_carrying_item(
@@ -461,6 +478,7 @@ class FileTool(FunctionToolCallback):
         current_revision: str,
         line_count: int,
         view_start_line: int,
+        source_kind: WorkingFileSourceKind,
         header_lines: list[str],
         requested_end_line: int | None = None,
     ) -> TurnItem:
@@ -474,20 +492,26 @@ class FileTool(FunctionToolCallback):
             numbered = "\n".join(f"{i} | {line}" for i, line in enumerate(view_lines, start=view_start_line))
             body = body_header + ("\n" + numbered if numbered else "")
         output = "\n".join(header_lines + [body])
-        annotations = {
-            "file_tool.path": str(path),
-            "file_tool.revision": current_revision,
-            "file_tool.status": "live",
-            "file_tool.view_start_line": str(view_start_line),
-            "file_tool.view_end_line": str(end_line),
-        }
-        if requested_end_line is not None:
-            annotations["file_tool.requested_end_line"] = str(requested_end_line)
+        # Mint a WorkingFileWindow for the diagnostic — its rendered_output carries the embedded current view; the
+        # next reconcile pass normalizes source_kind back to `read_lines` and re-renders against fresh on-disk text.
+        self._windows().append(
+            WorkingFileWindow(
+                window_id=call_id,
+                path=str(path),
+                status="live",
+                revision=current_revision,
+                rendered_output=output,
+                view_start_line=view_start_line,
+                view_end_line=end_line,
+                requested_end_line=requested_end_line,
+                source_kind=source_kind,
+            )
+        )
         return TurnItem(
             call_id=call_id,
             output=output,
             type="function_call_output",
-            prokaryotes_annotations=annotations,
+            prokaryotes_annotations=_file_tool_annotations(path, _PERSISTENCE_WORKING_FILE),
         )
 
     @property
@@ -650,37 +674,3 @@ class FileTool(FunctionToolCallback):
 
 def _error_item(call_id: str, message: str) -> TurnItem:
     return TurnItem(call_id=call_id, output=f"ERROR {message}", type="function_call_output")
-
-
-async def reconcile_tracked_files(
-    items: list[TurnItem],
-    workspace_root: Path | None = None,
-) -> None:
-    """Refresh live-window items in `items` against current on-disk content.
-
-    Takes a flat `list[TurnItem]` (typically the unified view from `current_turn_items`). Mutates items in place;
-    tombstones live items for paths that are no longer accessible. Idempotent.
-    """
-    workspace_root = workspace_root or Path.cwd()
-    paths_with_live: set[str] = set()
-    for item in items:
-        ann = item.prokaryotes_annotations or {}
-        if item.type == "function_call_output" and ann.get("file_tool.status") == "live":
-            path = ann.get("file_tool.path")
-            if path:
-                paths_with_live.add(path)
-    if not paths_with_live:
-        return
-    semaphore = asyncio.Semaphore(FileTool.max_concurrent_reconcile_paths)
-
-    async def reconcile_with_limit(path_str: str) -> None:
-        async with semaphore:
-            await reconciliation._reconcile_one_tracked_path(
-                items,
-                path_str,
-                workspace_root,
-                max_file_bytes=FileTool.max_file_bytes,
-                max_lines=FileTool.max_lines,
-            )
-
-    await asyncio.gather(*(reconcile_with_limit(p) for p in paths_with_live))

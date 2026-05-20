@@ -2,10 +2,6 @@
 
 `scripts/search_init.py` (run by the docker-compose `elasticsearch-init` service) creates `conversations` and
 `turn-executions` with strict mappings.
-
-The bootstrap no longer creates the legacy `context-partitions` index but does not delete a pre-existing one, so a
-migrated-in-place ES may still carry a stale one — hence no assertion of its absence. The contract is just "the new
-indices exist and are strict".
 """
 
 from __future__ import annotations

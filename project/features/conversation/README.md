@@ -20,7 +20,7 @@ Three properties define the model:
 
 A persistent snapshot of an external dialogue, identified by a stable `conversation_uuid`. A single `conversation_uuid` is a *DAG* of snapshots, each with its own `snapshot_uuid` — linear children via compaction, sibling branches via edit/regenerate (see [Branches and Snapshots](#branches-and-snapshots)).
 
-A snapshot owns its ordered `ConversationMessage`s, the bot's `author_id`, the snapshot-DAG metadata (`parent_snapshot_uuid`, `ancestor_summaries`, `raw_message_start_index`), and the tool state lifted across compaction (`lifted_turn_items` + `lifted_anchor_source_id`).
+A snapshot owns its ordered `ConversationMessage`s, the bot's `author_id`, the snapshot-DAG metadata (`parent_snapshot_uuid`, `ancestor_summaries`, `raw_message_start_index`), and the durable file-tool working memory (`working_file_windows` — see [file_tool/README.md](../file_tool/README.md)).
 
 ### `ConversationMessage`
 
@@ -42,7 +42,8 @@ One external dialogue message: `source_id` (identity *and* ordering key), `autho
 
 | Model | Role |
 |---|---|
-| `Conversation` | A snapshot: `conversation_uuid`, `snapshot_uuid`, `parent_snapshot_uuid`, `bot_author_id`, `ancestor_summaries`, `lifted_turn_items`, `lifted_anchor_source_id`, `raw_message_start_index`, `messages`. |
+| `Conversation` | A snapshot: `conversation_uuid`, `snapshot_uuid`, `parent_snapshot_uuid`, `bot_author_id`, `ancestor_summaries`, `raw_message_start_index`, `messages`, `working_file_windows`. |
+| `WorkingFileWindow` | Durable file-tool live-window state: `window_id`, `path`, `status`, `revision`, `view_start_line`, `view_end_line`, `requested_end_line`, `source_kind`, `rendered_output`. See [file_tool/README.md](../file_tool/README.md). |
 | `ConversationMessage` | External message: `source_id`, `author_id`, `content`, `display_name`, `deleted`, `edited`. |
 | `TurnExecution` | Per-bot-reply tool log: `conversation_uuid`, `bot_message_source_id`, `items`, `completed`. |
 | `TurnItem` | One `function_call` / `function_call_output` record. Carries `prokaryotes_annotations` (file-tool annotations live here). |
@@ -99,16 +100,36 @@ After load, the post-load pipeline runs: `_split_compacted_prefix` → `_detect_
 
 ## Projection
 
-`project_for_llm` (`prokaryotes/conversation_v1/project.py`) is the single bridge from storage to the LLM API and the only place role assignment, display-name prefixing, and consecutive-same-role text merging happen. Everything else in the system is role-agnostic.
+`project_for_llm` (`prokaryotes/conversation_v1/project.py`) is the single bridge from storage to the LLM API and the only place role assignment, display-name prefixing, leading-block emission, and consecutive-same-role text merging happen. Everything else in the system is role-agnostic.
 
 - Role is derived: `author_id == bot_author_id` → `assistant`, else `user`.
 - In a multi-author conversation (more than one distinct human `author_id`), each human turn is prefixed `<display_name> `.
-- Each bot message's `TurnExecution.items` are interleaved immediately before it; `lifted_turn_items` emit just before the `lifted_anchor_source_id` bot's tool round.
+- Each bot message's `TurnExecution.items` are interleaved immediately before it. Historical file-tool outputs annotated `file_tool.persistence="working_file"` (and their paired `function_call`s) are filtered out — their durable relevance lives on `Conversation.working_file_windows`, which projects as a leading user-role block; frozen edit records (`persistence="history"`) ride the transcript forward.
 - Consecutive same-role `message` items are merged (`\n\n`-joined) — this is what keeps the OpenAI Responses API's alternation requirement satisfied.
 
-LLM clients translate `list[ProjectedItem]` to their wire format (`_items_to_anthropic_messages` / `_items_to_openai_input`). The instruction (system/developer) message is injected by the harness at position 0 *after* projection — it is not part of conversation storage.
+LLM clients translate `list[ProjectedItem]` to their wire format (`_items_to_anthropic_messages` / `_items_to_openai_input`). The instruction (system/developer) message is injected by the harness at position 0 *after* projection — it is not part of conversation storage and carries only trusted content (core instructions, runtime context, tool usage, personality, user context).
 
-`current_turn_items(conversation, historical_turns, active_turn)` exposes the flat `TurnItem` view tools with lift semantics (`FileTool`) read from, so they see live windows carried across compaction.
+`FileTool` reads and mutates `Conversation.working_file_windows` directly via a `working_file_provider` callable (typically `lambda: conversation.working_file_windows`). Per-turn refresh runs at turn start via `reconcile_working_files(conversation.working_file_windows, ...)` before any FileTool call — see [file_tool/README.md](../file_tool/README.md) for the read/write/reconcile lifecycle.
+
+### Background-context blocks
+
+Untrusted-or-bot-summarized context projects into a **leading user-role slot** ahead of the conversation walk, using a shared XML delimiter convention:
+
+```
+<tag trust="…">
+…body…
+</tag>
+```
+
+Each block escapes any literal closing tag inside the body (`</tag>` → `<\/tag>`) so the structural boundary is unambiguous. Three sources flow through this slot, in this emission order:
+
+- **Ancestor summaries.** `Conversation.ancestor_summary_block()` materializes `ancestor_summaries` as `<compacted_summary trust="bot-summarized">…</compacted_summary>` whenever the list is non-empty. The [compaction lifecycle](../compaction/README.md) owns the *content*; projection owns the *placement*.
+- **Caller-supplied blocks.** `project_for_llm`'s `leading_context_blocks: list[str] | None = None` parameter accepts pre-delimited block strings (e.g. a future Slack `<channel_prelude trust="untrusted-user-data">…`). They emit between the summary and the working-files block, in list order. The parameter is `list[str]`, not `list[ProjectedItem]` — callers cannot inject assistant or function items at the head and break the merge invariant.
+- **Working files.** `Conversation.working_files_block()` materializes `working_file_windows` as `<working_files trust="file-content">…</working_files>` whenever the list is non-empty. The [file_tool lifecycle](../file_tool/README.md) owns the *content*; projection owns the *placement*. Closing-tag escape applies the same way as the other blocks (`</working_files>` → `<\/working_files>`).
+
+When the first stored message is user-role, the same-role merge collapses the summary, any caller-supplied blocks, the working-files block, and that first user message into one wire-level user-role message. Anthropic sees one user message with one text block whose body carries the merged content; OpenAI Responses sees one user input message with the same merged payload. When the first stored message is assistant-role (e.g. a snapshot that starts with a bot reply), the merge does not cross roles — the leading blocks form their own wire-level user-role message ahead of the assistant turn. Either way, the XML delimiters carry the structural separation inside any merged block; no wire-level non-merge guarantee is needed.
+
+This slot sits below the instruction (system/developer) message but ahead of the conversation walk, so both providers grant it less authority than system/developer instructions while still seeing it before any user turn — the trust placement the convention exists for.
 
 ---
 
@@ -123,7 +144,7 @@ A `conversation_uuid` is a DAG of snapshots. Two edge kinds, both via `parent_sn
 
 When the web syncer applies `edit` / `delete` / `divergence`, `_apply_divergence` roots a new snapshot at the shared prefix. The original snapshot is untouched in ES — prior branches survive server-side.
 
-- **Case A — divergence within the parent's raw window** (the common edit/regenerate path). The child inherits the parent's `ancestor_summaries` and `raw_message_start_index` verbatim, and recomputes `lifted_turn_items` / `lifted_anchor_source_id` against its own raw window.
+- **Case A — divergence within the parent's raw window** (the common edit/regenerate path). The child inherits the parent's `ancestor_summaries` and `raw_message_start_index` verbatim, and filters `working_file_windows` against the child's raw window using a two-set origin rule (active-path + shared-prefix call_id; see [file_tool/README.md](../file_tool/README.md#branch-divergence) for the filter details).
 - **Case B — divergence before the raw window** (editing a message that was compacted away). The compacted-prefix split fails, the syncer discards the loaded snapshot, and a fresh root `Conversation` is built from incoming alone — no inherited summaries, `raw_message_start_index=0`.
 
 Child branch `messages` are sorted by `source_id`, so the stored list stays in chronological order regardless of request shape.
@@ -192,7 +213,7 @@ Web clients only ever author `user` messages. `validate_assistant_messages` runs
 |---|---|
 | `prokaryotes/conversation_v1/models.py` | `Conversation`, `ConversationMessage`, `TurnExecution`, `TurnItem`, `ProjectedItem`, `NormalizedMessage`, `compute_boundary_hash` / `compute_tail_hash`. |
 | `prokaryotes/conversation_v1/reconcile.py` | Source-ID-keyed `reconcile()`. |
-| `prokaryotes/conversation_v1/project.py` | `project_for_llm`, `current_turn_items`. |
+| `prokaryotes/conversation_v1/project.py` | `project_for_llm` (role assignment, leading-block emission, historical working-file-output filter, same-role merge). |
 | `prokaryotes/context_v1/conversation_sync.py` | `ConversationSyncer` (three-tier load, post-load pipeline, `_apply_divergence`, guardrail), `SlackConversationSyncerMixin`. |
 | `prokaryotes/api_v1/models.py` | `IncomingMessage` / `IncomingConversation`, `CompactionStatusResponse`. |
 | `prokaryotes/search_v1/conversations.py` | `ConversationSearcher`: ES CRUD + index mappings. |

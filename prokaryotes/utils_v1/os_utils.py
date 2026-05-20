@@ -6,7 +6,6 @@ from functools import (
 )
 
 
-@cache
 def get_cwd() -> str:
     return os.getcwd()
 

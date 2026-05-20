@@ -76,17 +76,21 @@ def _resolved(path: Path | str) -> str:
     return path if isinstance(path, str) else str(path.resolve())
 
 
-def _live_windows_for_path(items, path: Path | str) -> list:
-    """Filter `TurnItem`s (which carry `prokaryotes_annotations`) to live windows for the path. Use on
-    `TurnExecution.items` or `Conversation.lifted_turn_items` — NOT on `ProjectedItem` lists (which strip
-    annotations)."""
+def _live_windows_for_path(windows, path: Path | str) -> list:
+    """Filter `WorkingFileWindow`s to live windows for the path. Use on `Conversation.working_file_windows`."""
     resolved = _resolved(path)
-    return [
-        item for item in items
-        if getattr(item, "type", None) == "function_call_output"
-        and (getattr(item, "prokaryotes_annotations", None) or {}).get("file_tool.path") == resolved
-        and (getattr(item, "prokaryotes_annotations", None) or {}).get("file_tool.status") == "live"
-    ]
+    return [w for w in windows if w.path == resolved and w.status == "live"]
+
+
+def _working_files_block_content(items) -> str:
+    """Return the rendered content of the leading `<working_files>` projection block, or '' when absent.
+    The block lives in a user-role `ProjectedItem` ahead of the conversation walk; with the same-role merge it
+    may be concatenated with the first stored user message in the same item."""
+    for item in items:
+        content = getattr(item, "content", "") or ""
+        if "<working_files trust=" in content:
+            return content
+    return ""
 
 
 def _outputs_by_call_id(items, call_ids: set[str]) -> dict[str, str]:
@@ -198,14 +202,13 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
-        turn1 = await _get_turn_execution(web_harness, conversation_uuid, record.bot_message_source_id)
-        live_after_turn1 = _live_windows_for_path(turn1.items, target)
-        assert len(live_after_turn1) == 2
-        assert all(
-            (item.prokaryotes_annotations or {}).get("file_tool.revision") == _hash(initial)
-            for item in live_after_turn1
+        cached_after_turn1 = Conversation.model_validate_json(
+            await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
         )
-        joined = "\n".join(item.output for item in live_after_turn1)
+        live_after_turn1 = _live_windows_for_path(cached_after_turn1.working_file_windows, target)
+        assert len(live_after_turn1) == 2
+        assert all(w.revision == _hash(initial) for w in live_after_turn1)
+        joined = "\n".join(w.rendered_output for w in live_after_turn1)
         assert "1 | one" in joined
         assert "3 | three" in joined
 
@@ -231,8 +234,8 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
         )
         snapshot_uuid = record.snapshot_uuid
 
-        # Turn 3: ack. Stream input shows turn-1's live windows refreshed to the post-write revision — historical
-        # TurnExecutions are immutable in ES, but reconcile mutates them in memory before projection.
+        # Turn 3: ack. Working-files block in the projection shows post-write revision — turn-start
+        # `reconcile_working_files` refreshed the windows before projection.
         messages.append(user_message("Confirm the update landed."))
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Confirmed."], stop_reason="end_turn", input_tokens=500)])
@@ -241,16 +244,12 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
         snapshot_uuid = record.snapshot_uuid
-        read_outputs_t3 = _outputs_by_call_id(
-            _last_stream_items(web_harness), {"call-read-1", "call-read-2"}
-        )
-        assert len(read_outputs_t3) == 2
-        joined_t3 = "\n".join(read_outputs_t3.values())
-        assert f"revision={_hash(after_write)}" in joined_t3
-        assert "status=live" in joined_t3
-        assert "2 | TWO" in joined_t3
-        assert "3 | THREE_X" in joined_t3
-        assert "3 | three" not in joined_t3
+        block_t3 = _working_files_block_content(_last_stream_items(web_harness))
+        assert f"revision={_hash(after_write)}" in block_t3
+        assert "status=live" in block_t3
+        assert "2 | TWO" in block_t3
+        assert "3 | THREE_X" in block_t3
+        assert "3 | three" not in block_t3
 
         # Turn 4: external edit between turns. Live windows refresh again.
         target.write_text(after_external_edit, encoding="utf-8")
@@ -261,17 +260,13 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
         await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
-        read_outputs_t4 = _outputs_by_call_id(
-            _last_stream_items(web_harness), {"call-read-1", "call-read-2"}
-        )
-        assert len(read_outputs_t4) == 2
-        joined_t4 = "\n".join(read_outputs_t4.values())
-        assert f"revision={_hash(after_external_edit)}" in joined_t4
-        assert "status=live" in joined_t4
-        assert "2 | TWO" in joined_t4
-        assert "3 | THREE_Y" in joined_t4
-        assert "5 | five" in joined_t4
-        assert "3 | THREE_X" not in joined_t4
+        block_t4 = _working_files_block_content(_last_stream_items(web_harness))
+        assert f"revision={_hash(after_external_edit)}" in block_t4
+        assert "status=live" in block_t4
+        assert "2 | TWO" in block_t4
+        assert "3 | THREE_Y" in block_t4
+        assert "5 | five" in block_t4
+        assert "3 | THREE_X" not in block_t4
 
 
 @pytest.mark.parametrize(
@@ -281,66 +276,65 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
 )
 @pytest.mark.asyncio(loop_scope="session")
 async def test_file_tool_live_windows_survive_compaction(web_harness, authed_client, request):
-    """Open two live windows, drive compaction, and verify the lifted live windows reappear in the post-compaction
-    projection at the current revision."""
+    """Reads that happen in the recency tail survive compaction via the CAS-time `working_file_windows` carry-forward,
+    are refreshed against disk on the next turn's `reconcile_working_files`, and appear in the leading
+    `<working_files>` projection block at the current revision.
+
+    Under the new design, the carry-forward filter drops windows whose `call_id` is in pre_tail `TurnExecution.items`
+    (race-safe, no active-path semantics). So this test minted its reads in the **recency tail** — pre-tail windows
+    are intentionally dropped per the design (edit/non-read tradeoff documented in the wip doc).
+    """
     conversation_uuid = str(uuid4())
     initial = "one\ntwo\nthree\nfour\n"
-    after_write = "one\nTWO\nTHREE_X\nfour\n"
+    after_external = "one\nTWO\nthree\nfour\nfive\n"
 
     with TemporaryDirectory(dir=Path.cwd(), prefix=".file-tool-it-") as temp_dir:
         target = Path(temp_dir) / "tracked.txt"
         target.write_text(initial, encoding="utf-8")
 
-        # Turn 1: open two read windows.
-        messages = [user_message("Inspect the file in two windows.")]
+        # Turns 1 & 2: noise to push the read turn into the post-compaction-boundary slot. With
+        # COMPACTION_RECENCY_TAIL=2 (set in env_bootstrap), the recency tail at compaction-time is the last 2 messages.
+        messages = [user_message("Hello.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading the top."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading the tail."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["I inspected it."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(rounds=[LLMRound(text_deltas=["Hi."], stop_reason="end_turn", input_tokens=500)])
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
 
-        # Turn 2: plain ack to extend the conversation past the recency tail.
-        messages.append(user_message("Acknowledge the inspection."))
+        messages.append(user_message("How are you?"))
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[LLMRound(text_deltas=["Acknowledged."], stop_reason="end_turn", input_tokens=500)])
+            LLMScript(rounds=[LLMRound(text_deltas=["Good."], stop_reason="end_turn", input_tokens=500)])
         )
         record = await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
         snapshot_uuid = record.snapshot_uuid
 
-        # Turn 3: write + finalize triggers compaction (input_tokens=5000).
-        messages.append(user_message("Now update the middle lines."))
+        # Turn 3: read + trigger compaction. With recency tail = 2, this turn (u3, b3) IS the recency tail. Its
+        # read minted windows carry forward via the pre_tail filter.
+        messages.append(user_message("Inspect the file in two windows."))
         web_harness.llm_client.set_script(
             LLMScript(
                 rounds=[
                     LLMRound(
                         stop_reason="tool_use",
-                        text_deltas=["Editing the file."],
+                        text_deltas=["Reading the top."],
                         tool_calls=[ToolCallSpec(
-                            arguments=_replace_args(target, _hash(initial), 2, 3, "TWO\nTHREE_X\n"),
-                            call_id="call-write-1",
-                            name="file_tool",
+                            arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool"
                         )],
                         input_tokens=500,
                     ),
-                    LLMRound(text_deltas=["It is updated and compacted."], stop_reason="end_turn", input_tokens=5000),
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading the tail."],
+                        tool_calls=[ToolCallSpec(
+                            arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool"
+                        )],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Inspected."], stop_reason="end_turn", input_tokens=5000),
                 ],
-                summary_text="LIVE WINDOW SUMMARY",
+                summary_text="EARLIER CHAT SUMMARY",
             )
         )
         record = await post_chat(
@@ -361,15 +355,16 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
         )
         assert cached.snapshot_uuid == post_compaction_uuid
         assert cached.parent_snapshot_uuid == pending_snapshot_uuid
-        assert cached.ancestor_summaries == ["LIVE WINDOW SUMMARY"]
+        assert cached.ancestor_summaries == ["EARLIER CHAT SUMMARY"]
         assert cached.raw_message_start_index > 0
-        # The compactor lifts both open live windows onto the child snapshot. Lift preserves the items at their
-        # commit-time annotations; reconcile on the next turn refreshes them to the current revision.
-        lifted_live = _live_windows_for_path(cached.lifted_turn_items, target)
-        assert len(lifted_live) == 2
+        # The recency-tail-minted windows survive the pre_tail call_id filter — their call_ids live in the
+        # recency-tail TurnExecution, not in pre_tail.
+        carried_live = _live_windows_for_path(cached.working_file_windows, target)
+        assert len(carried_live) == 2
 
-        # Turn 4: continue from compacted state. The lifted live windows are included in the projection AFTER
-        # reconcile refreshes them to the current revision.
+        # Turn 4: continue from compacted state with an external edit between turns. The carried windows are
+        # refreshed against disk on `reconcile_working_files` and projected in the `<working_files>` block.
+        target.write_text(after_external, encoding="utf-8")
         messages.append(user_message("Continue from the compacted state."))
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Continuing."], stop_reason="end_turn", input_tokens=500)])
@@ -377,15 +372,11 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
         await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=post_compaction_uuid
         )
-        read_outputs_t4 = _outputs_by_call_id(
-            _last_stream_items(web_harness), {"call-read-1", "call-read-2"}
-        )
-        assert len(read_outputs_t4) == 2
-        joined_t4 = "\n".join(read_outputs_t4.values())
-        assert f"revision={_hash(after_write)}" in joined_t4
-        assert "status=live" in joined_t4
-        assert "2 | TWO" in joined_t4
-        assert "3 | THREE_X" in joined_t4
+        block_t4 = _working_files_block_content(_last_stream_items(web_harness))
+        assert f"revision={_hash(after_external)}" in block_t4
+        assert "status=live" in block_t4
+        assert "2 | TWO" in block_t4
+        assert "5 | five" in block_t4
 
 
 @pytest.mark.parametrize(
@@ -480,15 +471,13 @@ async def test_file_tool_already_exists_window_normalizes_on_next_turn(web_harne
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
 
-        turn1 = await _get_turn_execution(web_harness, conversation_uuid, record.bot_message_source_id)
-        already_exists = next(
-            item for item in turn1.items
-            if item.call_id == "call-exists-1" and item.type == "function_call_output"
+        cached_after_turn1 = Conversation.model_validate_json(
+            await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
         )
-        assert already_exists.output.startswith("ALREADY_EXISTS ")
-        ann = already_exists.prokaryotes_annotations or {}
-        assert ann.get("file_tool.status") == "live"
-        assert ann.get("file_tool.revision") == _hash(initial)
+        already_exists = next(w for w in cached_after_turn1.working_file_windows if w.window_id == "call-exists-1")
+        assert already_exists.source_kind == "already_exists"
+        assert already_exists.status == "live"
+        assert already_exists.revision == _hash(initial)
 
         messages.append(user_message("Continue."))
         web_harness.llm_client.set_script(
@@ -497,11 +486,10 @@ async def test_file_tool_already_exists_window_normalizes_on_next_turn(web_harne
         await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
-        outputs = _outputs_by_call_id(_last_stream_items(web_harness), {"call-exists-1"})
-        normalized = outputs["call-exists-1"]
-        assert normalized.startswith("FILE ")
-        assert "ALREADY_EXISTS " not in normalized
-        assert "1 | alpha" in normalized
+        block = _working_files_block_content(_last_stream_items(web_harness))
+        assert "FILE " in block
+        assert "ALREADY_EXISTS " not in block
+        assert "1 | alpha" in block
 
 
 @pytest.mark.parametrize(
@@ -562,17 +550,15 @@ async def test_file_tool_conflict_window_normalizes_on_next_turn(web_harness, au
         )
         snapshot_uuid = record.snapshot_uuid
 
-        turn2 = await _get_turn_execution(web_harness, conversation_uuid, record.bot_message_source_id)
-        conflict = next(
-            item for item in turn2.items
-            if item.call_id == "call-conflict-1" and item.type == "function_call_output"
+        cached_after_turn2 = Conversation.model_validate_json(
+            await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
         )
-        assert conflict.output.startswith("CONFLICT ")
-        ann = conflict.prokaryotes_annotations or {}
-        assert ann.get("file_tool.status") == "live"
-        assert ann.get("file_tool.revision") == _hash(after_external_edit)
+        conflict = next(w for w in cached_after_turn2.working_file_windows if w.window_id == "call-conflict-1")
+        assert conflict.source_kind == "conflict"
+        assert conflict.status == "live"
+        assert conflict.revision == _hash(after_external_edit)
 
-        # Turn 3: continue. CONFLICT entry normalizes to plain FILE in the projection.
+        # Turn 3: continue. CONFLICT window normalizes to read_lines in the `<working_files>` block.
         messages.append(user_message("Continue."))
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Done."], stop_reason="end_turn", input_tokens=500)])
@@ -580,15 +566,11 @@ async def test_file_tool_conflict_window_normalizes_on_next_turn(web_harness, au
         await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
-        outputs = _outputs_by_call_id(
-            _last_stream_items(web_harness), {"call-read-1", "call-conflict-1"}
-        )
-        assert len(outputs) == 2
-        joined = "\n".join(outputs.values())
-        assert f"revision={_hash(after_external_edit)}" in joined
-        assert "status=live" in joined
-        assert "CONFLICT " not in joined
-        assert "3 | gamma" in joined
+        block = _working_files_block_content(_last_stream_items(web_harness))
+        assert f"revision={_hash(after_external_edit)}" in block
+        assert "status=live" in block
+        assert "CONFLICT " not in block
+        assert "3 | gamma" in block
 
 
 @pytest.mark.parametrize(
@@ -643,15 +625,13 @@ async def test_file_tool_range_error_window_normalizes_on_next_turn(web_harness,
         )
         snapshot_uuid = record.snapshot_uuid
 
-        turn2 = await _get_turn_execution(web_harness, conversation_uuid, record.bot_message_source_id)
-        range_error = next(
-            item for item in turn2.items
-            if item.call_id == "call-range-1" and item.type == "function_call_output"
+        cached_after_turn2 = Conversation.model_validate_json(
+            await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
         )
-        assert range_error.output.startswith("RANGE_ERROR ")
-        ann = range_error.prokaryotes_annotations or {}
-        assert ann.get("file_tool.status") == "live"
-        assert ann.get("file_tool.revision") == _hash(initial)
+        range_error = next(w for w in cached_after_turn2.working_file_windows if w.window_id == "call-range-1")
+        assert range_error.source_kind == "range_error"
+        assert range_error.status == "live"
+        assert range_error.revision == _hash(initial)
 
         messages.append(user_message("Continue."))
         web_harness.llm_client.set_script(
@@ -660,10 +640,9 @@ async def test_file_tool_range_error_window_normalizes_on_next_turn(web_harness,
         await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
-        outputs = _outputs_by_call_id(_last_stream_items(web_harness), {"call-range-1"})
-        normalized = outputs["call-range-1"]
-        assert normalized.startswith("FILE ")
-        assert "RANGE_ERROR " not in normalized
+        block = _working_files_block_content(_last_stream_items(web_harness))
+        assert "FILE " in block
+        assert "RANGE_ERROR " not in block
 
 
 @pytest.mark.parametrize(
@@ -705,11 +684,10 @@ async def test_file_tool_missing_file_tombstones_on_next_turn(web_harness, authe
         await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
         )
-        outputs = _outputs_by_call_id(_last_stream_items(web_harness), {"call-read-1"})
-        tombstone = outputs["call-read-1"]
-        assert "status=stale" in tombstone
-        assert "no longer accessible" in tombstone
-        assert "FileNotFoundError" in tombstone
+        block = _working_files_block_content(_last_stream_items(web_harness))
+        assert "status=stale" in block
+        assert "no longer accessible" in block
+        assert "FileNotFoundError" in block
 
 
 @pytest.mark.parametrize(
@@ -759,12 +737,11 @@ async def test_file_tool_symlink_escape_tombstones_on_next_turn(web_harness, aut
             await _advance_turn(
                 web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
             )
-            outputs = _outputs_by_call_id(_last_stream_items(web_harness), {"call-read-1"})
-            tombstone = outputs["call-read-1"]
-            assert "status=stale" in tombstone
-            assert "no longer accessible" in tombstone
-            assert "ValueError" in tombstone
-            assert "top secret" not in tombstone
+            block = _working_files_block_content(_last_stream_items(web_harness))
+            assert "status=stale" in block
+            assert "no longer accessible" in block
+            assert "ValueError" in block
+            assert "top secret" not in block
 
 
 @pytest.mark.parametrize(
@@ -773,9 +750,10 @@ async def test_file_tool_symlink_escape_tombstones_on_next_turn(web_harness, aut
     indirect=True,
 )
 @pytest.mark.asyncio(loop_scope="session")
-async def test_compaction_summary_input_strips_live_window_bodies(web_harness, authed_client, request):
-    """The compaction summarizer must not feed live-window bodies to the LLM: the rendered input replaces them with
-    a placeholder and keeps only the frozen edit records' context-before/after blocks."""
+async def test_compaction_summary_input_omits_working_file_windows(web_harness, authed_client, request):
+    """The compaction summarizer must not feed live-file content to the LLM. `_summarize_and_compact` projects
+    `pre_tail_conv` with `working_file_windows=[]`, so the projection's leading `<working_files>` block is absent
+    from the summarizer's input — and live-window bodies cannot fossilize into the new summary."""
     conversation_uuid = str(uuid4())
     initial = "one\ntwo\nthree\nfour\n"
 
@@ -846,20 +824,12 @@ async def test_compaction_summary_input_strips_live_window_bodies(web_harness, a
         echo_assistant(messages, record)
         await _wait_for_compaction(authed_client, conversation_uuid, pending_snapshot_uuid)
 
-        # Inspect the summarization input: live windows in the pre-tail bot turn are replaced by a placeholder so
-        # the summarizer doesn't burn tokens on contents that subsequent turns track via the live-window mechanism.
-        # The write itself (turn 3) lives in the recency tail with COMPACTION_RECENCY_TAIL=2 and is not part of this
-        # input.
+        # The summarizer's projected input must not carry any `<working_files>` block — `working_file_windows=[]`
+        # on `pre_tail_conv`. Historical file_tool outputs (persistence="working_file") are also dropped from the
+        # projection, so no rendered live-window contents reach the summarizer.
         summary_items = _last_complete_items(web_harness)
         rendered = "\n".join(item.output or item.content or "" for item in summary_items)
-        placeholder = (
-            f"[Live tracked file: {_resolved(target)} — current contents are tracked via the "
-            "live-window mechanism on subsequent turns, not summarized here.]"
-        )
-        assert placeholder in rendered
-        # Live-window bodies must not leak in: no rendered view headers, no status=live tags, no inline
-        # line-numbered content for the tracked path.
-        assert "Current view (" not in rendered
+        assert "<working_files" not in rendered
         assert f"FILE path={_resolved(target)} revision=" not in rendered
         assert "status=live" not in rendered
         assert "1 | one" not in rendered

@@ -55,8 +55,7 @@ async def _post_events(
 )
 @pytest.mark.asyncio(loop_scope="session")
 async def test_handshake_arrives_first(web_harness, authed_client):
-    """First NDJSON event is a handshake carrying `snapshot_uuid` and `source_id_assignments` — no top-level
-    `partition_uuid` event."""
+    """First NDJSON event is a handshake carrying `snapshot_uuid` and `source_id_assignments`."""
     web_harness.llm_client.set_script(LLMScript(rounds=[LLMRound(text_deltas=["x"], stop_reason="end_turn")]))
     payload = {
         "conversation_uuid": str(uuid4()),

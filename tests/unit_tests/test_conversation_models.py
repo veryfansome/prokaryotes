@@ -107,3 +107,58 @@ class TestAncestorSummaryBlock:
         assert "summary-1" in block
         assert "summary-2" in block
         assert "summary-1\n\nsummary-2" in block
+
+    def test_single_summary_emits_opening_and_closing_tags(self):
+        c = conversation(msg("1", "hi"), ancestor_summaries=["body-one"])
+        block = c.ancestor_summary_block()
+        assert block is not None
+        assert block.startswith('<compacted_summary trust="bot-summarized">\n')
+        assert block.endswith("\n</compacted_summary>")
+        assert "body-one" in block
+
+    def test_header_sentences_precede_bodies(self):
+        c = conversation(msg("1", "hi"), ancestor_summaries=["body-one"])
+        block = c.ancestor_summary_block()
+        assert block is not None
+        header_anchor = "The following is background memory summarizing earlier turns in this conversation."
+        assert header_anchor in block
+        assert block.index(header_anchor) < block.index("body-one")
+
+    def test_multiple_summaries_sit_inside_closing_tag(self):
+        c = conversation(msg("1", "hi"), ancestor_summaries=["body-one", "body-two"])
+        block = c.ancestor_summary_block()
+        assert block is not None
+        body_section = block.split("\n\n", 1)[1]
+        assert body_section.endswith("body-one\n\nbody-two\n</compacted_summary>")
+
+
+class TestAncestorSummaryBlockClosingTagEscape:
+    def test_closing_tag_in_body_is_escaped(self):
+        c = conversation(msg("1", "hi"), ancestor_summaries=["pre </compacted_summary> post"])
+        block = c.ancestor_summary_block()
+        assert block is not None
+        assert "<\\/compacted_summary>" in block
+        # The only un-escaped closing tag is the structural one at the very end
+        assert block.count("</compacted_summary>") == 1
+        assert block.rstrip().endswith("</compacted_summary>")
+
+    def test_opening_tag_substring_in_body_is_left_alone(self):
+        c = conversation(
+            msg("1", "hi"),
+            ancestor_summaries=['quote: <compacted_summary trust="something-else"> stays as-is'],
+        )
+        block = c.ancestor_summary_block()
+        assert block is not None
+        assert block.count('<compacted_summary trust="bot-summarized">') == 1
+        assert '<compacted_summary trust="something-else">' in block
+
+    def test_escape_applies_per_summary_independently(self):
+        c = conversation(
+            msg("1", "hi"),
+            ancestor_summaries=["clean body", "leaky </compacted_summary> body"],
+        )
+        block = c.ancestor_summary_block()
+        assert block is not None
+        assert "clean body" in block
+        assert "leaky <\\/compacted_summary> body" in block
+        assert block.count("</compacted_summary>") == 1

@@ -38,9 +38,7 @@ class CompactionStatusHandler(ABC):
         # `compaction_status:{pending_snapshot_uuid}` at the commit step.
         relabel_target = await self.redis_client.get(f"compaction_status:{pending_snapshot_uuid}")
         if relabel_target:
-            target_str = relabel_target.decode("utf-8") if isinstance(relabel_target, bytes) else relabel_target
-            if target_str:
-                return CompactionStatusResponse(done=True, snapshot_uuid=target_str)
+            return CompactionStatusResponse(done=True, snapshot_uuid=relabel_target.decode("utf-8"))
         return CompactionStatusResponse(done=True)
 
     @property

@@ -1,11 +1,10 @@
 /**
- * DOM/fetch integration tests for the migrated chat protocol.
+ * DOM/fetch integration tests for the chat protocol.
  *
  * Covers the production paths in `scripts/static/ui.js` that the pure-helper tests in `ui.test.js` and
  * `conversation_client.test.js` don't reach:
  *
- * - `sendMessage` builds the POST body with `snapshot_uuid` + `source_id`s for server-stamped nodes (no
- *   `partition_uuid`).
+ * - `sendMessage` builds the POST body with `snapshot_uuid` + `source_id`s for server-stamped nodes.
  * - The first stream event (handshake) stamps server-assigned source_ids onto the submitted user node.
  * - The assistant node is created only on `bot_message`, with the bot's server-assigned `source_id` and the
  *   handshake's `snapshot_uuid`.
@@ -101,8 +100,6 @@ describe('POST body wire shape', () => {
         expect(body.snapshot_uuid).toBeNull();
         expect(body.messages).toHaveLength(1);
         expect(body.messages[0]).toEqual({ role: 'user', content: 'hi' });
-        // Legacy field must not appear.
-        expect(body).not.toHaveProperty('partition_uuid');
     });
 
     it('second turn: includes snapshot_uuid + echoes server source_ids on prior nodes', async () => {

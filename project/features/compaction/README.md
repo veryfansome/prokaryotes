@@ -19,10 +19,12 @@ A compacted snapshot is sealed (`is_compacted=True`) and carries an LLM-generate
 When the model is called, context is assembled as:
 
 ```
-[core instructions] + [summary block from compacted ancestors] + [projected active snapshot]
+[instruction message]               ← trusted content only (no background blocks)
+[<compacted_summary> block]         ← prepended to the projection; user-role
+[projected active snapshot]         ← user/assistant/tool items, unchanged shape
 ```
 
-Summaries enter via the system (Anthropic) / developer (OpenAI) `instruction` parameter as a trailing `# Compacted conversation summary` background-memory section — never as conversation turns, so they aren't conflated with real dialogue.
+The summary projects as a **leading user-role block** via `project_for_llm`. When the first stored message is user-role, the same-role merge collapses the summary with that first user message into one wire-level user-role message; when it isn't, the summary stays as its own user-role message ahead of the conversation walk. Structural separation inside any merged block comes from the XML delimiters (`<compacted_summary trust="bot-summarized">…</compacted_summary>`), with closing-tag escape on the summary body. Trust placement is intentional — the summary is bot-generated content, not a system instruction. See [conversation/README.md — Background-context blocks](../conversation/README.md#background-context-blocks) for the projection seam and delimiter convention.
 
 ### Ancestor summaries
 
@@ -36,9 +38,9 @@ On compaction, the most recent K user/assistant messages stay verbatim in the ne
 
 A summary is only valid if the branch that produced it is provably identical to the current branch. Each compacted snapshot stores a `boundary_hash` — a SHA-256 over the `(author_id, content)` sequence of every non-deleted message the summary covers. On chain reconstruction the server recomputes the hash over the corresponding prefix of incoming and compares; a mismatch means the branches diverged before the boundary and the summary is not used. A secondary `tail_hash` (last N user-message contents) is a lookup key for tail-based discovery.
 
-### Lifted items and the file-tool anchor
+### Working-file carry-forward
 
-When compaction commits, the child's `lifted_turn_items` carry forward file-tool live windows (and their paired `function_call`s) for any path still active in the recency tail. `lifted_anchor_source_id` is the recency-tail bot message that touched a relevant path — projection emits the lifted items immediately before that bot's tool round. Invariant: `anchor=None iff lifted_turn_items==[]`. The summary input has live-window bodies stripped (`strip_live_window_bodies`) so current file contents don't fossilize into the summary.
+When compaction commits, the child's `working_file_windows` are carried forward from the **live Redis snapshot at CAS time** (`current.working_file_windows`, not the deep-copy snapshot taken at compaction start), filtered to drop windows whose `window_id` (== file-tool `call_id`) appears in any `pre_tail` `TurnExecution.items`. Three keep-buckets survive: windows minted by recency-tail turns, windows minted by post-snapshot turns finalized during in-flight summarization (race-safe by construction — the filter never reads post-snapshot TurnExecutions), and carryforward windows whose call_ids live in no current `TurnExecution.items` (they originated in a compacted ancestor). The summary input keeps `working_file_windows=[]` on its `pre_tail_conv` so live file bodies don't fossilize into the summary. See [file_tool/README.md](../file_tool/README.md#compaction) for the full filter rule and behavioral tradeoff.
 
 ---
 
@@ -53,8 +55,8 @@ The `conversations` ES index (defined in [conversation/README.md](../conversatio
 | `is_compacted` | Set on the parent only after the child swap commits. |
 | `summary` | LLM-generated summary text; full-text indexed. |
 | `boundary_hash` / `tail_hash` | Branch-validation hash and tail lookup key. |
-| `boundary_message_count` / `boundary_user_count` | Counts at the compaction boundary. |
-| `ancestor_summaries` / `lifted_turn_items_json` / `lifted_anchor_source_id` | Mirrors of the in-memory fields. |
+| `boundary_message_count` | Non-deleted message count at the compaction boundary. |
+| `ancestor_summaries` / `working_file_windows_json` | Mirrors of the in-memory fields. `working_file_windows_json` stores the serialized `WorkingFileWindow` list (same opaque-JSON shape as `messages_json`). |
 
 A compacted snapshot keeps its `messages_json` so the [assistant-message guardrail](../conversation/README.md#assistant-message-guardrail) can still read compacted ancestors' per-message identity.
 
@@ -76,11 +78,11 @@ After the final assistant message commits:
 
 ### `_compact_conversation` — `prokaryotes/context_v1/compaction.py`
 
-1. **`_prepare_compaction`** — split `(pre_tail, recency_tail)`, load `TurnExecution`s for both windows, build the `_LiftPlan`. Pure read step.
+1. **`_prepare_compaction`** — split `(pre_tail, recency_tail)`, load `TurnExecution`s for both windows into the `_CompactionPrep` handoff. Pure read step.
 2. Return early if the recency tail is empty.
-3. **Summarize** via `compact_fn` — `_summarize_and_compact` projects the pre-tail with stripped live-window bodies, appends the summarization prompt, and calls `llm_client.complete(...)`. An empty summary aborts.
+3. **Summarize** via `compact_fn` — `_summarize_and_compact` projects a copy of the pre-tail snapshot with `working_file_windows=[]` and `ancestor_summaries=[]` (so the compactor's own input carries no leading `<working_files>` block and never re-includes prior summaries — they ride forward as storage state on the child snapshot), appends the summarization prompt, and calls `llm_client.complete(...)`. An empty summary aborts.
 4. **Compute boundary metadata** — `boundary_hash`, `tail_hash`, the counts.
-5. **`_cas_swap_child`** — under Redis `WATCH / MULTI / EXEC` on `conversation:{conversation_uuid}`: abort if the active `snapshot_uuid`, `ancestor_summaries`, or `raw_message_start_index` changed; build the child (`messages = recency_tail + post_snapshot_messages`, `ancestor_summaries + [summary]`, lift state from prep); persist it as `compaction_state="pending"` so Redis never points at a snapshot ES doesn't know; execute the swap, retry on `WatchError`.
+5. **`_cas_swap_child`** — under Redis `WATCH / MULTI / EXEC` on `conversation:{conversation_uuid}`: abort if the active `snapshot_uuid`, `ancestor_summaries`, `raw_message_start_index`, or message prefix changed; build the child (`messages = recency_tail + post_snapshot_messages`, `ancestor_summaries + [summary]`, and `working_file_windows` carried forward from the live `current` snapshot via the pre_tail call-id filter); persist it as `compaction_state="pending"` so Redis never points at a snapshot ES doesn't know; execute the swap, retry on `WatchError`.
 6. **Promote the child to `committed`** via `update_conversation`. This write uses `refresh="wait_for"` so a post-compaction cold-Redis `_rebuild_from_chain` can immediately find the new active child via `find_latest_active_child`. The wait runs on this background task — no interactive latency.
 7. **Mark the parent `is_compacted`** with the summary + boundary metadata.
 8. **Write `compaction_status:{pending_snapshot_uuid}`** to Redis — the child's `snapshot_uuid` as the relabel target, or an empty-string sentinel on abort/exception.
@@ -100,7 +102,7 @@ The indicator is **branch-scoped**: each pending compaction has its own poll loo
 
 Each branch is independently compactable — the CAS is keyed on `snapshot_uuid`. How edit/retry interacts with the compaction boundary:
 
-- **Edit/regenerate within the recency tail** → Case A divergence: a new branch snapshot that inherits `ancestor_summaries` and recomputes lift state.
+- **Edit/regenerate within the recency tail** → Case A divergence: a new branch snapshot that inherits `ancestor_summaries` and filters `working_file_windows` by active path + origin.
 - **Retry before the recency tail** → `_split_compacted_prefix` fails, the syncer routes to Case B: a fresh root branch with no ancestor summaries and `raw_message_start_index=0`.
 
 See [conversation/README.md](../conversation/README.md#branches-and-snapshots) for the full divergence semantics.
@@ -131,12 +133,12 @@ See [conversation/README.md](../conversation/README.md#branches-and-snapshots) f
 
 | File | Role |
 |---|---|
-| `prokaryotes/context_v1/compaction.py` | `ConversationCompactor`: `_compact_conversation`, `_cas_swap_child`, `_prepare_compaction`, `_write_compaction_status`; `_compute_lift_plan`, `_recency_tail_messages`, `_retry_compaction_search_write`. |
-| `prokaryotes/context_v1/conversation_sync.py` | `_split_compacted_prefix`, `_rebuild_from_chain`, `find_latest_active_child` use — the chain-rebuild and compacted-prefix handling. |
+| `prokaryotes/context_v1/compaction.py` | `ConversationCompactor`: `_compact_conversation`, `_cas_swap_child` (with the pre_tail call_id filter on `working_file_windows`), `_prepare_compaction`, `_write_compaction_status`; `_file_tool_call_ids_in`, `_recency_tail_messages`, `_retry_compaction_search_write`. |
+| `prokaryotes/context_v1/conversation_sync.py` | `_split_compacted_prefix` and `_rebuild_from_chain` chain-rebuild handling; the working-file carry-forward filters for Case A divergence and cold rebuild (`_active_paths_in_turns`, `_file_tool_call_ids_in`, `_filter_windows_by_active_path_and_origin`). Cold rebuild restores windows from the donor returned by `find_latest_active_child` (defined in `search_v1/conversations.py`). |
 | `prokaryotes/harness_v1/web.py` | `on_usage` / `pending_compaction`, `_summarize_and_compact`. |
 | `prokaryotes/harness_v1/base.py` | `stream_and_finalize` compaction sequencing. |
 | `prokaryotes/web_v1/compaction.py` | `CompactionStatusHandler`: the `/compaction-status` endpoint. |
-| `prokaryotes/tools_v1/file_tool/live_windows.py` | Live-window strip/lift helpers used by the lift plan. |
+| `prokaryotes/tools_v1/file_tool/live_windows.py` | `refresh_windows_for_path`, `tombstone_windows_for_path`, `reconcile_working_files` — window refresh/tombstone/normalize over `working_file_windows`. |
 | `prokaryotes/utils_v1/llm_utils.py` | `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS`. |
-| `tests/unit_tests/test_compaction_*.py` | Lift plan, CAS swap, chain rebuild, status handler, summarization input. |
+| `tests/unit_tests/test_compaction_*.py` | Pre-tail working-file filter, CAS swap, chain rebuild, status handler, summarization input. |
 | `tests/integration_tests/tier_b/test_compaction_flow.py` | End-to-end compaction against real ES + Redis. |
