@@ -81,10 +81,7 @@ class AnthropicClient(LLMClient):
         thinking = _thinking_param(reasoning_effort)
         tool_call_rounds = 0
 
-        # Working buffer: initialized from the projection, grows with tool_use/result blocks, discarded when
-        # stream_turn returns.
         working_messages = _items_to_anthropic_messages(items)
-        # Text aggregated across all non-tool-use rounds.
         answer_text: list[str] = []
 
         while True:
@@ -123,7 +120,6 @@ class AnthropicClient(LLMClient):
                 yield json.dumps({"context_pct": context_pct}) + "\n"
 
             if response.stop_reason != "tool_use":
-                # Final assistant text. Emit via callback for commit to Conversation.
                 answer_text.extend(round_text)
                 if stream_ndjson:
                     for delta in round_text:
@@ -136,7 +132,6 @@ class AnthropicClient(LLMClient):
             if stream_ndjson and round_output:
                 yield json.dumps({"progress_message": round_output}) + "\n"
 
-            # Append the model's assistant turn (text + tool_use blocks) to the buffer.
             assistant_blocks: list[dict] = []
             if round_output:
                 assistant_blocks.append({"type": "text", "text": round_output})

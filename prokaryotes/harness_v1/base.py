@@ -91,7 +91,6 @@ class HarnessBase(ConversationCompactor):
     def ensure_runtime_clients(self):
         """Idempotently create Redis / Search clients. Subclasses needing them before `on_start` (e.g. `WebBase`
         mounting Redis-backed sessions) call this in their own setup."""
-        # self.graph_client.init_client()
         if self._redis_client is None:
             self._redis_client = get_redis_client()
         if self._search_client.es is None:
@@ -149,7 +148,6 @@ class HarnessBase(ConversationCompactor):
     async def on_stop(self):
         await self.drain_background_tasks()
         close_tasks = []
-        # close_tasks.append(self.graph_client.close())
         if self._search_client.es is not None:
             close_tasks.append(self._search_client.close())
         if self._redis_client is not None:
@@ -203,8 +201,6 @@ class HarnessBase(ConversationCompactor):
         conversation = sync_result.conversation
         ctx = _StreamFinalizationContext(final_assistant_text=[], committed_turn_items=[])
 
-        # The factory wires `on_committed_turn_item` / `on_final_assistant_message` into the LLM client; we own the
-        # buffers here.
         async for event_str in response_generator_factory(ctx):
             if not event_str:
                 continue

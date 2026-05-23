@@ -1,12 +1,9 @@
 """`SlackBase` — Socket Mode lifecycle and inbound event dispatch for the Slack harness.
 
-`SlackBase(SlackConversationSyncerMixin, HarnessBase, ABC)` owns the single per-workspace Socket Mode connection,
-acks envelopes inside the listener, dedupes by `event_id`, applies the trigger gate (`_should_handle`), and fires
-`handle_event` into a background task. `SlackConversationSyncerMixin` precedes `HarnessBase` in the MRO so its
-in-place `_apply_result` (edit / delete / op-aware divergence, `TurnExecution` re-keying) overrides the default
-web branch-on-divergence policy.
-
-The LLM / tool wiring and the per-turn flow live in `prokaryotes.harness_v1.slack.SlackHarness`.
+Owns the single per-workspace Socket Mode connection, acks envelopes inside the listener, dedupes by `event_id`,
+applies the trigger gate (`_should_handle`), and fires `handle_event` into a background task. The LLM / tool
+wiring and the per-turn flow live in `prokaryotes.harness_v1.slack.SlackHarness`. See the `SlackBase` class
+docstring below for the apply-policy MRO contract.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
-from prokaryotes.context_v1.conversation_sync import SlackConversationSyncerMixin
+from prokaryotes.context_v1.conversation_sync import SlackApplyPolicy
 from prokaryotes.harness_v1.base import HarnessBase
 from prokaryotes.slack_v1.client import SlackClient
 
@@ -62,10 +59,10 @@ class _LockEntry:
     last_used_monotonic: float = field(default_factory=time.monotonic)
 
 
-class SlackBase(SlackConversationSyncerMixin, HarnessBase, ABC):
+class SlackBase(SlackApplyPolicy, HarnessBase, ABC):
     """Worker harness bound to a single Slack workspace.
 
-    `SlackConversationSyncerMixin` precedes `HarnessBase` in the MRO so its `_apply_result` (in-place edit /
+    `SlackApplyPolicy` precedes `HarnessBase` in the MRO so its `_apply_result` (in-place edit /
     delete / divergence, `TurnExecution` re-keying) overrides the default web branch-on-divergence policy.
     """
 
@@ -204,11 +201,7 @@ class SlackBase(SlackConversationSyncerMixin, HarnessBase, ABC):
             return False
         if self.bot_id and event.get("bot_id") == self.bot_id:
             return False
-        if (
-            self.app_id
-            and event.get("bot_id") is None
-            and event.get("bot_profile", {}).get("app_id") == self.app_id
-        ):
+        if self.app_id and event.get("bot_id") is None and event.get("bot_profile", {}).get("app_id") == self.app_id:
             return False
         if event.get("subtype") == "bot_message":
             return False  # defensive — bot_message from another integration also drops here

@@ -84,7 +84,7 @@ TTLs default to `CONVERSATION_CACHE_EXPIRY_SECONDS` (7 days).
 - **`delete`** — stored `source_id`s missing from incoming, with no fresh `source_id`s and no content changes.
 - **`divergence`** — anything else (e.g. an edit/delete that isn't a pure trailing change).
 
-The **syncer** decides how to apply per surface. The web syncer (`ConversationSyncer._apply_result`) mutates in place for `match` / `append` and branches a new snapshot via `_apply_divergence` for `edit` / `delete` / `divergence` — this preserves the snapshot-DAG branch contract (the original snapshot stays intact in ES). `SlackConversationSyncerMixin` overrides this to mutate in place for all classifications, since Slack threads are linear and authoritative; its delete path also re-keys a tombstoned bot's `TurnExecution` to the next non-tombstoned bot in the run.
+The **syncer** decides how to apply per surface. The web syncer (`ConversationSyncer._apply_result`) mutates in place for `match` / `append` and branches a new snapshot via `_apply_divergence` for `edit` / `delete` / `divergence` — this preserves the snapshot-DAG branch contract (the original snapshot stays intact in ES). `SlackApplyPolicy` overrides this to mutate in place for all classifications, since Slack threads are linear and authoritative; its delete path also re-keys a tombstoned bot's `TurnExecution` to the next non-tombstoned bot in the run.
 
 ### Three-tier load — `ConversationSyncer.sync_conversation`
 
@@ -144,7 +144,7 @@ A `conversation_uuid` is a DAG of snapshots. Two edge kinds, both via `parent_sn
 
 When the web syncer applies `edit` / `delete` / `divergence`, `_apply_divergence` roots a new snapshot at the shared prefix. The original snapshot is untouched in ES — prior branches survive server-side.
 
-- **Case A — divergence within the parent's raw window** (the common edit/regenerate path). The child inherits the parent's `ancestor_summaries` and `raw_message_start_index` verbatim, and filters `working_file_windows` against the child's raw window using a two-set origin rule (active-path + shared-prefix call_id; see [file_tool/README.md](../file_tool/README.md#branch-divergence) for the filter details).
+- **Case A — divergence within the parent's raw window** (the common edit/regenerate path). The child inherits the parent's `ancestor_summaries` and `raw_message_start_index` verbatim, and filters `working_file_windows` with the two-gate active-path + origin filter; see [file_tool/README.md](../file_tool/README.md#branch-divergence) for the filter details.
 - **Case B — divergence before the raw window** (editing a message that was compacted away). The compacted-prefix split fails, the syncer discards the loaded snapshot, and a fresh root `Conversation` is built from incoming alone — no inherited summaries, `raw_message_start_index=0`.
 
 Child branch `messages` are sorted by `source_id`, so the stored list stays in chronological order regardless of request shape.
@@ -185,7 +185,7 @@ Web clients only ever author `user` messages. `validate_assistant_messages` runs
 
 ## Surface Mappings
 
-| Concept | Web | Slack (future) |
+| Concept | Web | Slack |
 |---|---|---|
 | `conversation_uuid` | Server-generated on first message | `uuid5(SLACK_NS, team:channel:thread)` |
 | `bot_author_id` | Constant `"__bot__"` | `bot_user_id` |
@@ -193,7 +193,7 @@ Web clients only ever author `user` messages. `validate_assistant_messages` runs
 | `author_id` | `chat_user.id` | Slack `user` |
 | Apply policy | Branch on divergence | Overwrite in place |
 
-`SlackConversationSyncerMixin` and the tombstone re-keying machinery exist; no concrete Slack harness ships yet.
+`SlackApplyPolicy` lives in `prokaryotes/context_v1/conversation_sync.py` and is mixed into `SlackBase` (`prokaryotes/slack_v1/__init__.py`); `SlackHarness` (`prokaryotes/harness_v1/slack.py`) is the concrete subclass.
 
 ---
 
@@ -214,7 +214,7 @@ Web clients only ever author `user` messages. `validate_assistant_messages` runs
 | `prokaryotes/conversation_v1/models.py` | `Conversation`, `ConversationMessage`, `TurnExecution`, `TurnItem`, `ProjectedItem`, `NormalizedMessage`, `compute_boundary_hash` / `compute_tail_hash`. |
 | `prokaryotes/conversation_v1/reconcile.py` | Source-ID-keyed `reconcile()`. |
 | `prokaryotes/conversation_v1/project.py` | `project_for_llm` (role assignment, leading-block emission, historical working-file-output filter, same-role merge). |
-| `prokaryotes/context_v1/conversation_sync.py` | `ConversationSyncer` (three-tier load, post-load pipeline, `_apply_divergence`, guardrail), `SlackConversationSyncerMixin`. |
+| `prokaryotes/context_v1/conversation_sync.py` | `ConversationSyncer` (three-tier load, post-load pipeline, `_apply_divergence`, guardrail), `SlackApplyPolicy`. |
 | `prokaryotes/api_v1/models.py` | `IncomingMessage` / `IncomingConversation`, `CompactionStatusResponse`. |
 | `prokaryotes/search_v1/conversations.py` | `ConversationSearcher`: ES CRUD + index mappings. |
 | `prokaryotes/harness_v1/base.py` / `web.py` | `stream_and_finalize`, `finalize_turn`; the `/chat` route, projection, instruction assembly. |

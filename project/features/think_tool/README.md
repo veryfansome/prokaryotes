@@ -1,16 +1,15 @@
-# Think Tool: Structured, Active Reasoning
+# Think Tool
 
 ## Implementation
 
 `prokaryotes/tools_v1/think.py` implements `ThinkTool` with four structured parameters:
 
-- **`context`** (string, required) — all data points the model considers relevant at this moment: prior tool outputs, constraints, partial results, and any facts that should inform the next decision. Forces the model to state what it actually knows before reasoning forward.
+- **`context`** (string, required) — relevant prior tool outputs, constraints, partial results, and facts that should inform the next decision.
+- **`goal`** (string, required) — the specific gap or decision that triggered this think call (not a restatement of the overall task).
+- **`perspectives`** (list of strings, required) — named lenses (e.g. `"implementation options"`, `"order of operations"`, `"risks"`) to analyze `context` against `goal`. Empty list = single synthesis.
+- **`paths`** (list of strings, required) — workspace-relative or absolute file paths whose active `WorkingFileWindow`s should be injected into the think subprompt. Empty list = no file context.
 
-- **`goal`** (string, required) — what the model needs before it can move on. Not a restatement of the overall task; specifically the gap or decision that triggered this think call. Grounds the reasoning in a concrete local objective rather than a general reflection.
-
-- **`perspectives`** (list of strings, required) — lenses through which to analyze the `context` relative to the `goal`. Each perspective is a named angle such as `"implementation options"`, `"order of operations"`, or `"risks"`. Pass an empty list when a single synthesis is sufficient.
-
-- **`paths`** (list of strings, required) — workspace-relative or absolute file paths whose active `WorkingFileWindow`s should be injected into the think subprompt. Lets the outer model name files it wants the inner think call to ground on, without nested tool access. Pass an empty list when no file context is needed.
+Surfacing `context` and `goal` as explicit slots forces the model to commit to what it knows and what it's missing before reasoning forward, rather than letting both stay implicit.
 
 ### Active reasoning call
 
@@ -35,11 +34,7 @@ The upstream tool result may be empty if the search returned no matches. The pla
 
 If any perspective raises an open question it cannot resolve from context, it may invoke the think tool again with a narrower goal targeting that question specifically.
 
-## Iterative use
-
-The think tool is not limited to one call per task. The design explicitly allows the model to call it again when a perspective surfaces uncertainty that warrants deeper reasoning. Each subsequent call should carry a more specific `goal` derived from the open question raised in the prior output.
-
-This creates a lightweight recursive structure: think → act or think again → act. The number of recursive think calls is implicitly bounded by the overall `max_tool_call_rounds` limit already enforced by the LLM clients.
+Recursive think calls are bounded by the outer `max_tool_call_rounds` limit enforced by the LLM clients.
 
 ## Relationship to the codebase
 
