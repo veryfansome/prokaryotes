@@ -40,7 +40,7 @@ class OpenAIClient(LLMClient):
         reasoning_effort: str | None = None,
     ) -> str:
         input_items = _items_to_openai_input(items, instruction)
-        reasoning = Reasoning(effort=reasoning_effort if reasoning_effort else "none")
+        reasoning = Reasoning(effort=reasoning_effort or "none")
         response = await self.async_openai.responses.create(  # type: ignore
             model=model,
             input=input_items,
@@ -73,7 +73,7 @@ class OpenAIClient(LLMClient):
     ) -> AsyncGenerator[str, Any]:
         answer_text: list[str] = []
         working_input = _items_to_openai_input(items, instruction)
-        reasoning = Reasoning(effort=reasoning_effort if reasoning_effort else "none")
+        reasoning = Reasoning(effort=reasoning_effort or "none")
         tool_call_rounds = 0
         tool_params: list[ToolParam] | None = (
             [cb.tool_spec.to_openai_function_tool_param() for cb in tool_callbacks.values()] if tool_callbacks else None

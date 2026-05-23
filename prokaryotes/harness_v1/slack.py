@@ -16,7 +16,6 @@ with `reply_to_source_id = event["ts"]`.
 from __future__ import annotations
 
 import asyncio
-import bisect
 import logging
 import uuid
 
@@ -29,6 +28,7 @@ from prokaryotes.conversation_v1.models import (
 )
 from prokaryotes.conversation_v1.project import project_for_llm
 from prokaryotes.conversation_v1.reconcile import reconcile
+from prokaryotes.conversation_v1.source_id import insert_message_sorted
 from prokaryotes.harness_v1 import build_llm_client
 from prokaryotes.slack_v1 import SlackBase
 from prokaryotes.slack_v1.client import SlackClientWithToken
@@ -283,7 +283,7 @@ class SlackHarness(SlackBase):
                 content=post.content,
                 reply_to_source_id=triggering_source_id,
             )
-            _insert_message_sorted(conversation.messages, message)
+            insert_message_sorted(conversation.messages, message)
 
         if turn_items:
             await self.search_client.put_turn_execution(
@@ -506,16 +506,3 @@ class SlackHarness(SlackBase):
             # stored` and preserves the message.
             await streamer.clear_in_flight_metadata(posted)
             await self._maybe_compact(conversation, pending_compaction[0])
-
-
-def _insert_message_sorted(messages: list[ConversationMessage], message: ConversationMessage) -> None:
-    """Insert `message` into `messages` at its `source_id`-sorted position, preserving the Slack-side
-    `source_id`-sorted invariant on `conversation.messages`.
-
-    `_finalize_slack_turn`'s commit is in practice always a tail-append (a turn's own posts carry the latest
-    `ts`), so the sorted insert is defensive here — but keeping one uniform rule across the syncer's append path
-    and the finalize commit avoids a divergent invariant.
-    """
-    keys = [m.source_id for m in messages]
-    index = bisect.bisect_right(keys, message.source_id)
-    messages.insert(index, message)

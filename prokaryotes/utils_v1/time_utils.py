@@ -20,7 +20,7 @@ def local_now_str(time_zone: str | None = None, fmt: str = '%Y-%m-%d %H:%M') -> 
 
 @cache
 def tz(time_zone: str | None = None) -> ZoneInfo:
-    return ZoneInfo("UTC" if not time_zone else time_zone)
+    return ZoneInfo(time_zone or "UTC")
 
 
 def utc_now() -> datetime:

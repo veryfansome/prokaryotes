@@ -1,9 +1,7 @@
 import os
 import platform
 import pwd
-from functools import (
-    cache,
-)
+from functools import cache
 
 
 def get_cwd() -> str:

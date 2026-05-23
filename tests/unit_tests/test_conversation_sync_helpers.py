@@ -7,10 +7,8 @@ SearchClient + Redis. These exercise just the helpers that don't need infra.
 from __future__ import annotations
 
 from prokaryotes.context_v1.conversation_sync import (
-    _bump_source_id,
     _conversation_can_follow_client,
     _detect_unacknowledged_bot_messages,
-    _format_source_id,
     _PartialMessage,
 )
 from tests.unit_tests._builders import bot_msg, conversation, msg
@@ -23,38 +21,6 @@ def _partial(content: str, source_id: str | None, *, author_id: str = "u-alice",
         client_index=client_index,
         source_id=source_id,
     )
-
-
-class TestFormatSourceId:
-    def test_seconds_microseconds_format(self):
-        out = _format_source_id(1717000000.123456)
-        assert out == "1717000000.123456"
-
-    def test_zero_pads_microseconds(self):
-        out = _format_source_id(1717000000.0)
-        assert out == "1717000000.000000"
-
-    def test_lex_sort_equals_chronological_for_realistic_timestamps(self):
-        """With fixed-width 10-digit unix seconds, lexicographic sort equals chronological sort — what makes
-        `source_id` viable as identity + ordering."""
-        a = _format_source_id(1717000000.123456)
-        b = _format_source_id(1717000001.000000)
-        c = _format_source_id(1717000999.999999)
-        assert a < b < c
-
-
-class TestBumpSourceId:
-    def test_increments_microseconds(self):
-        assert _bump_source_id("1717000000.000000") == "1717000000.000001"
-        assert _bump_source_id("1717000000.123456") == "1717000000.123457"
-
-    def test_carries_seconds_at_microsecond_overflow(self):
-        assert _bump_source_id("1717000000.999999") == "1717000001.000000"
-
-    def test_invalid_input_falls_back(self):
-        # Doesn't crash; produces a fresh now-time source_id.
-        out = _bump_source_id("not-a-source-id")
-        assert "." in out
 
 
 class TestConversationCanFollowClient:

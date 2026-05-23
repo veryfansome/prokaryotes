@@ -97,8 +97,7 @@ def get_non_interactive_execution_mode_parts() -> list[str]:
 
 
 def get_personality_parts(profile: OceanProfile | None = None) -> list[str]:
-    if not profile:
-        profile = OceanProfile()
+    profile = profile or OceanProfile()
     lines = [
         "# Personality",
         "",

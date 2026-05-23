@@ -28,11 +28,9 @@ The web flow also handles two stream-loss recovery scenarios:
 
 from __future__ import annotations
 
-import bisect
 import hashlib
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -49,6 +47,11 @@ from prokaryotes.conversation_v1.models import (
     conversation_message_items,
 )
 from prokaryotes.conversation_v1.reconcile import reconcile
+from prokaryotes.conversation_v1.source_id import (
+    bump_source_id,
+    format_source_id_now,
+    insert_message_sorted,
+)
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.search_v1.conversations import (
     conversation_from_doc,
@@ -366,9 +369,9 @@ class ConversationSyncer(ABC):
         for m in partial:
             if m.source_id is not None:
                 continue
-            candidate = _format_source_id(time.time())
+            candidate = format_source_id_now()
             if last is not None and candidate <= last:
-                candidate = _bump_source_id(last)
+                candidate = bump_source_id(last)
             m.source_id = candidate
             last = candidate
             assignments.append(SourceIdAssignment(client_index=m.client_index, source_id=candidate))
@@ -651,7 +654,7 @@ class SlackApplyPolicy:
 
     `stored.messages` is kept in `source_id`-sorted order as an invariant: same-thread turn serialization can
     deliver messages out of chronological order (a later mention's sync sees a prior turn's bot reply that landed
-    under the lock with a higher `ts`), so every append uses `_insert_message_sorted` rather than a tail-append. A
+    under the lock with a higher `ts`), so every append uses `insert_message_sorted` rather than a tail-append. A
     tail-append would leave `stored.messages` out of order and make the next turn's reconcile diverge needlessly.
 
     `_split_compacted_prefix` is intentionally not exercised by the Slack surface — the bounded `oldest` fetch in
@@ -675,7 +678,7 @@ class SlackApplyPolicy:
         if result.classification == "append":
             for op in result.operations:
                 if op.kind == "append" and op.incoming is not None:
-                    _insert_message_sorted(stored.messages, _normalized_to_message(op.incoming))
+                    insert_message_sorted(stored.messages, _normalized_to_message(op.incoming))
             return stored
         if result.classification == "edit":
             for op in result.operations:
@@ -704,7 +707,7 @@ class SlackApplyPolicy:
             if all(op.kind in handled_kinds for op in result.operations):
                 for op in result.operations:
                     if op.kind == "append" and op.incoming is not None:
-                        _insert_message_sorted(stored.messages, _normalized_to_message(op.incoming))
+                        insert_message_sorted(stored.messages, _normalized_to_message(op.incoming))
                     elif op.kind == "edit" and op.incoming is not None:
                         msg = stored.message_by_source_id(op.source_id)
                         if msg is not None:
@@ -820,20 +823,6 @@ def _filter_windows_by_active_path_and_origin(
     ]
 
 
-def _insert_message_sorted(messages: list[ConversationMessage], message: ConversationMessage) -> None:
-    """Insert `message` into `messages` at its `source_id`-sorted position, preserving the Slack-side
-    `source_id`-sorted invariant on `stored.messages`.
-
-    Same-thread turn serialization can deliver an append out of chronological order (a later mention's sync sees a
-    prior turn's bot reply with a higher `ts` already committed under the lock), so a tail-append would leave the
-    list unsorted and make the next turn's reconcile diverge needlessly. `bisect.insort` against a parallel
-    `source_id` key list keeps the insert ordered.
-    """
-    keys = [m.source_id for m in messages]
-    index = bisect.bisect_right(keys, message.source_id)
-    messages.insert(index, message)
-
-
 def _next_non_tombstoned_bot_in_run(
     stored: Conversation,
     deleted_source_id: str,
@@ -864,20 +853,6 @@ def _next_non_tombstoned_bot_in_run(
             return m.source_id
 
     return None
-
-
-def _bump_source_id(source_id: str) -> str:
-    seconds_str, _, micros_str = source_id.partition(".")
-    try:
-        seconds = int(seconds_str)
-        micros = int(micros_str or "0")
-    except ValueError:
-        return _format_source_id(time.time())
-    micros += 1
-    if micros >= 1_000_000:
-        seconds += 1
-        micros = 0
-    return f"{seconds}.{micros:06d}"
 
 
 def _conversation_can_follow_client(conversation: Conversation, client_snapshot_uuid: str | None) -> bool:
@@ -936,12 +911,6 @@ def _detect_unacknowledged_bot_messages(
         )
         parent_id = msg.source_id
     return out
-
-
-def _format_source_id(ts: float) -> str:
-    seconds = int(ts)
-    micros = int((ts - seconds) * 1_000_000)
-    return f"{seconds}.{micros:06d}"
 
 
 def _hash_content(content: str) -> str:
