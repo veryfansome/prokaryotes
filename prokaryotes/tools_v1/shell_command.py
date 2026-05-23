@@ -26,8 +26,7 @@ class ShellCommandTool(FunctionToolCallback):
             )
             stdout, stderr = await process.communicate()
             stdout_lines = stdout.decode(errors="replace").split("\n")
-            stdout_lines_len = len(stdout_lines)
-            if stdout_lines_len > self.max_output_lines:
+            if len(stdout_lines) > self.max_output_lines:
                 stdout_lines = (
                     stdout_lines[:self.max_output_lines]
                     + [f"--- Truncated after {self.max_output_lines} lines ---"]

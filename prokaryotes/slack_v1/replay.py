@@ -140,8 +140,9 @@ async def resolve_display_names(
         except Exception:
             logger.warning("users.info failed for user_id=%s — leaving unresolved", user_id)
             continue
-        profile = info.get("user", {}).get("profile", {})
-        name = profile.get("display_name") or profile.get("real_name") or info.get("user", {}).get("name")
+        user_info = info.get("user", {})
+        profile = user_info.get("profile", {})
+        name = profile.get("display_name") or profile.get("real_name") or user_info.get("name")
         if not name:
             continue
         resolved[user_id] = name
