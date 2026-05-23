@@ -1,0 +1,28 @@
+display_information:
+  name: Prokaryote
+  description: An instance of the Prokaryotes agentic harness
+  background_color: "#1a1a1a"
+features:
+  bot_user:
+    display_name: prokaryote
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # receive @-mention events
+      - chat:write          # post / update / delete own messages
+      - channels:history    # read public-channel thread + prelude history
+      - groups:history      # read private-channel thread history
+      - im:history          # receive DM message events + read DM history
+      - mpim:history        # read mpim thread history
+      - users:read          # users.info for display names + api_app_id resolution
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention         # channel + mpim mentions trigger turns
+      - message.im          # 1:1 DM messages trigger turns (no @ needed)
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

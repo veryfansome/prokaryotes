@@ -4,6 +4,17 @@ Reconciliation is source-ID-based via `prokaryotes.conversation_v1.reconcile`; t
 per-surface — divergence creates a new branch snapshot on web; Slack-specific subclasses can override
 `_apply_divergence` for in-place recovery.
 
+Case A branch divergence and cold rebuild apply the shared-prefix origin filter on `working_file_windows`:
+- `kept_call_ids` = file-tool call_ids in TurnExecutions kept by the new branch (shared-prefix turns or rebuild
+  target's own turns)
+- `source_call_ids` = file-tool call_ids in the source/donor snapshot's own TurnExecution.items (post-compaction
+  tail only — not the parent-snapshot chain)
+- Keep a window if `window_id ∈ kept_call_ids` OR `window_id ∉ source_call_ids`. The second clause is the
+  carryforward bucket: a window whose `call_id` lives nowhere in the source's own turns must have originated in a
+  compacted ancestor and ridden through one or more compactions — keep it. Windows from discarded sibling turns
+  (or donor-tail turns past the rebuild target) are in `source_call_ids` but not in `kept_call_ids` and are
+  dropped.
+
 The web flow also handles two stream-loss recovery scenarios:
 - Pre-commit (handshake-stamp invariant): managed by the client; the syncer produces a `snapshot_uuid` in the
   handshake even before the bot message commits so retries from the un-bot-replied user node extend the branch
@@ -15,6 +26,7 @@ The web flow also handles two stream-loss recovery scenarios:
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import logging
@@ -30,7 +42,7 @@ from prokaryotes.conversation_v1.models import (
     ConversationMessage,
     NormalizedMessage,
     TurnExecution,
-    TurnItem,
+    WorkingFileWindow,
     compute_boundary_hash,
     conversation_message_items,
 )
@@ -38,8 +50,8 @@ from prokaryotes.conversation_v1.reconcile import reconcile
 from prokaryotes.search_v1 import SearchClient
 from prokaryotes.search_v1.conversations import (
     conversation_from_doc,
-    lifted_turn_items_from_doc,
     messages_from_doc,
+    working_file_windows_from_doc,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,22 +156,13 @@ class ConversationSyncer(ABC):
             bot_author_id=bot_author_id,
             partial=partial,
         )
-        # Track the pre-split stored snapshot — Case B replaces `stored` with a fresh Conversation, but the
-        # SyncResult's `is_new_branch` flag must still report the divergence from the snapshot the client sent
-        # against.
         original_stored_snapshot_uuid = stored.snapshot_uuid
 
-        # Compacted-prefix split: runs BEFORE resync detection so compacted-prefix entries can't pollute
-        # `_detect_unacknowledged_bot_messages`'s `has_new_incoming` heuristic. After the split, reconcile only sees
-        # the raw-window suffix; any divergence it reports is Case A by construction.
         if stored.raw_message_start_index > 0:
             prefix_match, raw_suffix = await self._split_compacted_prefix(stored, partial)
             if prefix_match:
                 partial = raw_suffix
             else:
-                # Case B — the user is editing inside the compacted prefix. Discard `stored` and work against a
-                # fresh root Conversation; `partial` keeps the full incoming list so the reconcile-apply path
-                # appends everything as plain appends.
                 stored = _fresh_conversation(conversation_uuid, bot_author_id)
 
         unacknowledged = _detect_unacknowledged_bot_messages(stored, partial)
@@ -170,8 +173,6 @@ class ConversationSyncer(ABC):
                 unacknowledged_bot_messages=unacknowledged,
             )
 
-        # Source-id assignment for any raw-suffix (or Case B) entries that arrived without one — `_to_normalized`
-        # would otherwise raise on `source_id=None`.
         assignments = self._assign_source_ids(partial, stored)
         normalized = [_to_normalized(m) for m in partial]
         result = reconcile(stored, normalized)
@@ -198,15 +199,7 @@ class ConversationSyncer(ABC):
         partial: list[_PartialMessage],
     ) -> tuple[bool, list[_PartialMessage]]:
         """Reconstruct the compacted-away prefix from the parent chain and compare it against the first
-        `stored.raw_message_start_index` non-deleted entries of incoming.
-
-        Returns `(True, raw_suffix)` when every `(source_id, author_id, content)` triple matches — strip the prefix
-        before reconcile. Returns `(False, partial)` on any mismatch (length, source_id, author_id, content) — the
-        caller routes to Case B (fresh Conversation, no inherited compacted state).
-
-        `source_id` is included in the comparison deliberately: accepting different source-ids with the same content
-        would silently weaken the source-ID-as-identity invariant the rest of the system relies on.
-        """
+        `stored.raw_message_start_index` non-deleted entries of incoming."""
         n = stored.raw_message_start_index
         if n <= 0:
             return True, partial
@@ -228,12 +221,6 @@ class ConversationSyncer(ABC):
         self,
         stored: Conversation,
     ) -> list[ConversationMessage]:
-        """Walk the parent chain to return the first `stored.raw_message_start_index` non-deleted
-        ConversationMessages from the global conversation history.
-
-        Returns an empty list when the parent chain can't be walked (missing parent doc, missing messages_json) so
-        the caller treats the split as failed.
-        """
         n = stored.raw_message_start_index
         if n <= 0 or not stored.parent_snapshot_uuid:
             return []
@@ -247,8 +234,6 @@ class ConversationSyncer(ABC):
         self,
         conversation: Conversation,
     ) -> list[ConversationMessage]:
-        """Return `prefix + this snapshot's non-deleted messages` for boundary hashing. Walks the parent chain when
-        this snapshot has a non-zero `raw_message_start_index`."""
         prefix: list[ConversationMessage] = []
         if conversation.parent_snapshot_uuid and conversation.raw_message_start_index > 0:
             parent_doc = await self.search_client.get_conversation(conversation.parent_snapshot_uuid)
@@ -267,7 +252,7 @@ class ConversationSyncer(ABC):
         if key in memo:
             return memo[key]
         prefix: list[ConversationMessage] = []
-        raw_start = doc.get("raw_message_start_index") or 0
+        raw_start = doc["raw_message_start_index"]
         parent_uuid = doc.get("parent_snapshot_uuid")
         if parent_uuid and raw_start > 0:
             parent_doc = await self.search_client.get_conversation(parent_uuid)
@@ -290,12 +275,7 @@ class ConversationSyncer(ABC):
         conversation_uuid: str,
     ) -> Conversation:
         """Default (web) apply policy: `match` and `append` mutate in place; `edit`, `delete`, and `divergence` all
-        branch to a new snapshot via `_apply_divergence`. This preserves the snapshot-DAG branch contract — the
-        original snapshot stays intact in ES; the new branch carries the edit/delete/divergence.
-
-        Slack overrides this in `SlackConversationSyncerMixin` to mutate in place (Slack threads are linear and
-        authoritative).
-        """
+        branch to a new snapshot via `_apply_divergence`."""
         if result.classification == "match":
             return stored
         if result.classification == "append":
@@ -322,20 +302,17 @@ class ConversationSyncer(ABC):
         bot_author_id: str,
         conversation_uuid: str,
     ) -> Conversation:
-        """Default (web) divergence behavior: create a new branch snapshot rooted at the shared prefix. Case A —
-        divergence within the parent's raw window — inherits compacted state and recomputes lifted state against the
-        child's raw window. The Case B (retry-before-recency-tail) path materializes in `_rebuild_from_chain`'s
-        fresh-Conversation fallback, never here.
+        """Default (web) divergence behavior: create a new branch snapshot rooted at the shared prefix.
 
-        Slack subclasses can override for in-place recovery — see design doc.
+        Case A — divergence within the parent's raw window — inherits `ancestor_summaries` and
+        `raw_message_start_index` verbatim, and applies the two-set origin filter on `working_file_windows`:
+        `kept_call_ids` from shared-prefix TurnExecutions, `source_call_ids` from the source's own
+        TurnExecutions (post-compaction tail only). The keep rule (`in kept` OR `not in source`) drops
+        discarded-sibling-origin windows while preserving carryforward windows whose call_id is from a compacted
+        ancestor.
         """
-        # Build shared_messages in shared_prefix_source_ids order — not by set membership over stored.messages — so
-        # the branch snapshot preserves source-id ordering even if stored.messages's underlying order is ever
-        # imperfect.
         stored_by_id = {m.source_id: m for m in stored.messages}
-        shared_messages = [
-            stored_by_id[sid] for sid in result.shared_prefix_source_ids if sid in stored_by_id
-        ]
+        shared_messages = [stored_by_id[sid] for sid in result.shared_prefix_source_ids if sid in stored_by_id]
         shared_ids = set(result.shared_prefix_source_ids)
         normalized_by_id = {m.source_id: m for m in normalized}
         new_tail_normalized = [
@@ -343,50 +320,40 @@ class ConversationSyncer(ABC):
         ]
         new_tail = [_normalized_to_message(m) for m in new_tail_normalized]
 
-        # Case A lifted-state recompute: load the shared prefix's bot `TurnExecution`s, derive active paths, filter
-        # the parent's lifted pairs to those paths, and pick the anchor as the first bot in the shared prefix with
-        # non-stale file-tool activity. Invariant: `anchor=None iff lifted_turn_items == []`.
-        shared_bot_ids = [
-            m.source_id
-            for m in shared_messages
-            if not m.deleted and m.author_id == bot_author_id
-        ]
-        shared_turns: dict[str, TurnExecution] = {}
-        if shared_bot_ids:
-            shared_turns = await self.search_client.get_turn_executions(
-                stored.conversation_uuid, shared_bot_ids
-            )
-        child_active_paths = _active_paths_in_turns(shared_turns)
-        lifted = _filter_lifted_pairs_by_paths(stored.lifted_turn_items, child_active_paths)
-        anchor = (
-            _first_bot_with_file_activity(shared_messages, shared_turns, bot_author_id)
-            if lifted
-            else None
+        source_bot_ids = [m.source_id for m in stored.messages if not m.deleted and m.author_id == bot_author_id]
+        source_turns: dict[str, TurnExecution] = {}
+        if source_bot_ids:
+            source_turns = await self.search_client.get_turn_executions(stored.conversation_uuid, source_bot_ids)
+        shared_bot_id_set = {m.source_id for m in shared_messages if not m.deleted and m.author_id == bot_author_id}
+        kept_turns = {bid: turn for bid, turn in source_turns.items() if bid in shared_bot_id_set}
+
+        kept_call_ids = _file_tool_call_ids_in(kept_turns)
+        source_call_ids = _file_tool_call_ids_in(source_turns)
+        # Active paths come from the kept turns' file-tool output annotations — those cover every call shape
+        # (read, edit, redundant_read, conflict, ...), not just calls that minted a fresh `WorkingFileWindow`.
+        # Combined with the origin filter, this drops a carryforward window for a path no longer touched in the
+        # shared prefix while preserving a carryforward window for a path the shared prefix still touches (e.g.
+        # via an edit that refreshed the existing window without minting a new one).
+        child_active_paths = _active_paths_in_turns(kept_turns)
+        carried_windows = _filter_windows_by_active_path_and_origin(
+            stored.working_file_windows,
+            active_paths=child_active_paths,
+            kept_call_ids=kept_call_ids,
+            source_call_ids=source_call_ids,
         )
 
-        # Sort by source_id: `shared_messages` is already in order but `new_tail` follows request order, which only
-        # coincides with source_id order when newly-authored messages are terminal. Compaction's recency-tail split
-        # and `raw_message_start_index` index into `messages` positionally, so the stored list must be
-        # source_id-ordered regardless of request shape.
         branch_messages = sorted(shared_messages + new_tail, key=lambda m: m.source_id)
         return Conversation(
             conversation_uuid=conversation_uuid,
             parent_snapshot_uuid=stored.snapshot_uuid,
             bot_author_id=bot_author_id,
             ancestor_summaries=list(stored.ancestor_summaries),
-            lifted_turn_items=lifted,
-            lifted_anchor_source_id=anchor,
             raw_message_start_index=stored.raw_message_start_index,
             messages=branch_messages,
+            working_file_windows=carried_windows,
         )
 
     def _assign_source_ids(self, partial: list[_PartialMessage], stored: Conversation) -> list[SourceIdAssignment]:
-        """Assign `source_id`s to incoming messages that arrived without one.
-
-        Format: `seconds.microseconds` from `time.time()`. Monotonicity within the conversation is enforced: if the
-        candidate is `<=` the last source_id seen so far (in stored or earlier in this incoming list), it's bumped
-        by 1 microsecond.
-        """
         existing_ids: list[str] = [m.source_id for m in stored.messages if not m.deleted]
         for m in partial:
             if m.source_id is not None:
@@ -414,27 +381,18 @@ class ConversationSyncer(ABC):
         await self.search_client.put_conversation(conversation)
 
     async def load_assistant_index(self, conversation_uuid: str) -> dict[str, str]:
-        """Return a `{bot_source_id: sha256(content)}` mapping for every assistant `ConversationMessage` reachable
-        in the snapshot DAG for `conversation_uuid`.
-
-        Cached in Redis at `assistant_index:{conversation_uuid}` with the same TTL as conversation snapshots. On
-        miss, rebuild by walking every conversation doc (compacted ancestors + branch siblings) and indexing their
-        bot messages.
-
-        When the same `source_id` appears across multiple snapshots (branches duplicate the shared prefix) the
-        index records one content_hash per source_id — last write wins. That's safe under the assumption that bot
-        messages aren't edited per-branch; if a future feature changes that the index will need to become
-        per-branch.
-        """
         cached = await self.redis_client.get(f"assistant_index:{conversation_uuid}")
         if cached is not None:
             try:
-                raw = cached.decode("utf-8") if isinstance(cached, bytes) else cached
-                data = json.loads(raw)
+                data = json.loads(cached)
                 if isinstance(data, dict):
                     return data
             except (UnicodeDecodeError, json.JSONDecodeError):
-                pass
+                logger.warning(
+                    "Corrupt assistant_index cache for %s; rebuilding from search.",
+                    conversation_uuid,
+                    exc_info=True,
+                )
 
         docs = await self.search_client.find_all_conversation_docs(conversation_uuid)
         index: dict[str, str] = {}
@@ -462,8 +420,6 @@ class ConversationSyncer(ABC):
         source_id: str,
         content: str,
     ) -> None:
-        """Add (or replace) a single bot message in the cached assistant index. Called by `finalize_turn`
-        immediately after committing the bot's final `ConversationMessage` to ES."""
         index = await self.load_assistant_index(conversation_uuid)
         index[source_id] = _hash_content(content)
         await self.redis_client.set(
@@ -477,16 +433,6 @@ class ConversationSyncer(ABC):
         conversation_uuid: str,
         incoming: list[IncomingMessage],
     ) -> None:
-        """DAG-scoped guardrail for web clients.
-
-        Raises `AssistantMessageGuardrailError` if any `role="assistant"` entry:
-        - has no `source_id` (web assistants always must),
-        - has a `source_id` not in the conversation's assistant index, or
-        - has content whose hash doesn't match the indexed hash.
-
-        No-op when `incoming` contains no assistant entries — the common case on the first turn or any pure-user
-        POST.
-        """
         if not any(msg.role == "assistant" for msg in incoming):
             return
         index = await self.load_assistant_index(conversation_uuid)
@@ -494,29 +440,18 @@ class ConversationSyncer(ABC):
             if msg.role != "assistant":
                 continue
             if msg.source_id is None:
-                raise AssistantMessageGuardrailError(
-                    "Assistant messages must carry a server-assigned source_id"
-                )
+                raise AssistantMessageGuardrailError("Assistant messages must carry a server-assigned source_id")
             known_hash = index.get(msg.source_id)
             if known_hash is None:
-                raise AssistantMessageGuardrailError(
-                    f"Unknown assistant source_id: {msg.source_id}"
-                )
+                raise AssistantMessageGuardrailError(f"Unknown assistant source_id: {msg.source_id}")
             if known_hash != _hash_content(msg.content):
-                raise AssistantMessageGuardrailError(
-                    f"Assistant content mismatch for {msg.source_id}"
-                )
+                raise AssistantMessageGuardrailError(f"Assistant content mismatch for {msg.source_id}")
 
     async def _load_exact_conversation(
         self,
         conversation_uuid: str,
         snapshot_uuid: str,
     ) -> tuple[Conversation | None, dict | None]:
-        """Fetch the snapshot doc for `snapshot_uuid`.
-
-        Returns `(conversation, None)` when the doc exists and is not compacted. Returns `(None, doc)` when the doc
-        is compacted (caller forwards as head_doc to chain rebuild). Returns `(None, None)` when missing/invalid.
-        """
         doc = await self.search_client.get_conversation(snapshot_uuid)
         if not doc:
             return None, None
@@ -536,8 +471,6 @@ class ConversationSyncer(ABC):
         bot_author_id: str,
         partial: list[_PartialMessage],
     ) -> Conversation:
-        # Tier 1: Redis fast path. Must match client's snapshot_uuid (or its parent — post-compaction relabel
-        # hasn't reached the client yet).
         cached_data = await self.redis_client.get(f"conversation:{conversation_uuid}")
         if cached_data:
             try:
@@ -553,14 +486,12 @@ class ConversationSyncer(ABC):
                     snapshot_uuid,
                 )
 
-        # Tier 2: ES exact load.
         head_doc: dict | None = None
         if snapshot_uuid:
             exact, head_doc = await self._load_exact_conversation(conversation_uuid, snapshot_uuid)
             if exact is not None:
                 return exact
 
-        # Tier 3: ancestor-chain rebuild.
         return await self._rebuild_from_chain(
             conversation_uuid=conversation_uuid,
             snapshot_uuid=snapshot_uuid,
@@ -581,10 +512,10 @@ class ConversationSyncer(ABC):
         """Walk the snapshot DAG back to a compacted ancestor whose boundary_hash matches a prefix of incoming;
         build a Conversation rooted there.
 
-        If no matching ancestor (Case B retry-before-recency-tail) or no client snapshot_uuid at all (fresh
-        conversation), return a fresh `Conversation` with no ancestors, no lifted state,
-        `raw_message_start_index=0`, `messages=[]`. The reconcile-apply step then appends the full incoming list as
-        plain appends.
+        Working-file state is restored from the latest active descendant (donor) of the matched ancestor, then
+        filtered through the two-set origin filter against the rebuild target's own TurnExecutions and the donor's
+        own TurnExecutions (neither set walks the parent-snapshot chain). Windows opened by donor-tail turns past
+        the target are dropped; carryforward windows whose call_id lives in no current TurnExecution are kept.
         """
         if not snapshot_uuid:
             logger.info("Starting new conversation from request payload")
@@ -599,9 +530,9 @@ class ConversationSyncer(ABC):
 
         matched_ancestor: dict | None = None
         for doc in compacted_ancestors:
-            boundary_count = doc.get("boundary_message_count") or 0
-            boundary_hash = doc.get("boundary_hash")
-            if not boundary_hash or boundary_count == 0:
+            boundary_count = doc["boundary_message_count"]
+            boundary_hash = doc["boundary_hash"]
+            if boundary_count == 0:
                 continue
             if boundary_count > len(partial):
                 continue
@@ -628,7 +559,7 @@ class ConversationSyncer(ABC):
             if doc["snapshot_uuid"] == matched_ancestor["snapshot_uuid"]:
                 break
 
-        raw_start = matched_ancestor.get("boundary_message_count") or 0
+        raw_start = matched_ancestor["boundary_message_count"]
         echoed_messages: list[ConversationMessage] = []
         for m in partial[raw_start:]:
             if m.source_id is None:
@@ -642,28 +573,44 @@ class ConversationSyncer(ABC):
                 )
             )
 
-        # The compactor wrote `lifted_turn_items` + `lifted_anchor_source_id` on the child snapshot, not on the
-        # (now-compacted) parent we matched here. On Redis miss we lose that lifted state unless we look it up from
-        # the existing active descendant — otherwise tracked file-tool live windows carried across compaction would
-        # silently disappear.
-        lifted_turn_items: list[TurnItem] = []
-        lifted_anchor_source_id: str | None = None
+        # Restore working_file_windows from the latest active descendant (donor) and apply the two-set origin
+        # filter. The donor's working_file_windows live on its snapshot doc; the donor's own TurnExecutions are
+        # loaded for its non-deleted bot messages. The rebuild target's own turns are the bot messages in
+        # echoed_messages.
+        working_file_windows: list[WorkingFileWindow] = []
         descendant_doc = await self.search_client.find_latest_active_child(
             conversation_uuid, matched_ancestor["snapshot_uuid"]
         )
         if descendant_doc is not None:
-            lifted_turn_items = lifted_turn_items_from_doc(descendant_doc)
-            lifted_anchor_source_id = descendant_doc.get("lifted_anchor_source_id")
+            donor_windows = working_file_windows_from_doc(descendant_doc)
+            donor_bot_ids = [
+                m.source_id for m in messages_from_doc(descendant_doc) if not m.deleted and m.author_id == bot_author_id
+            ]
+            target_bot_ids = [m.source_id for m in echoed_messages if not m.deleted and m.author_id == bot_author_id]
+            donor_turns: dict[str, TurnExecution] = {}
+            if donor_bot_ids:
+                donor_turns = await self.search_client.get_turn_executions(conversation_uuid, donor_bot_ids)
+            target_turns: dict[str, TurnExecution] = {}
+            if target_bot_ids:
+                target_turns = await self.search_client.get_turn_executions(conversation_uuid, target_bot_ids)
+            target_kept_call_ids = _file_tool_call_ids_in(target_turns)
+            donor_call_ids = _file_tool_call_ids_in(donor_turns)
+            target_active_paths = _active_paths_in_turns(target_turns)
+            working_file_windows = _filter_windows_by_active_path_and_origin(
+                donor_windows,
+                active_paths=target_active_paths,
+                kept_call_ids=target_kept_call_ids,
+                source_call_ids=donor_call_ids,
+            )
 
         return Conversation(
             conversation_uuid=conversation_uuid,
             parent_snapshot_uuid=matched_ancestor["snapshot_uuid"],
             bot_author_id=bot_author_id,
             ancestor_summaries=ancestor_summaries,
-            lifted_turn_items=lifted_turn_items,
-            lifted_anchor_source_id=lifted_anchor_source_id,
             raw_message_start_index=raw_start,
             messages=echoed_messages,
+            working_file_windows=working_file_windows,
         )
 
     async def _walk_snapshot_chain(
@@ -673,10 +620,6 @@ class ConversationSyncer(ABC):
         snapshot_uuid: str,
         head_doc: dict | None = None,
     ) -> list[dict]:
-        """Walk the parent chain from `snapshot_uuid` back to root, oldest-last.
-
-        `head_doc`, if provided, avoids a redundant ES read for the head.
-        """
         chain: list[dict] = []
         seen: set[str] = set()
         current = snapshot_uuid
@@ -700,17 +643,20 @@ class SlackConversationSyncerMixin:
     """Slack-flavored apply policy: edit, delete, and divergence all mutate the stored snapshot in place rather than
     branching.
 
-    Slack threads are linear and authoritative — `message_changed` carries the same `ts`, `message_deleted` is a
-    tombstone, and divergence indicates the stored snapshot drifted from Slack's view (recovery action is overwrite
-    in place with a log warning, per the design doc).
+    Delete still triggers tombstone re-keying for the deleted bot's `TurnExecution` (the next non-tombstoned bot in
+    the same consecutive run becomes the new owner). The previous design also re-keyed `lifted_anchor_source_id`;
+    that anchor no longer exists — working_file_windows are not positioned by bot source_id at projection time.
 
-    Delete also triggers tombstone re-keying: the deleted bot's `TurnExecution` is moved to the next non-tombstoned
-    bot in the same consecutive run, and `Conversation.lifted_anchor_source_id` follows the same rule. See
-    `_rekey_for_tombstone` below.
+    `stored.messages` is kept in `source_id`-sorted order as an invariant: same-thread turn serialization can
+    deliver messages out of chronological order (a later mention's sync sees a prior turn's bot reply that landed
+    under the lock with a higher `ts`), so every append uses `_insert_message_sorted` rather than a tail-append. A
+    tail-append would leave `stored.messages` out of order and make the next turn's reconcile diverge needlessly.
 
-    Mixed in *before* `ConversationSyncer` in MRO so `_apply_result` overrides the default web behavior:
+    `_split_compacted_prefix` is intentionally not exercised by the Slack surface — the bounded `oldest` fetch in
+    `sync_slack_thread` already excludes the compacted prefix, so invoking it would mis-classify every
+    post-compaction turn. Slack subclasses keep `raw_message_start_index == 0` on the snapshots they reconcile.
 
-        class SlackSyncer(SlackConversationSyncerMixin, ConversationSyncer): ...
+    Mixed in *before* `ConversationSyncer` in MRO so `_apply_result` overrides the default web behavior.
     """
 
     async def _apply_result(
@@ -727,7 +673,7 @@ class SlackConversationSyncerMixin:
         if result.classification == "append":
             for op in result.operations:
                 if op.kind == "append" and op.incoming is not None:
-                    stored.messages.append(_normalized_to_message(op.incoming))
+                    _insert_message_sorted(stored.messages, _normalized_to_message(op.incoming))
             return stored
         if result.classification == "edit":
             for op in result.operations:
@@ -748,13 +694,35 @@ class SlackConversationSyncerMixin:
                         await self._rekey_for_tombstone(stored, op.source_id)
             return stored
         if result.classification == "divergence":
-            # Stored snapshot drifted from Slack's authoritative thread — overwrite in place with the incoming
-            # view. Surface a warning so operators see this happened.
+            # For Slack, `divergence` is the normal classification for a turn whose operation set mixes kinds
+            # (combined edit/delete/append) — `reconcile._classify` only shortcuts single-kind sets. Apply each
+            # operation per its kind, reusing the same logic as the `append`/`edit`/`delete` branches above so
+            # tombstone re-keying still runs for deleted bot messages.
+            handled_kinds = {"append", "edit", "delete"}
+            if all(op.kind in handled_kinds for op in result.operations):
+                for op in result.operations:
+                    if op.kind == "append" and op.incoming is not None:
+                        _insert_message_sorted(stored.messages, _normalized_to_message(op.incoming))
+                    elif op.kind == "edit" and op.incoming is not None:
+                        msg = stored.message_by_source_id(op.source_id)
+                        if msg is not None:
+                            msg.content = op.incoming.content
+                            msg.edited = True
+                    elif op.kind == "delete":
+                        msg = stored.message_by_source_id(op.source_id)
+                        if msg is None:
+                            continue
+                        msg.deleted = True
+                        if msg.author_id == bot_author_id:
+                            await self._rekey_for_tombstone(stored, op.source_id)
+                return stored
+            # Defensive fallback: an operation kind outside {append, edit, delete} genuinely should not occur on
+            # the Slack surface. Overwrite wholesale rather than silently dropping the operation.
             logger.warning(
-                "Slack syncer overwriting snapshot %s in place: reconcile returned divergence",
+                "Slack syncer overwriting snapshot %s in place: divergence carried an unhandled operation kind",
                 stored.snapshot_uuid,
             )
-            stored.messages = [_normalized_to_message(m) for m in normalized]
+            stored.messages = sorted((_normalized_to_message(m) for m in normalized), key=lambda m: m.source_id)
             return stored
         raise ValueError(f"Unknown reconcile classification: {result.classification!r}")
 
@@ -764,60 +732,113 @@ class SlackConversationSyncerMixin:
         deleted_source_id: str,
     ) -> None:
         """Move a tombstoned bot's `TurnExecution` ownership to the next non-tombstoned bot in the same consecutive
-        run; same rule for `lifted_anchor_source_id`.
+        run. If the run has no non-tombstoned bots left, the `TurnExecution` is orphaned (deleted from ES).
 
-        Run membership: walk the bot run that contains `deleted_source_id`, stopping at non-bot messages.
-        Tombstoned bots stay in the run for membership but are skipped for selection.
-
-        If the run has no non-tombstoned bots left, the `TurnExecution` is orphaned (deleted from ES) and the
-        anchor falls to `None` (which also clears `lifted_turn_items` to preserve the invariant
-        `anchor=None iff lifted_turn_items == []`).
+        Working-file windows are not anchored to a bot source_id under the first-class working-files design, so no
+        anchor re-key happens here — only the TurnExecution ownership re-key.
         """
         next_owner = _next_non_tombstoned_bot_in_run(stored, deleted_source_id)
 
-        # Re-key the TurnExecution.
-        try:
-            existing = await self.search_client.get_turn_execution(
-                stored.conversation_uuid, deleted_source_id
-            )
-        except Exception:
-            existing = None
+        existing = await self.search_client.get_turn_execution(stored.conversation_uuid, deleted_source_id)
         if existing is not None:
             if next_owner is not None:
-                await self.search_client.rekey_turn_execution(
-                    stored.conversation_uuid, deleted_source_id, next_owner
-                )
+                await self.search_client.rekey_turn_execution(stored.conversation_uuid, deleted_source_id, next_owner)
             else:
-                await self.search_client.delete_turn_execution(
-                    stored.conversation_uuid, deleted_source_id
-                )
+                await self.search_client.delete_turn_execution(stored.conversation_uuid, deleted_source_id)
 
-        # Re-key the lifted anchor if it pointed at the deleted bot.
-        if stored.lifted_anchor_source_id == deleted_source_id:
-            if next_owner is not None:
-                stored.lifted_anchor_source_id = next_owner
-            else:
-                stored.lifted_anchor_source_id = None
-                stored.lifted_turn_items = []
+
+def _file_tool_call_ids_in(turns: dict[str, TurnExecution]) -> set[str]:
+    """Collect file-tool `function_call.call_id`s across the given `TurnExecution`s. Used by the two-set origin
+    filter at branch divergence and cold rebuild."""
+    call_ids: set[str] = set()
+    for turn in turns.values():
+        for item in turn.items:
+            if item.type != "function_call":
+                continue
+            if item.name != "file_tool":
+                continue
+            call_id = item.call_id or item.id
+            if call_id is not None:
+                call_ids.add(call_id)
+    return call_ids
+
+
+def _filter_windows_by_origin(
+    windows: list[WorkingFileWindow],
+    *,
+    kept_call_ids: set[str],
+    source_call_ids: set[str],
+) -> list[WorkingFileWindow]:
+    """Two-set origin filter: keep a window if `window_id ∈ kept_call_ids` OR `window_id ∉ source_call_ids`. The
+    second clause is the carryforward bucket — a window whose call_id appears nowhere in the source's own turns
+    must have originated in a compacted ancestor and ridden forward, so keep it."""
+    return [w for w in windows if w.window_id in kept_call_ids or w.window_id not in source_call_ids]
+
+
+def _active_paths_in_turns(turns: dict[str, TurnExecution]) -> set[str]:
+    """Active paths in a set of kept turns: every `file_tool.path` annotation present on a file-tool
+    `function_call_output` in those turns.
+
+    Reads outputs (not function_call arguments) because outputs carry the **resolved absolute** path that
+    `WorkingFileWindow.path` is also stored as — derived from the same `_resolve_path(...)` call. Annotations
+    cover every call shape: successful reads, RANGE_TRUNCATED, ALREADY_EXISTS, CONFLICT, RANGE_ERROR,
+    REDUNDANT_READ (which doesn't mint a new window), and CREATED/EDITED records (which refresh existing windows
+    without minting new ones). Using outputs as the source-of-truth for "path was touched in this turn" keeps the
+    active-path derivation working for edits and redundant reads even when no new window was minted for the call.
+    """
+    paths: set[str] = set()
+    for turn in turns.values():
+        for item in turn.items:
+            if item.type != "function_call_output":
+                continue
+            ann = item.prokaryotes_annotations or {}
+            path = ann.get("file_tool.path")
+            if path:
+                paths.add(path)
+    return paths
+
+
+def _filter_windows_by_active_path_and_origin(
+    windows: list[WorkingFileWindow],
+    *,
+    active_paths: set[str],
+    kept_call_ids: set[str],
+    source_call_ids: set[str],
+) -> list[WorkingFileWindow]:
+    """Two-gate filter at Case A divergence and cold rebuild: keep a window if `path ∈ active_paths` AND
+    (`window_id ∈ kept_call_ids` OR `window_id ∉ source_call_ids`).
+
+    The active-path gate drops carryforward windows whose path is no longer touched in the kept turns; the origin
+    gate drops windows minted by discarded sibling/tail turns even when their path remains active.
+    """
+    return [
+        w
+        for w in windows
+        if w.path in active_paths and (w.window_id in kept_call_ids or w.window_id not in source_call_ids)
+    ]
+
+
+def _insert_message_sorted(messages: list[ConversationMessage], message: ConversationMessage) -> None:
+    """Insert `message` into `messages` at its `source_id`-sorted position, preserving the Slack-side
+    `source_id`-sorted invariant on `stored.messages`.
+
+    Same-thread turn serialization can deliver an append out of chronological order (a later mention's sync sees a
+    prior turn's bot reply with a higher `ts` already committed under the lock), so a tail-append would leave the
+    list unsorted and make the next turn's reconcile diverge needlessly. `bisect.insort` against a parallel
+    `source_id` key list keeps the insert ordered.
+    """
+    keys = [m.source_id for m in messages]
+    index = bisect.bisect_right(keys, message.source_id)
+    messages.insert(index, message)
 
 
 def _next_non_tombstoned_bot_in_run(
     stored: Conversation,
     deleted_source_id: str,
 ) -> str | None:
-    """Pick the replacement owner for a tombstoned bot's `TurnExecution`.
-
-    Walks the bot run that contains `deleted_source_id` in `sorted_messages` order. Run boundaries: any non-bot
-    message (a user / different-author message). Tombstoned bots are in the run for *membership* (they don't break
-    the run) but are skipped for *selection*.
-
-    Returns the source_id of the next non-tombstoned bot in the run, or `None` if the run is fully tombstoned (the
-    orphan case).
-    """
     sorted_msgs = stored.sorted_messages()
     bot_author_id = stored.bot_author_id
 
-    # Find the deleted message's index in sorted order.
     deleted_idx: int | None = None
     for idx, m in enumerate(sorted_msgs):
         if m.source_id == deleted_source_id:
@@ -825,67 +846,21 @@ def _next_non_tombstoned_bot_in_run(
             break
     if deleted_idx is None:
         return None
-    # Defensive: callers already guard that the deleted message is a bot, but a user source_id from a future
-    # caller should still yield a clean `None`.
     if sorted_msgs[deleted_idx].author_id != bot_author_id:
         return None
 
-    # Walk forward through bot-author entries to find the first non-tombstoned one.
     for m in sorted_msgs[deleted_idx + 1 :]:
         if m.author_id != bot_author_id:
             break
         if not m.deleted:
             return m.source_id
 
-    # Walk backward — but only through bots since the previous run ends at a non-bot.
     for m in reversed(sorted_msgs[:deleted_idx]):
         if m.author_id != bot_author_id:
             break
         if not m.deleted:
             return m.source_id
 
-    return None
-
-
-def _active_paths_in_turns(turns: dict[str, TurnExecution]) -> set[str]:
-    """Paths active in a window: any `file_tool.path`-annotated TurnItem whose `file_tool.status` is not `"stale"`.
-    Used by both the compactor's lift plan and the syncer's Case A branch-creation lifted-state recompute."""
-    paths: set[str] = set()
-    for turn in turns.values():
-        for item in turn.items:
-            ann = item.prokaryotes_annotations or {}
-            if ann.get("file_tool.status") == "stale":
-                continue
-            path = ann.get("file_tool.path")
-            if path:
-                paths.add(path)
-    return paths
-
-
-def _first_bot_with_file_activity(
-    messages: list[ConversationMessage],
-    turns: dict[str, TurnExecution],
-    bot_author_id: str,
-) -> str | None:
-    """Pick the source_id of the first non-tombstoned bot message in `messages` whose `TurnExecution` carries a
-    non-stale file-tool annotation.
-
-    Used as the lift anchor — projection emits `lifted_turn_items` just before this bot's tool round. Returns
-    `None` if no qualifying bot exists.
-    """
-    for msg in messages:
-        if msg.deleted or msg.author_id != bot_author_id:
-            continue
-        turn = turns.get(msg.source_id)
-        if turn is None:
-            continue
-        for item in turn.items:
-            ann = item.prokaryotes_annotations or {}
-            if not ann.get("file_tool.path"):
-                continue
-            if ann.get("file_tool.status") == "stale":
-                continue
-            return msg.source_id
     return None
 
 
@@ -904,8 +879,6 @@ def _bump_source_id(source_id: str) -> str:
 
 
 def _conversation_can_follow_client(conversation: Conversation, client_snapshot_uuid: str | None) -> bool:
-    """A cached snapshot can serve a client whose own `snapshot_uuid` is either this snapshot or its parent (the
-    client may not have run `relabelSnapshotUuid` after a recent compaction yet)."""
     if client_snapshot_uuid is None:
         return True
     return (
@@ -917,21 +890,11 @@ def _detect_unacknowledged_bot_messages(
     stored: Conversation,
     partial: list[_PartialMessage],
 ) -> list[UnacknowledgedBotMessage]:
-    """Resync trigger: stored has trailing bot-authored messages immediately after the last source_id shared with
-    incoming, and incoming has new content (a new source_id, or a message that arrived without one) beyond that
-    point.
-
-    Returns the unacknowledged bots in source_id order, or `[]` if not a resync.
-    """
     stored_sorted = stored.sorted_messages()
     stored_non_deleted = [m for m in stored_sorted if not m.deleted]
     if not stored_non_deleted:
         return []
 
-    # Only count a source_id as shared when its content and author also match. Otherwise an edit (same source_id,
-    # changed content) or a payload that rebinds a source_id to a different author would trigger a resync handshake
-    # when the right classification is `edit` / `divergence`, which reconcile + `_apply_divergence` handle
-    # correctly.
     incoming_by_id = {m.source_id: m for m in partial if m.source_id is not None}
 
     last_shared_idx = -1
@@ -973,33 +936,6 @@ def _detect_unacknowledged_bot_messages(
     return out
 
 
-def _filter_lifted_pairs_by_paths(lifted_items, active_paths: set[str]):
-    """Return only those `(function_call, function_call_output)` pairs whose `file_tool.path` annotation is in
-    `active_paths`. Empty when `active_paths` is empty, preserving the invariant `anchor=None iff lifted == []`."""
-    if not active_paths:
-        return []
-    out = []
-    by_call_id: dict[str, object] = {}
-    for item in lifted_items:
-        if item.type == "function_call":
-            cid = item.call_id or item.id
-            if cid is not None:
-                by_call_id[cid] = item
-            continue
-        if item.type != "function_call_output":
-            continue
-        ann = item.prokaryotes_annotations or {}
-        if ann.get("file_tool.path") not in active_paths:
-            continue
-        cid = item.call_id or item.id
-        function_call_item = by_call_id.get(cid) if cid else None
-        if function_call_item is None:
-            continue
-        out.append(function_call_item)
-        out.append(item)
-    return out
-
-
 def _format_source_id(ts: float) -> str:
     seconds = int(ts)
     micros = int((ts - seconds) * 1_000_000)
@@ -1007,7 +943,6 @@ def _format_source_id(ts: float) -> str:
 
 
 def _hash_content(content: str) -> str:
-    """Stable per-message content hash used by the assistant-message guardrail."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 

@@ -265,8 +265,7 @@ class TestCaseBHelperAssignsSourceIds:
 
         # Fresh conversation — no inherited compacted state.
         assert result.conversation.ancestor_summaries == []
-        assert result.conversation.lifted_turn_items == []
-        assert result.conversation.lifted_anchor_source_id is None
+        assert result.conversation.working_file_windows == []
         assert result.conversation.raw_message_start_index == 0
         # New snapshot_uuid != client's `s-child`.
         assert result.is_new_branch is True

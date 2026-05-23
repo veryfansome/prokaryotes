@@ -360,7 +360,7 @@ async def test_stream_turn_max_tool_call_rounds_commits_round_then_stops():
 
 
 def test_anthropic_tool_param_strips_integer_minimum_from_file_tool_schema(tmp_path):
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     anthropic_param = tool.tool_spec.to_anthropic_tool_param()
 
@@ -373,7 +373,7 @@ def test_anthropic_tool_param_strips_integer_minimum_from_file_tool_schema(tmp_p
 
 
 def test_openai_tool_param_keeps_integer_minimum_in_file_tool_schema(tmp_path):
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     openai_param = tool.tool_spec.to_openai_function_tool_param()
 

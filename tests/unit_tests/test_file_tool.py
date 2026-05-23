@@ -7,9 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from prokaryotes.conversation_v1.models import TurnItem
-from prokaryotes.tools_v1.file_tool import FileTool, reads, reconcile_tracked_files
-from prokaryotes.tools_v1.file_tool.live_windows import _refresh_live_windows
+from prokaryotes.conversation_v1.models import WorkingFileWindow
+from prokaryotes.tools_v1.file_tool import FileTool, reads
+from prokaryotes.tools_v1.file_tool.live_windows import (
+    reconcile_working_files,
+    refresh_windows_for_path,
+)
 from prokaryotes.tools_v1.file_tool.reads import _locked_read_text
 from prokaryotes.tools_v1.file_tool.rendering import render_view
 
@@ -87,53 +90,65 @@ def _delete_args(path: Path, expected_revision: str, start: int, end: int) -> st
 async def test_read_returns_live_window_with_annotations(tmp_path: Path):
     target = tmp_path / "hello.txt"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(_read_args(target), "call_1")
 
     assert result.type == "function_call_output"
     assert result.call_id == "call_1"
     assert result.prokaryotes_annotations["file_tool.path"] == str(target.resolve())
-    assert result.prokaryotes_annotations["file_tool.status"] == "live"
-    assert result.prokaryotes_annotations["file_tool.view_start_line"] == "1"
-    assert result.prokaryotes_annotations["file_tool.view_end_line"] == "3"
-    assert result.prokaryotes_annotations["file_tool.revision"] == _hash("alpha\nbeta\ngamma\n")
+    assert result.prokaryotes_annotations["file_tool.persistence"] == "working_file"
     assert "1 | alpha" in result.output
     assert "line_count=3" in result.output
+    # Per-call window state lives on the WorkingFileWindow now, not on the output annotations.
+    assert len(windows) == 1
+    window = windows[0]
+    assert window.window_id == "call_1"
+    assert window.path == str(target.resolve())
+    assert window.status == "live"
+    assert window.source_kind == "read_lines"
+    assert window.view_start_line == 1
+    assert window.view_end_line == 3
+    assert window.revision == _hash("alpha\nbeta\ngamma\n")
 
 
 @pytest.mark.asyncio
 async def test_read_with_exact_end_line_returns_requested_span(tmp_path: Path):
     target = tmp_path / "span.txt"
     target.write_text("alpha\nbeta\ngamma\ndelta\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(_read_args(target, start_line=2, end_line=3), "call_span")
 
-    assert result.prokaryotes_annotations["file_tool.view_start_line"] == "2"
-    assert result.prokaryotes_annotations["file_tool.view_end_line"] == "3"
-    assert result.prokaryotes_annotations["file_tool.requested_end_line"] == "3"
     assert "2 | beta" in result.output
     assert "3 | gamma" in result.output
     assert "4 | delta" not in result.output
+    window = windows[-1]
+    assert window.view_start_line == 2
+    assert window.view_end_line == 3
+    assert window.requested_end_line == 3
 
 
 @pytest.mark.asyncio
 async def test_read_empty_file_yields_zero_line_count(tmp_path: Path):
     target = tmp_path / "empty.txt"
     target.write_text("", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(_read_args(target), "call_e")
 
-    assert result.prokaryotes_annotations["file_tool.status"] == "live"
     assert "line_count=0" in result.output
     assert "1 | " not in result.output
+    assert windows[-1].status == "live"
+    assert windows[-1].source_kind == "read_lines"
 
 
 @pytest.mark.asyncio
 async def test_read_missing_file_returns_error(tmp_path: Path):
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_read_args(tmp_path / "missing.txt"), "call_x")
 
@@ -147,7 +162,7 @@ async def test_read_path_escape_returns_error(tmp_path: Path):
     workspace.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("nope\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=workspace)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=workspace)
 
     result = await tool.call(_read_args(outside), "call_esc")
 
@@ -159,7 +174,7 @@ async def test_read_path_escape_returns_error(tmp_path: Path):
 async def test_read_rejects_non_positive_start_line(tmp_path: Path):
     target = tmp_path / "hello.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     zero_result = await tool.call(_read_args(target, start_line=0), "call_zero")
     negative_result = await tool.call(_read_args(target, start_line=-3), "call_neg")
@@ -176,7 +191,7 @@ async def test_read_rejects_non_positive_start_line(tmp_path: Path):
 async def test_read_rejects_invalid_end_line(tmp_path: Path):
     target = tmp_path / "hello.txt"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     zero_result = await tool.call(_read_args(target, start_line=1, end_line=0), "call_end_zero")
     reversed_result = await tool.call(_read_args(target, start_line=3, end_line=2), "call_end_rev")
@@ -192,7 +207,8 @@ async def test_read_over_cap_with_truncation_returns_range_truncated_live_view(t
     target = tmp_path / "long.txt"
     line_count = FileTool.max_lines + 55
     target.write_text("".join(f"line{i}\n" for i in range(1, line_count + 1)), encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(
         _read_args(target, start_line=1, end_line=line_count),
@@ -209,10 +225,11 @@ async def test_read_over_cap_with_truncation_returns_range_truncated_live_view(t
     assert "1 | line1" in result.output
     assert f"{cap_end} | line{cap_end}" in result.output
     assert f"{cap_end + 1} | line{cap_end + 1}" not in result.output
-    assert result.prokaryotes_annotations["file_tool.status"] == "live"
-    assert result.prokaryotes_annotations["file_tool.view_start_line"] == "1"
-    assert result.prokaryotes_annotations["file_tool.view_end_line"] == str(cap_end)
-    assert result.prokaryotes_annotations["file_tool.requested_end_line"] == str(cap_end)
+    window = windows[-1]
+    assert window.source_kind == "range_truncated"
+    assert window.view_start_line == 1
+    assert window.view_end_line == cap_end
+    assert window.requested_end_line == cap_end
 
 
 @pytest.mark.asyncio
@@ -224,7 +241,7 @@ async def test_read_over_cap_remaining_count_tracks_requested_span_not_eof(tmp_p
     file_line_count = FileTool.max_lines * 5
     requested_end = FileTool.max_lines + 50
     target.write_text("".join(f"line{i}\n" for i in range(1, file_line_count + 1)), encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(
         _read_args(target, start_line=1, end_line=requested_end),
@@ -243,7 +260,8 @@ async def test_read_over_cap_remaining_count_tracks_requested_span_not_eof(tmp_p
 async def test_read_over_cap_with_eof_inside_cap_returns_plain_live_view(tmp_path: Path):
     target = tmp_path / "short.txt"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(
         _read_args(target, start_line=1, end_line=FileTool.max_lines + 1),
@@ -256,43 +274,40 @@ async def test_read_over_cap_with_eof_inside_cap_returns_plain_live_view(tmp_pat
     assert "RANGE_TRUNCATED" not in result.output
     assert "1 | alpha" in result.output
     assert "3 | gamma" in result.output
-    assert result.prokaryotes_annotations["file_tool.view_end_line"] == "3"
-    # The annotation is pinned to the cap, not the original over-cap request, so a later refresh after file growth
-    # cannot expand the window past max_lines.
-    assert result.prokaryotes_annotations["file_tool.requested_end_line"] == str(FileTool.max_lines)
+    window = windows[-1]
+    assert window.view_end_line == 3
+    # `requested_end_line` is pinned to the cap, not the original over-cap request, so a later refresh after file
+    # growth cannot expand the window past max_lines.
+    assert window.requested_end_line == FileTool.max_lines
 
 
 @pytest.mark.asyncio
-async def test_read_over_cap_pinned_annotation_caps_refresh_after_file_growth(tmp_path: Path):
+async def test_read_over_cap_pinned_requested_end_caps_refresh_after_file_growth(tmp_path: Path):
     target = tmp_path / "growth.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    initial = await tool.call(
+    await tool.call(
         _read_args(target, start_line=1, end_line=FileTool.max_lines + 100),
         "call_over_cap_grow",
     )
-    items.append(
-        TurnItem(
-            call_id="call_over_cap_grow",
-            name="file_tool",
-            arguments=_read_args(target, start_line=1, end_line=FileTool.max_lines + 100),
-            type="function_call",
-        )
-    )
-    items.append(initial)
 
-    # Grow the file beyond the cap; the pinned annotation must prevent the refreshed window from extending past
-    # max_lines, even though the original request was wider.
+    # Grow the file beyond the cap; the pinned requested_end_line must prevent the refreshed window from
+    # extending past max_lines, even though the original request was wider.
     grown_line_count = FileTool.max_lines + 50
     target.write_text("".join(f"L{i}\n" for i in range(1, grown_line_count + 1)), encoding="utf-8")
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    refreshed = items[1]
-    assert refreshed.prokaryotes_annotations["file_tool.view_end_line"] == str(FileTool.max_lines)
-    assert f"{FileTool.max_lines} | L{FileTool.max_lines}" in refreshed.output
-    assert f"{FileTool.max_lines + 1} | L{FileTool.max_lines + 1}" not in refreshed.output
+    refreshed = windows[0]
+    assert refreshed.view_end_line == FileTool.max_lines
+    assert f"{FileTool.max_lines} | L{FileTool.max_lines}" in refreshed.rendered_output
+    assert f"{FileTool.max_lines + 1} | L{FileTool.max_lines + 1}" not in refreshed.rendered_output
 
 
 @pytest.mark.asyncio
@@ -300,7 +315,7 @@ async def test_default_workspace_root_is_current_working_directory(tmp_path: Pat
     target = tmp_path / "relative.txt"
     target.write_text("from cwd\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    tool = FileTool(view_provider=lambda: [])
+    tool = FileTool(working_file_provider=lambda: [])
 
     result = await tool.call(_read_args(Path("relative.txt")), "call_rel")
 
@@ -311,35 +326,44 @@ async def test_default_workspace_root_is_current_working_directory(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_create_file_writes_new_file_and_returns_created_record(tmp_path: Path):
     target = tmp_path / "created.txt"
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(_create_args(target, "alpha\nbeta\n"), "call_create")
 
     assert target.read_text(encoding="utf-8") == "alpha\nbeta\n"
-    assert result.prokaryotes_annotations == {"file_tool.path": str(target.resolve())}
+    # CREATED records ride the transcript forward as history; they do NOT mint a working_file_window.
+    assert result.prokaryotes_annotations == {
+        "file_tool.path": str(target.resolve()),
+        "file_tool.persistence": "history",
+    }
     assert result.output.startswith("CREATED ")
     assert "revision: " in result.output
     assert "line_count: 0 → 2" in result.output
     assert "Added (lines 1-2):" in result.output
+    assert windows == []
 
 
 @pytest.mark.asyncio
 async def test_create_file_creates_missing_parent_directories(tmp_path: Path):
     target = tmp_path / "nested" / "deeper" / "created.txt"
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_create_args(target, "alpha\n"), "call_create_nested")
 
     assert target.read_text(encoding="utf-8") == "alpha\n"
     assert target.parent.is_dir()
     assert result.output.startswith("CREATED ")
-    assert result.prokaryotes_annotations == {"file_tool.path": str(target.resolve())}
+    assert result.prokaryotes_annotations == {
+        "file_tool.path": str(target.resolve()),
+        "file_tool.persistence": "history",
+    }
 
 
 @pytest.mark.asyncio
 async def test_create_file_allows_empty_text(tmp_path: Path):
     target = tmp_path / "empty_created.txt"
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_create_args(target, ""), "call_create_empty")
 
@@ -353,15 +377,19 @@ async def test_create_file_allows_empty_text(tmp_path: Path):
 async def test_create_file_existing_path_returns_already_exists_live_window(tmp_path: Path):
     target = tmp_path / "exists.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(_create_args(target, "new\n"), "call_exists")
 
     assert target.read_text(encoding="utf-8") == "alpha\nbeta\n"
     assert result.output.startswith("ALREADY_EXISTS ")
-    assert result.prokaryotes_annotations["file_tool.status"] == "live"
-    assert result.prokaryotes_annotations["file_tool.revision"] == _hash("alpha\nbeta\n")
     assert "1 | alpha" in result.output
+    # ALREADY_EXISTS mints a diagnostic-source_kind window carrying the embedded current view.
+    window = windows[-1]
+    assert window.source_kind == "already_exists"
+    assert window.status == "live"
+    assert window.revision == _hash("alpha\nbeta\n")
 
 
 @pytest.mark.asyncio
@@ -369,40 +397,35 @@ async def test_replace_lines_writes_disk_and_refreshes_prior_window(tmp_path: Pa
     target = tmp_path / "code.txt"
     initial = "one\ntwo\nthree\nfour\n"
     target.write_text(initial, encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_read")
-    items.append(
-        TurnItem(
-            call_id="call_read",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
+    await tool.call(_read_args(target), "call_read")
+    expected_revision = windows[-1].revision
 
-    expected_revision = read_result.prokaryotes_annotations["file_tool.revision"]
     write_result = await tool.call(
         _replace_args(target, expected_revision, 2, 3, "TWO\nTHREE_X\n"),
         "call_write",
     )
 
     assert target.read_text(encoding="utf-8") == "one\nTWO\nTHREE_X\nfour\n"
-    assert write_result.prokaryotes_annotations == {"file_tool.path": str(target.resolve())}
+    assert write_result.prokaryotes_annotations == {
+        "file_tool.path": str(target.resolve()),
+        "file_tool.persistence": "history",
+    }
     assert write_result.output.startswith("EDITED ")
     assert "Removed (lines 2-3):" in write_result.output
     assert "Added (lines 2-3):" in write_result.output
     assert "line_count: 4 → 4" in write_result.output
     assert "Live windows refreshed for this path: 1." in write_result.output
 
-    refreshed = items[1]
-    assert refreshed.prokaryotes_annotations["file_tool.status"] == "live"
-    assert refreshed.prokaryotes_annotations["file_tool.revision"] == _hash("one\nTWO\nTHREE_X\nfour\n")
-    assert "1 | one" in refreshed.output
-    assert "2 | TWO" in refreshed.output
-    assert "3 | THREE_X" in refreshed.output
+    # The prior read window was refreshed in place at the new revision.
+    read_window = next(w for w in windows if w.window_id == "call_read")
+    assert read_window.status == "live"
+    assert read_window.revision == _hash("one\nTWO\nTHREE_X\nfour\n")
+    assert "1 | one" in read_window.rendered_output
+    assert "2 | TWO" in read_window.rendered_output
+    assert "3 | THREE_X" in read_window.rendered_output
 
 
 @pytest.mark.asyncio
@@ -410,7 +433,7 @@ async def test_insert_lines_appends_at_eof(tmp_path: Path):
     target = tmp_path / "log.txt"
     target.write_text("a\nb\n", encoding="utf-8")
     rev = _hash("a\nb\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_insert_args(target, rev, 3, "c\nd\n"), "call_ins")
 
@@ -425,7 +448,7 @@ async def test_delete_lines_only_emits_removed_block(tmp_path: Path):
     target = tmp_path / "data.txt"
     target.write_text("a\nb\nc\nd\n", encoding="utf-8")
     rev = _hash("a\nb\nc\nd\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_delete_args(target, rev, 2, 3), "call_del")
 
@@ -439,7 +462,7 @@ async def test_replace_lines_emits_context_blocks_around_edit(tmp_path: Path):
     target = tmp_path / "code.txt"
     target.write_text("one\ntwo\nthree\nfour\nfive\nsix\n", encoding="utf-8")
     rev = _hash("one\ntwo\nthree\nfour\nfive\nsix\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(
         _replace_args(target, rev, 3, 4, "THREE\nFOUR\n"),
@@ -461,7 +484,7 @@ async def test_insert_lines_at_eof_emits_only_context_before(tmp_path: Path):
     target = tmp_path / "log.txt"
     target.write_text("a\nb\n", encoding="utf-8")
     rev = _hash("a\nb\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_insert_args(target, rev, 3, "c\nd\n"), "call_ins_eof")
 
@@ -477,7 +500,7 @@ async def test_delete_lines_emits_context_blocks_at_boundary(tmp_path: Path):
     target = tmp_path / "data.txt"
     target.write_text("a\nb\nc\nd\nE\nF\n", encoding="utf-8")
     rev = _hash("a\nb\nc\nd\nE\nF\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_delete_args(target, rev, 3, 4), "call_del_ctx")
 
@@ -496,7 +519,7 @@ async def test_replace_at_line_1_omits_context_before(tmp_path: Path):
     target = tmp_path / "code.txt"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
     rev = _hash("alpha\nbeta\ngamma\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(
         _replace_args(target, rev, 1, 1, "ALPHA\n"),
@@ -518,7 +541,7 @@ async def test_replace_with_duplicate_trailing_line_shows_collision_in_context(t
     target = tmp_path / "doc.md"
     target.write_text("intro\n```\nbody\n```\noutro\n", encoding="utf-8")
     rev = _hash("intro\n```\nbody\n```\noutro\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     # Replace lines 2-3 (opening fence + body) with a new fenced block that also closes the fence at its last line —
     # leaving the original closing fence on line 4.
@@ -539,7 +562,8 @@ async def test_replace_with_duplicate_trailing_line_shows_collision_in_context(t
 async def test_write_with_stale_revision_returns_conflict_carrying_live_view(tmp_path: Path):
     target = tmp_path / "f.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(
         _replace_args(target, "wrong-revision", 1, 1, "ALPHA\n"),
@@ -548,8 +572,10 @@ async def test_write_with_stale_revision_returns_conflict_carrying_live_view(tmp
 
     assert result.output.startswith("CONFLICT ")
     assert "Use the current view before retrying" in result.output
-    assert result.prokaryotes_annotations["file_tool.status"] == "live"
-    assert result.prokaryotes_annotations["file_tool.revision"] == _hash("alpha\nbeta\n")
+    window = windows[-1]
+    assert window.source_kind == "conflict"
+    assert window.status == "live"
+    assert window.revision == _hash("alpha\nbeta\n")
     assert target.read_text(encoding="utf-8") == "alpha\nbeta\n"
 
 
@@ -558,7 +584,8 @@ async def test_write_with_out_of_range_returns_range_error_carrying_live_view(tm
     target = tmp_path / "f.txt"
     target.write_text("a\nb\n", encoding="utf-8")
     rev = _hash("a\nb\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     result = await tool.call(
         _replace_args(target, rev, 5, 9, "X\n"),
@@ -566,7 +593,9 @@ async def test_write_with_out_of_range_returns_range_error_carrying_live_view(tm
     )
 
     assert result.output.startswith("RANGE_ERROR ")
-    assert result.prokaryotes_annotations["file_tool.status"] == "live"
+    window = windows[-1]
+    assert window.source_kind == "range_error"
+    assert window.status == "live"
     assert target.read_text(encoding="utf-8") == "a\nb\n"
 
 
@@ -574,7 +603,7 @@ async def test_write_with_out_of_range_returns_range_error_carrying_live_view(tm
 async def test_write_without_expected_revision_errors(tmp_path: Path):
     target = tmp_path / "f.txt"
     target.write_text("a\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     args = json.dumps(
         {
@@ -598,7 +627,7 @@ async def test_replace_and_insert_require_non_empty_new_text_string(tmp_path: Pa
     target = tmp_path / "f.txt"
     target.write_text("a\nb\n", encoding="utf-8")
     rev = _hash("a\nb\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     replace_args = json.dumps(
         {
@@ -647,7 +676,7 @@ async def test_replace_and_insert_require_non_empty_new_text_string(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_create_file_requires_string_new_text_and_null_line_fields(tmp_path: Path):
     target = tmp_path / "new.txt"
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     bad_type_args = json.dumps(
         {
@@ -685,7 +714,7 @@ async def test_write_rejects_boolean_line_numbers(tmp_path: Path):
     target = tmp_path / "f.txt"
     target.write_text("a\nb\n", encoding="utf-8")
     rev = _hash("a\nb\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     args = json.dumps(
         {
@@ -711,7 +740,7 @@ async def test_read_rejects_files_over_max_file_bytes(tmp_path: Path, monkeypatc
     target = tmp_path / "large.txt"
     target.write_text("01234567890", encoding="utf-8")
     monkeypatch.setattr(FileTool, "max_file_bytes", 10)
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_read_args(target), "call_large")
 
@@ -723,28 +752,25 @@ async def test_read_rejects_files_over_max_file_bytes(tmp_path: Path, monkeypatc
 async def test_reconcile_tombstones_live_window_when_file_grows_too_large(tmp_path: Path, monkeypatch):
     target = tmp_path / "grows.txt"
     target.write_text("small\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_read")
-    items.append(
-        TurnItem(
-            call_id="call_read",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
+    await tool.call(_read_args(target), "call_read")
 
     target.write_text("01234567890", encoding="utf-8")
     monkeypatch.setattr(FileTool, "max_file_bytes", 10)
 
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    tombstoned = items[1]
-    assert tombstoned.prokaryotes_annotations["file_tool.status"] == "stale"
-    assert "FileToolFileTooLargeError" in tombstoned.output
+    tombstoned = windows[0]
+    assert tombstoned.status == "stale"
+    assert tombstoned.source_kind == "tombstone"
+    assert "FileToolFileTooLargeError" in tombstoned.rendered_output
 
 
 @pytest.mark.asyncio
@@ -753,7 +779,7 @@ async def test_write_rejects_edit_that_would_exceed_max_file_bytes(tmp_path: Pat
     target.write_text("a\n", encoding="utf-8")
     rev = _hash("a\n")
     monkeypatch.setattr(FileTool, "max_file_bytes", 5)
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result = await tool.call(_insert_args(target, rev, 2, "bbbb\n"), "call_grow")
 
@@ -792,7 +818,7 @@ async def test_line_edits_preserve_existing_trailing_newline_policy(
     target = tmp_path / "newline.txt"
     target.write_text(original, encoding="utf-8")
     rev = _hash(original)
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     if action == "replace_lines":
         args = _replace_args(target, rev, start, end, new_text)
@@ -808,124 +834,114 @@ async def test_line_edits_preserve_existing_trailing_newline_policy(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tracked_files_refreshes_live_windows_after_external_edit(tmp_path: Path):
+async def test_reconcile_working_files_refreshes_live_windows_after_external_edit(tmp_path: Path):
     target = tmp_path / "tracked.txt"
     target.write_text("v1\nv2\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_r")
-    items.append(
-        TurnItem(
-            call_id="call_r",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
+    await tool.call(_read_args(target), "call_r")
 
     target.write_text("v1\nv2\nv3\n", encoding="utf-8")
 
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    refreshed = items[1]
-    assert refreshed.prokaryotes_annotations["file_tool.revision"] == _hash("v1\nv2\nv3\n")
-    assert "3 | v3" in refreshed.output
-    assert refreshed.prokaryotes_annotations["file_tool.status"] == "live"
+    refreshed = windows[0]
+    assert refreshed.revision == _hash("v1\nv2\nv3\n")
+    assert "3 | v3" in refreshed.rendered_output
+    assert refreshed.status == "live"
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tracked_files_normalizes_conflict_window_without_revision_change(tmp_path: Path):
+async def test_reconcile_working_files_normalizes_conflict_window_without_revision_change(tmp_path: Path):
     target = tmp_path / "conflict.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     conflict_result = await tool.call(
         _replace_args(target, "stale-revision", 1, 1, "ALPHA\n"),
         "call_conflict",
     )
-    items.append(
-        TurnItem(
-            call_id="call_conflict",
-            name="file_tool",
-            arguments=_replace_args(target, "stale-revision", 1, 1, "ALPHA\n"),
-            type="function_call",
-        )
-    )
-    items.append(conflict_result)
     assert conflict_result.output.startswith("CONFLICT ")
+    assert windows[-1].source_kind == "conflict"
 
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    normalized = items[1]
-    assert normalized.output.startswith("FILE ")
-    assert "CONFLICT " not in normalized.output
-    assert "1 | alpha" in normalized.output
-    assert normalized.prokaryotes_annotations["file_tool.revision"] == _hash("alpha\nbeta\n")
+    normalized = windows[-1]
+    assert normalized.source_kind == "read_lines"
+    assert normalized.rendered_output.startswith("FILE ")
+    assert "CONFLICT " not in normalized.rendered_output
+    assert "1 | alpha" in normalized.rendered_output
+    assert normalized.revision == _hash("alpha\nbeta\n")
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tracked_files_normalizes_range_truncated_window_without_revision_change(tmp_path: Path):
+async def test_reconcile_working_files_normalizes_range_truncated_window_without_revision_change(tmp_path: Path):
     target = tmp_path / "truncated.txt"
     line_count = FileTool.max_lines + 10
     target.write_text("".join(f"line{i}\n" for i in range(1, line_count + 1)), encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     truncated_result = await tool.call(
         _read_args(target, start_line=1, end_line=line_count),
         "call_trunc",
     )
-    items.append(
-        TurnItem(
-            call_id="call_trunc",
-            name="file_tool",
-            arguments=_read_args(target, start_line=1, end_line=line_count),
-            type="function_call",
-        )
-    )
-    items.append(truncated_result)
     assert truncated_result.output.startswith("RANGE_TRUNCATED ")
+    assert windows[-1].source_kind == "range_truncated"
 
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    normalized = items[1]
-    assert normalized.output.startswith("FILE ")
-    assert "RANGE_TRUNCATED " not in normalized.output
-    assert "1 | line1" in normalized.output
-    assert f"{FileTool.max_lines} | line{FileTool.max_lines}" in normalized.output
-    assert normalized.prokaryotes_annotations["file_tool.view_end_line"] == str(FileTool.max_lines)
-    assert normalized.prokaryotes_annotations["file_tool.requested_end_line"] == str(FileTool.max_lines)
+    normalized = windows[-1]
+    assert normalized.source_kind == "read_lines"
+    assert normalized.rendered_output.startswith("FILE ")
+    assert "RANGE_TRUNCATED " not in normalized.rendered_output
+    assert "1 | line1" in normalized.rendered_output
+    assert f"{FileTool.max_lines} | line{FileTool.max_lines}" in normalized.rendered_output
+    assert normalized.view_end_line == FileTool.max_lines
+    assert normalized.requested_end_line == FileTool.max_lines
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tracked_files_normalizes_already_exists_window_without_revision_change(tmp_path: Path):
+async def test_reconcile_working_files_normalizes_already_exists_window_without_revision_change(tmp_path: Path):
     target = tmp_path / "exists_again.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     already_exists_result = await tool.call(_create_args(target, "ignored\n"), "call_exists")
-    items.append(
-        TurnItem(
-            call_id="call_exists",
-            name="file_tool",
-            arguments=_create_args(target, "ignored\n"),
-            type="function_call",
-        )
-    )
-    items.append(already_exists_result)
     assert already_exists_result.output.startswith("ALREADY_EXISTS ")
+    assert windows[-1].source_kind == "already_exists"
 
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    normalized = items[1]
-    assert normalized.output.startswith("FILE ")
-    assert "ALREADY_EXISTS " not in normalized.output
-    assert "1 | alpha" in normalized.output
-    assert normalized.prokaryotes_annotations["file_tool.revision"] == _hash("alpha\nbeta\n")
+    normalized = windows[-1]
+    assert normalized.source_kind == "read_lines"
+    assert normalized.rendered_output.startswith("FILE ")
+    assert "ALREADY_EXISTS " not in normalized.rendered_output
+    assert "1 | alpha" in normalized.rendered_output
+    assert normalized.revision == _hash("alpha\nbeta\n")
 
 
 @pytest.mark.asyncio
@@ -934,30 +950,22 @@ async def test_read_refreshes_prior_live_windows_for_same_path(tmp_path: Path):
     # short-circuits to REDUNDANT_READ instead.
     target = tmp_path / "read_refresh.txt"
     target.write_text("old1\nold2\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     first_args = _read_args(target, 1, 1)
-    first_read = await tool.call(first_args, "call_first")
-    items.append(
-        TurnItem(
-            call_id="call_first",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(first_read)
+    await tool.call(first_args, "call_first")
 
     target.write_text("new1\nnew2\n", encoding="utf-8")
-    second_read = await tool.call(_read_args(target, 2, 2), "call_second")
+    await tool.call(_read_args(target, 2, 2), "call_second")
 
-    refreshed = items[1]
+    refreshed = next(w for w in windows if w.window_id == "call_first")
     new_rev = _hash("new1\nnew2\n")
-    assert refreshed.prokaryotes_annotations["file_tool.revision"] == new_rev
-    assert "1 | new1" in refreshed.output
-    assert "1 | old1" not in refreshed.output
-    assert second_read.prokaryotes_annotations["file_tool.revision"] == new_rev
+    assert refreshed.revision == new_rev
+    assert "1 | new1" in refreshed.rendered_output
+    assert "1 | old1" not in refreshed.rendered_output
+    second = next(w for w in windows if w.window_id == "call_second")
+    assert second.revision == new_rev
 
 
 @pytest.mark.asyncio
@@ -967,50 +975,31 @@ async def test_failed_read_tombstones_prior_live_windows_for_same_path(tmp_path:
     # discovery for the covered case shifts to the per-turn reconcile pass; that path is covered separately.
     target = tmp_path / "read_missing.txt"
     target.write_text("gone1\ngone2\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    first_args = _read_args(target, 1, 1)
-    read_result = await tool.call(first_args, "call_read")
-    items.append(
-        TurnItem(
-            call_id="call_read",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(read_result)
+    await tool.call(_read_args(target, 1, 1), "call_read")
 
     target.unlink()
     missing_result = await tool.call(_read_args(target, 2, 2), "call_missing")
 
-    tombstoned = items[1]
+    tombstoned = next(w for w in windows if w.window_id == "call_read")
     assert missing_result.output.startswith("ERROR FileNotFoundError")
-    assert tombstoned.prokaryotes_annotations["file_tool.status"] == "stale"
-    assert "no longer accessible" in tombstoned.output
-    assert "FileNotFoundError" in tombstoned.output
+    assert tombstoned.status == "stale"
+    assert tombstoned.source_kind == "tombstone"
+    assert "no longer accessible" in tombstoned.rendered_output
+    assert "FileNotFoundError" in tombstoned.rendered_output
 
 
 @pytest.mark.asyncio
 async def test_covered_exact_span_reread_returns_redundant_read(tmp_path: Path):
     target = tmp_path / "covered.txt"
     target.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    first_args = _read_args(target, 1, 3)
-    first_read = await tool.call(first_args, "call_first")
-    items.append(
-        TurnItem(
-            call_id="call_first",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(first_read)
-    items_before = len(items)
+    await tool.call(_read_args(target, 1, 3), "call_first")
+    windows_before = len(windows)
 
     second_read = await tool.call(_read_args(target, 2, 3), "call_second")
 
@@ -1018,34 +1007,25 @@ async def test_covered_exact_span_reread_returns_redundant_read(tmp_path: Path):
     assert "rendered lines 1-3" in second_read.output
     assert "intended coverage 1-3" in second_read.output
     assert "page forward from start_line=4" in second_read.output
-    assert second_read.prokaryotes_annotations == {"file_tool.path": str(target)}
-    # The short-circuit must not append a new live window to the partition.
-    assert len(items) == items_before
+    assert second_read.prokaryotes_annotations == {
+        "file_tool.path": str(target),
+        "file_tool.persistence": "working_file",
+    }
+    # The short-circuit must not append a new working_file_window.
+    assert len(windows) == windows_before
 
 
 @pytest.mark.asyncio
 async def test_covered_open_ended_reread_of_short_file_returns_redundant_read(tmp_path: Path):
-    # File shorter than max_lines: the first window's view_end_line is clipped at EOF (3), but intended coverage is
-    # still [1, start_line + max_lines - 1] = [1, 200]. A follow-up open-ended re-read of start=1 must still
-    # short-circuit even though view_end_line (3) does not reach intended_coverage_end (200).
     target = tmp_path / "short_open_ended.txt"
     target.write_text("a\nb\nc\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    first_args = _read_args(target)
-    first_read = await tool.call(first_args, "call_first")
-    items.append(
-        TurnItem(
-            call_id="call_first",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(first_read)
-    assert first_read.prokaryotes_annotations["file_tool.view_end_line"] == "3"
-    assert "file_tool.requested_end_line" not in first_read.prokaryotes_annotations
+    await tool.call(_read_args(target), "call_first")
+    first_window = windows[-1]
+    assert first_window.view_end_line == 3
+    assert first_window.requested_end_line is None
 
     second_read = await tool.call(_read_args(target), "call_second")
 
@@ -1057,26 +1037,12 @@ async def test_covered_open_ended_reread_of_short_file_returns_redundant_read(tm
 
 @pytest.mark.asyncio
 async def test_next_page_uses_intended_coverage_end_not_view_end(tmp_path: Path):
-    # Verifies the diagnostic's paging boundary is intended_coverage_end + 1, not view_end_line + 1. After an open-ended
-    # read of a 3-line file the window has view_end_line=3 but intended coverage [1, 200]. A small exact-span read at
-    # view_end_line + 1 (=4) is still inside intended coverage and must short-circuit; only a read past
-    # intended_coverage_end + 1 (=201) escapes.
     target = tmp_path / "next_page.txt"
     target.write_text("a\nb\nc\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    first_args = _read_args(target)
-    first_read = await tool.call(first_args, "call_first")
-    items.append(
-        TurnItem(
-            call_id="call_first",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(first_read)
+    await tool.call(_read_args(target), "call_first")
 
     # view_end_line + 1 = 4, small exact span inside intended coverage [1, 200].
     covered_exact = await tool.call(_read_args(target, 4, 4), "call_view_end_plus_one")
@@ -1086,34 +1052,22 @@ async def test_next_page_uses_intended_coverage_end_not_view_end(tmp_path: Path)
     # intended_coverage_end + 1 = 201, escapes coverage.
     next_page = await tool.call(_read_args(target, 201), "call_intended_end_plus_one")
     assert not next_page.output.startswith("REDUNDANT_READ ")
-    assert next_page.prokaryotes_annotations.get("file_tool.status") == "live"
+    new_window = next(w for w in windows if w.window_id == "call_intended_end_plus_one")
+    assert new_window.status == "live"
 
 
 @pytest.mark.asyncio
 async def test_range_truncated_window_counts_as_stable_coverage(tmp_path: Path):
-    # RANGE_TRUNCATED's embedded view is a real live window over [view_start_line, view_end_line] with
-    # requested_end_line=cap_end_line set. After the model has seen one RANGE_TRUNCATED view, an immediate
-    # re-read of the truncated span is exactly the misuse the fix targets, so RANGE_TRUNCATED must count as
-    # stable coverage.
     long_text = "".join(f"line{n}\n" for n in range(1, 301))
     target = tmp_path / "range_truncated.txt"
     target.write_text(long_text, encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    first_args = _read_args(target, 1, 250)
-    first_read = await tool.call(first_args, "call_first")
-    items.append(
-        TurnItem(
-            call_id="call_first",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(first_read)
+    first_read = await tool.call(_read_args(target, 1, 250), "call_first")
     assert first_read.output.startswith("RANGE_TRUNCATED ")
-    assert first_read.prokaryotes_annotations["file_tool.status"] == "live"
+    assert windows[-1].source_kind == "range_truncated"
+    assert windows[-1].status == "live"
 
     second_read = await tool.call(_read_args(target, 1, 200), "call_second")
     assert second_read.output.startswith("REDUNDANT_READ ")
@@ -1123,234 +1077,153 @@ async def test_range_truncated_window_counts_as_stable_coverage(tmp_path: Path):
 async def test_already_exists_window_is_not_stable_coverage(tmp_path: Path):
     target = tmp_path / "already_exists.txt"
     target.write_text("a\nb\nc\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    create_args = _create_args(target, "ignored\n")
-    create_result = await tool.call(create_args, "call_create")
-    items.append(
-        TurnItem(
-            call_id="call_create",
-            name="file_tool",
-            arguments=create_args,
-            type="function_call",
-        )
-    )
-    items.append(create_result)
+    create_result = await tool.call(_create_args(target, "ignored\n"), "call_create")
     assert create_result.output.startswith("ALREADY_EXISTS ")
-    assert create_result.prokaryotes_annotations["file_tool.status"] == "live"
+    assert windows[-1].source_kind == "already_exists"
 
     follow_up = await tool.call(_read_args(target, 1, 3), "call_follow")
     assert not follow_up.output.startswith("REDUNDANT_READ ")
-    assert follow_up.prokaryotes_annotations["file_tool.status"] == "live"
 
 
 @pytest.mark.asyncio
 async def test_conflict_window_is_not_stable_coverage(tmp_path: Path):
     target = tmp_path / "conflict.txt"
     target.write_text("a\nb\nc\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     stale_rev = _hash("not-the-real-content\n")
-    conflict_args = _replace_args(target, stale_rev, 1, 1, "x\n")
-    conflict_result = await tool.call(conflict_args, "call_conflict")
-    items.append(
-        TurnItem(
-            call_id="call_conflict",
-            name="file_tool",
-            arguments=conflict_args,
-            type="function_call",
-        )
-    )
-    items.append(conflict_result)
+    conflict_result = await tool.call(_replace_args(target, stale_rev, 1, 1, "x\n"), "call_conflict")
     assert conflict_result.output.startswith("CONFLICT ")
-    assert conflict_result.prokaryotes_annotations["file_tool.status"] == "live"
+    assert windows[-1].source_kind == "conflict"
 
     follow_up = await tool.call(_read_args(target, 1, 3), "call_follow")
     assert not follow_up.output.startswith("REDUNDANT_READ ")
-    assert follow_up.prokaryotes_annotations["file_tool.status"] == "live"
 
 
 @pytest.mark.asyncio
 async def test_range_error_window_is_not_stable_coverage(tmp_path: Path):
     target = tmp_path / "range_error.txt"
     target.write_text("a\nb\nc\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     rev = _hash("a\nb\nc\n")
-    range_error_args = _replace_args(target, rev, 50, 60, "x\n")
-    range_error_result = await tool.call(range_error_args, "call_range_error")
-    items.append(
-        TurnItem(
-            call_id="call_range_error",
-            name="file_tool",
-            arguments=range_error_args,
-            type="function_call",
-        )
-    )
-    items.append(range_error_result)
+    range_error_result = await tool.call(_replace_args(target, rev, 50, 60, "x\n"), "call_range_error")
     assert range_error_result.output.startswith("RANGE_ERROR ")
-    assert range_error_result.prokaryotes_annotations["file_tool.status"] == "live"
-    assert range_error_result.prokaryotes_annotations["file_tool.view_start_line"] == "50"
+    assert windows[-1].source_kind == "range_error"
+    assert windows[-1].view_start_line == 50
 
-    # If RANGE_ERROR were stable coverage, this read of [50, 60] would short-circuit (its intended_coverage_end is
-    # view_start_line + max_lines - 1 = 249). It must not.
+    # If RANGE_ERROR were stable coverage, this read of [50, 60] would short-circuit. It must not.
     follow_up = await tool.call(_read_args(target, 50, 60), "call_follow")
     assert not follow_up.output.startswith("REDUNDANT_READ ")
 
 
 @pytest.mark.asyncio
-async def test_redundant_read_item_skipped_by_refresh_and_tombstone(tmp_path: Path):
+async def test_redundant_read_does_not_mint_window_and_does_not_block_refresh_or_tombstone(tmp_path: Path):
     target = tmp_path / "redundant_annotations.txt"
     target.write_text("a\nb\nc\nd\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    first_args = _read_args(target, 1, 4)
-    first_read = await tool.call(first_args, "call_first")
-    items.append(
-        TurnItem(
-            call_id="call_first",
-            name="file_tool",
-            arguments=first_args,
-            type="function_call",
-        )
-    )
-    items.append(first_read)
+    await tool.call(_read_args(target, 1, 4), "call_first")
+    initial_window_count = len(windows)
 
-    second_args = _read_args(target, 2, 3)
-    redundant = await tool.call(second_args, "call_redundant")
-    items.append(
-        TurnItem(
-            call_id="call_redundant",
-            name="file_tool",
-            arguments=second_args,
-            type="function_call",
-        )
-    )
-    items.append(redundant)
+    redundant = await tool.call(_read_args(target, 2, 3), "call_redundant")
     assert redundant.output.startswith("REDUNDANT_READ ")
-    assert redundant.prokaryotes_annotations == {"file_tool.path": str(target)}
+    assert redundant.prokaryotes_annotations == {
+        "file_tool.path": str(target),
+        "file_tool.persistence": "working_file",
+    }
+    # REDUNDANT_READ does not mint a new window.
+    assert len(windows) == initial_window_count
 
-    # A follow-up edit must refresh exactly one live window — the original first_read. The REDUNDANT_READ carries no
-    # status=live and must be skipped by _refresh_live_windows.
-    rev = first_read.prokaryotes_annotations["file_tool.revision"]
-    edit_result = await tool.call(_replace_args(target, rev, 1, 1, "A\n"), "call_edit")
+    # A follow-up edit refreshes exactly one live window — the original read.
+    first_window = windows[0]
+    edit_result = await tool.call(_replace_args(target, first_window.revision, 1, 1, "A\n"), "call_edit")
     assert edit_result.output.startswith("EDITED ")
     assert "Live windows refreshed for this path: 1" in edit_result.output
 
-    # Deleting the file and triggering a non-covered failing read must tombstone the live window but leave the
-    # REDUNDANT_READ item untouched (status absent → tombstone skip).
+    # Tombstone on missing file affects only the live windows for the path.
     target.unlink()
     await tool.call(_read_args(target, 50, 60), "call_missing")
-    assert items[1].prokaryotes_annotations["file_tool.status"] == "stale"
-    assert items[3].prokaryotes_annotations == {"file_tool.path": str(target)}
-    assert items[3].output.startswith("REDUNDANT_READ ")
+    assert windows[0].status == "stale"
+    assert windows[0].source_kind == "tombstone"
 
 
 @pytest.mark.asyncio
 async def test_failed_write_tombstones_prior_live_windows_for_same_path(tmp_path: Path):
     target = tmp_path / "write_missing.txt"
     target.write_text("gone soon\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_read")
-    items.append(
-        TurnItem(
-            call_id="call_read",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
-    rev = read_result.prokaryotes_annotations["file_tool.revision"]
+    await tool.call(_read_args(target), "call_read")
+    rev = windows[-1].revision
 
     target.unlink()
     write_result = await tool.call(_replace_args(target, rev, 1, 1, "replacement\n"), "call_write")
 
-    tombstoned = items[1]
+    tombstoned = next(w for w in windows if w.window_id == "call_read")
     assert write_result.output.startswith("ERROR FileNotFoundError")
-    assert tombstoned.prokaryotes_annotations["file_tool.status"] == "stale"
-    assert "no longer accessible" in tombstoned.output
-    assert "FileNotFoundError" in tombstoned.output
+    assert tombstoned.status == "stale"
+    assert tombstoned.source_kind == "tombstone"
+    assert "no longer accessible" in tombstoned.rendered_output
+    assert "FileNotFoundError" in tombstoned.rendered_output
 
 
 @pytest.mark.asyncio
-async def test_write_refreshes_same_round_read_result_before_partition_append(tmp_path: Path):
+async def test_write_refreshes_same_round_read_window(tmp_path: Path):
+    """A read in the same turn mints a window; a subsequent write at the read's revision refreshes that window
+    in place. Replaces the previous test that asserted on the TurnItem's annotation — same behavior, working
+    against `WorkingFileWindow` state."""
     target = tmp_path / "same_round.txt"
     target.write_text("before\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_read")
+    await tool.call(_read_args(target), "call_read")
     write_result = await tool.call(
         _replace_args(target, _hash("before\n"), 1, 1, "after\n"),
         "call_write",
     )
 
     assert write_result.output.startswith("EDITED ")
-    assert read_result.prokaryotes_annotations["file_tool.revision"] == _hash("after\n")
-    assert "1 | after" in read_result.output
-    assert "1 | before" not in read_result.output
+    read_window = next(w for w in windows if w.window_id == "call_read")
+    assert read_window.revision == _hash("after\n")
+    assert "1 | after" in read_window.rendered_output
+    assert "1 | before" not in read_window.rendered_output
 
 
 @pytest.mark.asyncio
-async def test_pending_result_items_are_pruned_after_partition_append(tmp_path: Path):
-    target = tmp_path / "pending.txt"
-    target.write_text("before\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
-
-    read_result = await tool.call(_read_args(target), "call_read")
-    assert sum(item is read_result for item in tool._refreshable_items()) == 1
-
-    items.append(
-        TurnItem(
-            call_id="call_read",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
-    refreshable_items = tool._refreshable_items()
-
-    assert sum(item is read_result for item in refreshable_items) == 1
-    assert tool._pending_result_items == []
-
-
-@pytest.mark.asyncio
-async def test_reconcile_tracked_files_tombstones_when_path_disappears(tmp_path: Path):
+async def test_reconcile_working_files_tombstones_when_path_disappears(tmp_path: Path):
     target = tmp_path / "vanishing.txt"
     target.write_text("here today\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_t")
-    items.append(
-        TurnItem(
-            call_id="call_t",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
+    await tool.call(_read_args(target), "call_t")
 
     target.unlink()
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    tombstoned = items[1]
-    assert tombstoned.prokaryotes_annotations["file_tool.status"] == "stale"
-    assert "no longer accessible" in tombstoned.output
-    assert "FileNotFoundError" in tombstoned.output
+    tombstoned = windows[0]
+    assert tombstoned.status == "stale"
+    assert tombstoned.source_kind == "tombstone"
+    assert "no longer accessible" in tombstoned.rendered_output
+    assert "FileNotFoundError" in tombstoned.rendered_output
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tracked_files_tombstones_when_path_now_escapes_workspace(tmp_path: Path):
+async def test_reconcile_working_files_tombstones_when_path_now_escapes_workspace(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside_dir = tmp_path / "outside"
@@ -1359,92 +1232,83 @@ async def test_reconcile_tracked_files_tombstones_when_path_now_escapes_workspac
     outside = outside_dir / "secret.txt"
     target.write_text("inside\n", encoding="utf-8")
     outside.write_text("outside\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=workspace)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=workspace)
 
-    read_result = await tool.call(_read_args(target), "call_escape")
-    items.append(
-        TurnItem(
-            call_id="call_escape",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
+    await tool.call(_read_args(target), "call_escape")
 
     target.unlink()
     target.symlink_to(outside)
-    await reconcile_tracked_files(items, workspace_root=workspace)
+    await reconcile_working_files(
+        windows,
+        workspace_root=workspace,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
+    )
 
-    tombstoned = items[1]
-    assert tombstoned.prokaryotes_annotations["file_tool.status"] == "stale"
-    assert "no longer accessible" in tombstoned.output
-    assert "ValueError" in tombstoned.output
-    assert "outside" not in tombstoned.output
+    tombstoned = windows[0]
+    assert tombstoned.status == "stale"
+    assert tombstoned.source_kind == "tombstone"
+    assert "no longer accessible" in tombstoned.rendered_output
+    assert "ValueError" in tombstoned.rendered_output
+    assert "outside" not in tombstoned.rendered_output
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tracked_files_skips_items_already_at_current_revision(tmp_path: Path):
+async def test_reconcile_working_files_skips_items_already_at_current_revision(tmp_path: Path):
     target = tmp_path / "stable.txt"
     target.write_text("unchanged\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_s")
-    items.append(
-        TurnItem(
-            call_id="call_s",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
+    await tool.call(_read_args(target), "call_s")
+    output_before = windows[0].rendered_output
+
+    await reconcile_working_files(
+        windows,
+        workspace_root=tmp_path,
+        max_file_bytes=FileTool.max_file_bytes,
+        max_lines=FileTool.max_lines,
     )
-    items.append(read_result)
-    output_before = read_result.output
 
-    await reconcile_tracked_files(items, workspace_root=tmp_path)
-
-    assert items[1].output == output_before
+    assert windows[0].rendered_output == output_before
 
 
-def test_refresh_live_windows_handles_multiple_views_into_same_path():
+def test_refresh_windows_for_path_handles_multiple_views_into_same_path():
     text_v1 = "a\nb\nc\nd\ne\n"
     text_v2 = "A\nB\nC\nD\nE\n"
     rev_v1 = _hash(text_v1)
     rev_v2 = _hash(text_v2)
-    item_first = TurnItem(
-        call_id="c1",
-        type="function_call_output",
-        output="placeholder",
-        prokaryotes_annotations={
-            "file_tool.path": "/tmp/x",
-            "file_tool.revision": rev_v1,
-            "file_tool.status": "live",
-            "file_tool.view_start_line": "1",
-            "file_tool.view_end_line": "3",
-        },
+    win_first = WorkingFileWindow(
+        window_id="c1",
+        path="/tmp/x",
+        status="live",
+        revision=rev_v1,
+        rendered_output="placeholder",
+        view_start_line=1,
+        view_end_line=3,
+        requested_end_line=None,
+        source_kind="read_lines",
     )
-    item_second = TurnItem(
-        call_id="c2",
-        type="function_call_output",
-        output="placeholder",
-        prokaryotes_annotations={
-            "file_tool.path": "/tmp/x",
-            "file_tool.revision": rev_v1,
-            "file_tool.status": "live",
-            "file_tool.view_start_line": "3",
-            "file_tool.view_end_line": "5",
-        },
+    win_second = WorkingFileWindow(
+        window_id="c2",
+        path="/tmp/x",
+        status="live",
+        revision=rev_v1,
+        rendered_output="placeholder",
+        view_start_line=3,
+        view_end_line=5,
+        requested_end_line=None,
+        source_kind="read_lines",
     )
 
-    refreshed_count = _refresh_live_windows([item_first, item_second], "/tmp/x", text_v2, rev_v2, FileTool.max_lines)
+    refreshed_count = refresh_windows_for_path([win_first, win_second], "/tmp/x", text_v2, rev_v2, FileTool.max_lines)
 
     assert refreshed_count == 2
-    assert item_first.prokaryotes_annotations["file_tool.revision"] == rev_v2
-    assert "1 | A" in item_first.output
-    assert item_second.prokaryotes_annotations["file_tool.revision"] == rev_v2
-    assert "3 | C" in item_second.output
+    assert win_first.revision == rev_v2
+    assert "1 | A" in win_first.rendered_output
+    assert win_second.revision == rev_v2
+    assert "3 | C" in win_second.rendered_output
 
 
 def test_render_view_returns_empty_view_past_eof():
@@ -1468,55 +1332,52 @@ def test_render_view_honors_requested_end_line():
     assert end_line == 3
 
 
-def test_refresh_live_windows_preserves_exact_requested_range():
+def test_refresh_windows_for_path_preserves_exact_requested_range():
     text_v1 = "a\nb\nc\nd\ne\n"
     text_v2 = "A\nB\nC\nD\nE\nF\n"
     rev_v1 = _hash(text_v1)
     rev_v2 = _hash(text_v2)
-    item = TurnItem(
-        call_id="c1",
-        type="function_call_output",
-        output="placeholder",
-        prokaryotes_annotations={
-            "file_tool.path": "/tmp/x",
-            "file_tool.revision": rev_v1,
-            "file_tool.status": "live",
-            "file_tool.view_start_line": "2",
-            "file_tool.view_end_line": "3",
-            "file_tool.requested_end_line": "3",
-        },
+    window = WorkingFileWindow(
+        window_id="c1",
+        path="/tmp/x",
+        status="live",
+        revision=rev_v1,
+        rendered_output="placeholder",
+        view_start_line=2,
+        view_end_line=3,
+        requested_end_line=3,
+        source_kind="read_lines",
     )
 
-    refreshed_count = _refresh_live_windows([item], "/tmp/x", text_v2, rev_v2, FileTool.max_lines)
+    refreshed_count = refresh_windows_for_path([window], "/tmp/x", text_v2, rev_v2, FileTool.max_lines)
 
     assert refreshed_count == 1
-    assert item.prokaryotes_annotations["file_tool.revision"] == rev_v2
-    assert item.prokaryotes_annotations["file_tool.view_end_line"] == "3"
-    assert "2 | B" in item.output
-    assert "3 | C" in item.output
-    assert "4 | D" not in item.output
+    assert window.revision == rev_v2
+    assert window.view_end_line == 3
+    assert "2 | B" in window.rendered_output
+    assert "3 | C" in window.rendered_output
+    assert "4 | D" not in window.rendered_output
 
 
-def test_refresh_live_windows_returns_zero_for_already_current_items():
+def test_refresh_windows_for_path_returns_zero_for_already_current_items():
     text = "a\nb\n"
     rev = _hash(text)
-    item = TurnItem(
-        call_id="c1",
-        type="function_call_output",
-        output="original",
-        prokaryotes_annotations={
-            "file_tool.path": "/tmp/x",
-            "file_tool.revision": rev,
-            "file_tool.status": "live",
-            "file_tool.view_start_line": "1",
-            "file_tool.view_end_line": "2",
-        },
+    window = WorkingFileWindow(
+        window_id="c1",
+        path="/tmp/x",
+        status="live",
+        revision=rev,
+        rendered_output="original",
+        view_start_line=1,
+        view_end_line=2,
+        requested_end_line=None,
+        source_kind="read_lines",
     )
 
-    refreshed_count = _refresh_live_windows([item], "/tmp/x", text, rev, FileTool.max_lines)
+    refreshed_count = refresh_windows_for_path([window], "/tmp/x", text, rev, FileTool.max_lines)
 
     assert refreshed_count == 0
-    assert item.output == "original"
+    assert window.rendered_output == "original"
 
 
 @pytest.mark.asyncio
@@ -1524,8 +1385,10 @@ async def test_concurrent_writes_same_path_yield_one_edit_one_conflict(tmp_path:
     target = tmp_path / "shared.txt"
     target.write_text("x\n", encoding="utf-8")
     rev_a = _hash("x\n")
-    tool_a = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
-    tool_b = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows_a: list[WorkingFileWindow] = []
+    windows_b: list[WorkingFileWindow] = []
+    tool_a = FileTool(working_file_provider=lambda: windows_a, workspace_root=tmp_path)
+    tool_b = FileTool(working_file_provider=lambda: windows_b, workspace_root=tmp_path)
 
     result_a, result_b = await asyncio.gather(
         tool_a.call(_replace_args(target, rev_a, 1, 1, "A\n"), "call_a"),
@@ -1537,8 +1400,11 @@ async def test_concurrent_writes_same_path_yield_one_edit_one_conflict(tmp_path:
     assert sum(o.startswith("CONFLICT ") for o in outputs) == 1
     final = target.read_text(encoding="utf-8")
     assert final in {"A\n", "B\n"}
-    conflict_result = result_a if result_a.output.startswith("CONFLICT ") else result_b
-    assert conflict_result.prokaryotes_annotations["file_tool.revision"] == _hash(final)
+    # Whichever tool ran the CONFLICT minted a diagnostic window at the current revision.
+    conflict_windows = windows_a if result_a.output.startswith("CONFLICT ") else windows_b
+    conflict_window = conflict_windows[-1]
+    assert conflict_window.source_kind == "conflict"
+    assert conflict_window.revision == _hash(final)
 
 
 @pytest.mark.asyncio
@@ -1547,8 +1413,8 @@ async def test_concurrent_writes_different_paths_do_not_block_each_other(tmp_pat
     target_b = tmp_path / "b.txt"
     target_a.write_text("a\n", encoding="utf-8")
     target_b.write_text("b\n", encoding="utf-8")
-    tool_a = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
-    tool_b = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool_a = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
+    tool_b = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     result_a, result_b = await asyncio.gather(
         tool_a.call(_replace_args(target_a, _hash("a\n"), 1, 1, "A\n"), "call_a"),
@@ -1577,20 +1443,11 @@ async def test_get_path_lock_returns_same_instance_for_same_path(tmp_path: Path)
 async def test_conflict_refreshes_prior_live_windows_for_same_path(tmp_path: Path):
     target = tmp_path / "drift.txt"
     target.write_text("old1\nold2\n", encoding="utf-8")
-    items: list[TurnItem] = []
-    tool = FileTool(view_provider=lambda: items, workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
-    read_result = await tool.call(_read_args(target), "call_read")
-    items.append(
-        TurnItem(
-            call_id="call_read",
-            name="file_tool",
-            arguments=_read_args(target),
-            type="function_call",
-        )
-    )
-    items.append(read_result)
-    rev_a = read_result.prokaryotes_annotations["file_tool.revision"]
+    await tool.call(_read_args(target), "call_read")
+    rev_a = windows[-1].revision
 
     target.write_text("new1\nnew2\nnew3\n", encoding="utf-8")
     rev_b = _hash("new1\nnew2\nnew3\n")
@@ -1601,12 +1458,14 @@ async def test_conflict_refreshes_prior_live_windows_for_same_path(tmp_path: Pat
     )
 
     assert write_result.output.startswith("CONFLICT ")
-    assert write_result.prokaryotes_annotations["file_tool.revision"] == rev_b
-    refreshed = items[1]
-    assert refreshed.prokaryotes_annotations["file_tool.revision"] == rev_b
-    assert refreshed.prokaryotes_annotations["file_tool.status"] == "live"
-    assert "1 | new1" in refreshed.output
-    assert "3 | new3" in refreshed.output
+    conflict_window = next(w for w in windows if w.window_id == "call_write")
+    assert conflict_window.revision == rev_b
+    assert conflict_window.source_kind == "conflict"
+    refreshed = next(w for w in windows if w.window_id == "call_read")
+    assert refreshed.revision == rev_b
+    assert refreshed.status == "live"
+    assert "1 | new1" in refreshed.rendered_output
+    assert "3 | new3" in refreshed.rendered_output
 
 
 @pytest.mark.asyncio
@@ -1614,7 +1473,7 @@ async def test_flock_alone_serializes_concurrent_locked_write_transactions(tmp_p
     target = tmp_path / "flock_target.txt"
     target.write_text("v0\n", encoding="utf-8")
     rev = _hash("v0\n")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
 
     args_a = {
         "action": "replace_lines",
@@ -1663,7 +1522,8 @@ async def test_flock_alone_serializes_concurrent_locked_write_transactions(tmp_p
 async def test_read_waits_for_same_path_lock_before_snapshotting(tmp_path: Path):
     target = tmp_path / "locked_read.txt"
     target.write_text("initial\n", encoding="utf-8")
-    tool = FileTool(view_provider=lambda: [], workspace_root=tmp_path)
+    windows: list[WorkingFileWindow] = []
+    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
     path_lock = reads._get_path_lock(str(target.resolve()))
 
     async with path_lock:
@@ -1674,9 +1534,9 @@ async def test_read_waits_for_same_path_lock_before_snapshotting(tmp_path: Path)
         target.write_text("final\n", encoding="utf-8")
 
     result = await asyncio.wait_for(read_task, timeout=5)
-    assert result.prokaryotes_annotations["file_tool.revision"] == _hash("final\n")
     assert "1 | final" in result.output
     assert "partial" not in result.output
+    assert windows[-1].revision == _hash("final\n")
 
 
 @pytest.mark.asyncio

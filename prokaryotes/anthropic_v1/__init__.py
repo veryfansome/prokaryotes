@@ -39,8 +39,7 @@ class AnthropicClient(LLMClient):
         model: str,
         reasoning_effort: str | None = None,
     ) -> str:
-        thinking_budget = {"low": 1024, "medium": 2048, "high": 4096}.get(reasoning_effort or "")
-        thinking = {"type": "enabled", "budget_tokens": thinking_budget} if thinking_budget else None
+        thinking = _thinking_param(reasoning_effort)
         messages = _items_to_anthropic_messages(items)
         params: dict[str, Any] = {
             "model": model,
@@ -79,8 +78,7 @@ class AnthropicClient(LLMClient):
         tool_params = (
             [cb.tool_spec.to_anthropic_tool_param() for cb in tool_callbacks.values()] if tool_callbacks else None
         )
-        thinking_budget = {"low": 1024, "medium": 2048, "high": 4096}.get(reasoning_effort or "")
-        thinking = {"type": "enabled", "budget_tokens": thinking_budget} if thinking_budget else None
+        thinking = _thinking_param(reasoning_effort)
         tool_call_rounds = 0
 
         # Working buffer: initialized from the projection, grows with tool_use/result blocks, discarded when
@@ -290,3 +288,9 @@ def _items_to_anthropic_messages(items: list[ProjectedItem]) -> list[dict]:
 
     flush()
     return messages
+
+
+def _thinking_param(reasoning_effort: str | None) -> dict | None:
+    """Map a reasoning-effort level to an Anthropic `thinking` param, or `None` when extended thinking is off."""
+    budget = {"low": 1024, "medium": 2048, "high": 4096}.get(reasoning_effort or "")
+    return {"type": "enabled", "budget_tokens": budget} if budget else None

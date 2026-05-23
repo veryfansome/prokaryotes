@@ -1,13 +1,23 @@
-"""Compaction lifecycle: lift step, CAS swap, parent marking, relabel-target write.
+"""Compaction lifecycle: pre_tail filter on working files, CAS swap, parent marking, relabel-target write.
 
-The lift step computes `lifted_turn_items` and `lifted_anchor_source_id` for the child snapshot before
-summarization, then swaps the child into Redis atomically. After commit, the parent is marked `is_compacted=true`
-(its `messages_json` is retained — the DAG-scoped guardrail requires walking the parent chain after compaction), and
-`compaction_status:{pending_snapshot_uuid}` is written to Redis with the child's `snapshot_uuid` as the relabel
-target.
+The compactor carries `working_file_windows` forward from the **live Redis snapshot at CAS time** (not the
+deep-copy `snapshot` taken at compaction start), filtered so that windows whose originating file-tool `call_id`
+lives in the pre-tail `TurnExecution.items` are dropped. The keep buckets are recency-tail-minted windows
+(call_id in recency-tail TurnExecutions), post-snapshot-turn-minted windows (call_id in a TurnExecution that may
+not have been written yet at CAS time, but never in pre_tail), and carryforward windows (call_id nowhere in
+current TurnExecutions). This filter is race-safe by construction: `pre_tail_turns` is loaded in
+`_prepare_compaction` well before CAS, and `finalize_turn` writes the Redis conversation before the
+TurnExecution — so a post-snapshot turn's call_id can be invisible to the CAS-time TurnExecution read while its
+window is already visible in `current.working_file_windows`. The pre_tail bucket is well-known, so the
+"NOT in pre_tail" check is unaffected.
 
-The recency-tail / live-window stripping is invoked via `compact_fn`; callers (WebHarness) build the summarization
-input.
+After commit, the parent is marked `is_compacted=true` (its `messages_json` is retained — the DAG-scoped
+guardrail requires walking the parent chain after compaction), and `compaction_status:{pending_snapshot_uuid}`
+is written to Redis with the child's `snapshot_uuid` as the relabel target.
+
+The summarization step is invoked via `compact_fn`; callers (WebHarness) build the summarization input — it now
+projects `pre_tail_conv` with `working_file_windows=[]` and `ancestor_summaries=[]`, so live file bodies and
+prior summaries don't fossilize into the new summary.
 """
 
 from __future__ import annotations
@@ -21,15 +31,11 @@ from typing import Any
 
 from redis.exceptions import WatchError
 
-from prokaryotes.context_v1.conversation_sync import (
-    ConversationSyncer,
-    _active_paths_in_turns,
-)
+from prokaryotes.context_v1.conversation_sync import ConversationSyncer
 from prokaryotes.conversation_v1.models import (
     Conversation,
     ConversationMessage,
     TurnExecution,
-    TurnItem,
     compute_boundary_hash,
     compute_tail_hash,
 )
@@ -46,12 +52,6 @@ _NO_RELABEL_SENTINEL = ""
 
 
 @dataclass
-class _LiftPlan:
-    lifted_turn_items: list[TurnItem]
-    lifted_anchor_source_id: str | None
-
-
-@dataclass
 class _CompactionPrep:
     """Internal handoff between snapshot and CAS swap."""
 
@@ -60,7 +60,6 @@ class _CompactionPrep:
     tail_offset: int
     pre_tail_turns: dict[str, TurnExecution]
     recency_tail_turns: dict[str, TurnExecution]
-    lift_plan: _LiftPlan
 
 
 class ConversationCompactor(ConversationSyncer):
@@ -75,11 +74,10 @@ class ConversationCompactor(ConversationSyncer):
         lock_key: str,
         snapshot: Conversation,
     ) -> None:
-        """Snapshot → lift plan → summarize → CAS swap → mark parent compacted.
+        """Snapshot → summarize → CAS swap (with pre_tail working-file filter) → mark parent compacted.
 
         `compact_fn(snapshot, prep)` produces the summary text. The prep object carries the pre-tail/recency-tail
-        split and loaded TurnExecutions so the summarizer can strip live-window bodies before projection without
-        re-fetching anything.
+        split and loaded TurnExecutions; the summarization input projection happens in `compact_fn`.
         """
         try:
             prep = await self._prepare_compaction(snapshot)
@@ -105,7 +103,6 @@ class ConversationCompactor(ConversationSyncer):
             boundary_hash = compute_boundary_hash(boundary_messages)
             tail_hash = compute_tail_hash(boundary_messages, snapshot.bot_author_id)
             boundary_message_count = len(boundary_messages)
-            boundary_user_count = sum(1 for msg in boundary_messages if msg.author_id != snapshot.bot_author_id)
 
             swapped = await self._cas_swap_child(
                 conversation_uuid=conversation_uuid,
@@ -121,7 +118,7 @@ class ConversationCompactor(ConversationSyncer):
                 return
 
             # `refresh="wait_for"`: marking the child committed makes it findable by `find_latest_active_child`. A
-            # post-compaction `_rebuild_from_chain` (cold Redis) recovers the child's lifted state through that
+            # post-compaction `_rebuild_from_chain` (cold Redis) recovers the child's working-file state through that
             # search, so the committed transition must be searchable before this background task returns. This runs
             # off the request path, so the refresh wait costs no interactive latency.
             await _retry_compaction_search_write(
@@ -142,7 +139,6 @@ class ConversationCompactor(ConversationSyncer):
                     summary=summary,
                     boundary_hash=boundary_hash,
                     boundary_message_count=boundary_message_count,
-                    boundary_user_count=boundary_user_count,
                     tail_hash=tail_hash,
                 ),
             )
@@ -193,16 +189,19 @@ class ConversationCompactor(ConversationSyncer):
                         return None
 
                     post_snapshot_messages = current.messages[len(snapshot.messages) :]
+                    pre_tail_call_ids = _file_tool_call_ids_in(prep.pre_tail_turns)
+                    carried_windows = [
+                        w for w in current.working_file_windows if w.window_id not in pre_tail_call_ids
+                    ]
                     swapped = Conversation(
                         conversation_uuid=conversation_uuid,
                         snapshot_uuid=child_snapshot_uuid,
                         parent_snapshot_uuid=snapshot.snapshot_uuid,
                         bot_author_id=snapshot.bot_author_id,
                         ancestor_summaries=snapshot.ancestor_summaries + [summary],
-                        lifted_turn_items=prep.lift_plan.lifted_turn_items,
-                        lifted_anchor_source_id=prep.lift_plan.lifted_anchor_source_id,
                         raw_message_start_index=snapshot.raw_message_start_index + prep.tail_offset,
                         messages=prep.recency_tail_messages + post_snapshot_messages,
+                        working_file_windows=carried_windows,
                     )
 
                     async def put_child(
@@ -215,7 +214,7 @@ class ConversationCompactor(ConversationSyncer):
                         )
 
                     await _retry_compaction_search_write(
-                        f"persist child snapshot {swapped.snapshot_uuid}",
+                        f"persist pending child snapshot {child_snapshot_uuid}",
                         put_child,
                     )
 
@@ -226,19 +225,19 @@ class ConversationCompactor(ConversationSyncer):
                         ex=self.conversation_cache_ex,
                     )
                     await pipe.execute()
-                    logger.info(
-                        "Compaction complete: new snapshot %s (parent %s)",
-                        swapped.snapshot_uuid,
-                        snapshot.snapshot_uuid,
-                    )
                     return swapped
                 except WatchError:
-                    logger.info("Compaction Redis swap contended; retrying")
+                    logger.info("WatchError on compaction swap; retrying")
                     await pipe.reset()
+                    continue
 
     async def _prepare_compaction(self, snapshot: Conversation) -> _CompactionPrep:
-        """Build the pre-tail/recency-tail split, load TurnExecutions for both windows, and compute the lift plan.
-        Pure read step — no writes."""
+        """Build the pre-tail/recency-tail split and load TurnExecutions for both windows. Pure read step.
+
+        `pre_tail_turns` is loaded here, well before the CAS swap. The CAS swap's pre_tail-call_id working-file
+        filter reads from this set only — it does **not** re-query post-snapshot TurnExecutions at CAS time, which
+        would race against `finalize_turn`'s write order (Redis conversation before TurnExecution).
+        """
         recency_tail, tail_offset = _recency_tail_messages(
             snapshot.messages,
             snapshot.bot_author_id,
@@ -251,7 +250,6 @@ class ConversationCompactor(ConversationSyncer):
                 tail_offset=0,
                 pre_tail_turns={},
                 recency_tail_turns={},
-                lift_plan=_LiftPlan(lifted_turn_items=[], lifted_anchor_source_id=None),
             )
 
         tail_start = len(snapshot.messages) - len(recency_tail)
@@ -268,22 +266,12 @@ class ConversationCompactor(ConversationSyncer):
             snapshot.conversation_uuid, recency_tail_bot_ids
         )
 
-        lift_plan = _compute_lift_plan(
-            pre_tail_messages=pre_tail_messages,
-            recency_tail_messages=recency_tail,
-            pre_tail_turns=pre_tail_turns,
-            recency_tail_turns=recency_tail_turns,
-            parent_lifted=snapshot.lifted_turn_items,
-            bot_author_id=snapshot.bot_author_id,
-        )
-
         return _CompactionPrep(
             pre_tail_messages=pre_tail_messages,
             recency_tail_messages=recency_tail,
             tail_offset=tail_offset,
             pre_tail_turns=pre_tail_turns,
             recency_tail_turns=recency_tail_turns,
-            lift_plan=lift_plan,
         )
 
     async def _write_compaction_status(
@@ -310,80 +298,24 @@ class ConversationCompactor(ConversationSyncer):
             )
 
 
-def _compute_lift_plan(
-    *,
-    pre_tail_messages: list[ConversationMessage],
-    recency_tail_messages: list[ConversationMessage],
-    pre_tail_turns: dict[str, TurnExecution],
-    recency_tail_turns: dict[str, TurnExecution],
-    parent_lifted: list[TurnItem],
-    bot_author_id: str,
-) -> _LiftPlan:
-    """Determine active paths from the new raw window's TurnExecutions, lift pre-tail TurnItems + parent's
-    already-lifted items whose path is active, and choose the anchor bot. Invariant: anchor=None iff
-    lifted_turn_items==[]."""
-    active_paths = _active_paths_in_turns(recency_tail_turns)
-    if not active_paths:
-        return _LiftPlan(lifted_turn_items=[], lifted_anchor_source_id=None)
+def _file_tool_call_ids_in(turns: dict[str, TurnExecution]) -> set[str]:
+    """Collect file-tool `function_call.call_id`s across the given `TurnExecution`s.
 
-    candidates: list[TurnItem] = []
-    for msg in pre_tail_messages:
-        if msg.deleted or msg.author_id != bot_author_id:
-            continue
-        turn = pre_tail_turns.get(msg.source_id)
-        if turn is not None:
-            candidates.extend(turn.items)
-    candidates.extend(parent_lifted)
-
-    by_call_id: dict[str, TurnItem] = {}
-    for item in candidates:
-        if item.type == "function_call":
-            cid = item.call_id or item.id
-            if cid is not None:
-                by_call_id[cid] = item
-
-    fresh_paths = _paths_freshly_read_in_window(recency_tail_turns)
-
-    lifted: list[TurnItem] = []
-    for item in candidates:
-        if item.type != "function_call_output":
-            continue
-        ann = item.prokaryotes_annotations or {}
-        if ann.get("file_tool.status") != "live":
-            continue
-        path = ann.get("file_tool.path")
-        if path not in active_paths:
-            continue
-        if path in fresh_paths:
-            # Superseded by a fresh read in the new raw window — let that pair represent it.
-            continue
-        cid = item.call_id or item.id
-        if cid is None:
-            continue
-        function_call_item = by_call_id.get(cid)
-        if function_call_item is None:
-            continue
-        lifted.append(function_call_item)
-        lifted.append(item)
-
-    anchor: str | None = None
-    for msg in recency_tail_messages:
-        if msg.deleted or msg.author_id != bot_author_id:
-            continue
-        turn = recency_tail_turns.get(msg.source_id)
-        if turn is None:
-            continue
-        if any(
-            (item.prokaryotes_annotations or {}).get("file_tool.path")
-            and (item.prokaryotes_annotations or {}).get("file_tool.status") != "stale"
-            for item in turn.items
-        ):
-            anchor = msg.source_id
-            break
-
-    if not lifted or anchor is None:
-        return _LiftPlan(lifted_turn_items=[], lifted_anchor_source_id=None)
-    return _LiftPlan(lifted_turn_items=lifted, lifted_anchor_source_id=anchor)
+    Used by the CAS-time working-file filter: a window whose `window_id` lives in this set originated in one of
+    the supplied turns. With `pre_tail_turns` as input, the result is the universe of pre-compaction file-tool
+    calls; windows in that universe are dropped during carry-forward.
+    """
+    call_ids: set[str] = set()
+    for turn in turns.values():
+        for item in turn.items:
+            if item.type != "function_call":
+                continue
+            if item.name != "file_tool":
+                continue
+            call_id = item.call_id or item.id
+            if call_id is not None:
+                call_ids.add(call_id)
+    return call_ids
 
 
 def _messages_match_prefix(
@@ -391,30 +323,10 @@ def _messages_match_prefix(
     snapshot: list[ConversationMessage],
 ) -> bool:
     """The Conversation prefix check at the CAS swap step. Messages are append-only with `deleted`/`edited` flags,
-    so prefix equality is structural — no `mod_live_windows` carve-out is needed (live-window mutation lives in
-    `TurnExecution` items, which the CAS step does not touch)."""
+    so prefix equality is structural."""
     if len(current) < len(snapshot):
         return False
     return current[: len(snapshot)] == snapshot
-
-
-def _paths_freshly_read_in_window(
-    turns: dict[str, TurnExecution],
-) -> set[str]:
-    """Paths with a live `function_call_output` in the recency tail. A prior lifted pair for the same path is
-    superseded by such a fresh read; we let the new pair carry forward instead of duplicating."""
-    fresh: set[str] = set()
-    for turn in turns.values():
-        for item in turn.items:
-            if item.type != "function_call_output":
-                continue
-            ann = item.prokaryotes_annotations or {}
-            if ann.get("file_tool.status") != "live":
-                continue
-            path = ann.get("file_tool.path")
-            if path:
-                fresh.add(path)
-    return fresh
 
 
 def _recency_tail_messages(
@@ -459,6 +371,5 @@ async def _retry_compaction_search_write(
                 attempt_idx + 1,
                 total_attempts,
                 delay,
-                exc_info=True,
             )
             await asyncio.sleep(delay)

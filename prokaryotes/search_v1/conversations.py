@@ -6,6 +6,9 @@ Two indices:
   ancestors' per-message identity at validation time.
 - `turn-executions` — one doc per bot reply that involved tool calls. Keyed by `bot_message_source_id`. Looked up
   only when projecting a `Conversation` for the LLM, and only for the most recent turn(s) inside the raw window.
+
+Working-file state lives on `Conversation.working_file_windows` and persists alongside the snapshot as
+`working_file_windows_json` (opaque-JSON; same shape as `messages_json`).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from prokaryotes.conversation_v1.models import (
     ConversationMessage,
     TurnExecution,
     TurnItem,
+    WorkingFileWindow,
     compute_boundary_hash,
     compute_tail_hash,
     conversation_message_items,
@@ -44,6 +48,7 @@ def _turn_execution_doc_id(conversation_uuid: str, bot_message_source_id: str) -
     """
     return f"{conversation_uuid}:{bot_message_source_id}"
 
+
 conversation_mappings = {
     "dynamic": "strict",
     "properties": {
@@ -56,13 +61,11 @@ conversation_mappings = {
         "is_compacted": {"type": "boolean"},
         "summary": {"type": "text", "analyzer": "standard"},
         "ancestor_summaries": {"type": "keyword", "index": False, "doc_values": False},
-        "lifted_turn_items_json": {"type": "keyword", "index": False, "doc_values": False},
-        "lifted_anchor_source_id": {"type": "keyword"},
+        "working_file_windows_json": {"type": "keyword", "index": False, "doc_values": False},
         "messages_json": {"type": "keyword", "index": False, "doc_values": False},
         "message_content": {"type": "text", "analyzer": "standard"},
         "raw_message_start_index": {"type": "integer"},
         "boundary_message_count": {"type": "integer"},
-        "boundary_user_count": {"type": "integer"},
         "boundary_hash": {"type": "keyword"},
         "tail_hash": {"type": "keyword"},
         "dt_created": {"type": "date"},
@@ -83,18 +86,6 @@ turn_execution_mappings = {
 }
 
 
-def _committed_or_legacy_clause() -> dict[str, object]:
-    return {
-        "bool": {
-            "should": [
-                {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
-                {"bool": {"must_not": [{"exists": {"field": "compaction_state"}}]}},
-            ],
-            "minimum_should_match": 1,
-        }
-    }
-
-
 def _default_boundary_fields(conversation: Conversation) -> dict[str, object]:
     """Per-snapshot boundary fields (no parent walk).
 
@@ -105,7 +96,6 @@ def _default_boundary_fields(conversation: Conversation) -> dict[str, object]:
     return {
         "raw_message_start_index": conversation.raw_message_start_index,
         "boundary_message_count": conversation.raw_message_start_index + len(non_deleted),
-        "boundary_user_count": sum(1 for msg in non_deleted if msg.author_id != conversation.bot_author_id),
         "boundary_hash": compute_boundary_hash(non_deleted),
         "tail_hash": compute_tail_hash(non_deleted, conversation.bot_author_id),
     }
@@ -116,55 +106,43 @@ def _extract_message_content(messages: list[ConversationMessage]) -> str:
 
 
 def conversation_from_doc(conversation_uuid: str, doc: dict) -> Conversation | None:
-    if doc.get("conversation_uuid") and doc["conversation_uuid"] != conversation_uuid:
+    if doc["conversation_uuid"] != conversation_uuid:
         logger.warning(
             "Ignoring snapshot %s; belongs to conversation %s, not %s",
-            doc.get("snapshot_uuid"),
-            doc.get("conversation_uuid"),
+            doc["snapshot_uuid"],
+            doc["conversation_uuid"],
             conversation_uuid,
         )
-        return None
-    if not doc.get("messages_json"):
         return None
     return Conversation(
         conversation_uuid=conversation_uuid,
         snapshot_uuid=doc["snapshot_uuid"],
         parent_snapshot_uuid=doc.get("parent_snapshot_uuid"),
         bot_author_id=doc["bot_author_id"],
-        ancestor_summaries=doc.get("ancestor_summaries") or [],
-        lifted_turn_items=lifted_turn_items_from_doc(doc),
-        lifted_anchor_source_id=doc.get("lifted_anchor_source_id"),
-        raw_message_start_index=doc.get("raw_message_start_index") or 0,
+        ancestor_summaries=doc["ancestor_summaries"],
+        raw_message_start_index=doc["raw_message_start_index"],
         messages=messages_from_doc(doc),
+        working_file_windows=working_file_windows_from_doc(doc),
     )
 
 
-def lifted_turn_items_from_doc(doc: dict) -> list[TurnItem]:
-    lifted_json = doc.get("lifted_turn_items_json")
-    if not lifted_json:
-        return []
-    payload = json.loads(lifted_json)
-    return [TurnItem.model_validate(item) for item in payload.get("items", [])]
-
-
 def messages_from_doc(doc: dict) -> list[ConversationMessage]:
-    messages_json = doc.get("messages_json")
-    if not messages_json:
-        return []
-    payload = json.loads(messages_json)
-    return [ConversationMessage.model_validate(item) for item in payload.get("messages", [])]
+    payload = json.loads(doc["messages_json"])
+    return [ConversationMessage.model_validate(item) for item in payload["messages"]]
 
 
-def turn_execution_from_doc(doc: dict) -> TurnExecution | None:
-    items_json = doc.get("items_json")
-    if not items_json:
-        return None
-    payload = json.loads(items_json)
+def working_file_windows_from_doc(doc: dict) -> list[WorkingFileWindow]:
+    payload = json.loads(doc["working_file_windows_json"])
+    return [WorkingFileWindow.model_validate(item) for item in payload["windows"]]
+
+
+def turn_execution_from_doc(doc: dict) -> TurnExecution:
+    payload = json.loads(doc["items_json"])
     return TurnExecution(
         conversation_uuid=doc["conversation_uuid"],
         bot_message_source_id=doc["bot_message_source_id"],
-        items=[TurnItem.model_validate(item) for item in payload.get("items", [])],
-        completed=doc.get("completed", False),
+        items=[TurnItem.model_validate(item) for item in payload["items"]],
+        completed=doc["completed"],
     )
 
 
@@ -228,7 +206,7 @@ class ConversationSearcher(ABC):
                 "bool": {
                     "must": [
                         {"term": {"conversation_uuid": conversation_uuid}},
-                        _committed_or_legacy_clause(),
+                        {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
                     ]
                 }
             },
@@ -247,7 +225,7 @@ class ConversationSearcher(ABC):
                         {"term": {"conversation_uuid": conversation_uuid}},
                         {"term": {"tail_hash": tail_hash}},
                         {"term": {"is_compacted": True}},
-                        _committed_or_legacy_clause(),
+                        {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
                     ]
                 }
             },
@@ -256,14 +234,13 @@ class ConversationSearcher(ABC):
         hits = response["hits"]["hits"]
         return hits[0]["_source"] if hits else None
 
-    async def find_latest_active_child(
-        self, conversation_uuid: str, parent_snapshot_uuid: str
-    ) -> dict | None:
+    async def find_latest_active_child(self, conversation_uuid: str, parent_snapshot_uuid: str) -> dict | None:
         """Return the most recently modified committed, non-compacted snapshot whose `parent_snapshot_uuid` matches.
 
-        Used by `_rebuild_from_chain` to recover lifted file-tool state when Redis has been evicted: the compacted
-        ancestor matched but its active descendant still holds `lifted_turn_items` + `lifted_anchor_source_id` that
-        the rebuild result needs to carry forward."""
+        Used by `_rebuild_from_chain` to recover working-file state when Redis has been evicted: the compacted
+        ancestor matched but its active descendant still holds the `working_file_windows` that the rebuild result
+        needs to carry forward (filtered against the rebuild target).
+        """
         response = await self.es.search(
             index=CONVERSATIONS_INDEX,
             query={
@@ -272,7 +249,7 @@ class ConversationSearcher(ABC):
                         {"term": {"conversation_uuid": conversation_uuid}},
                         {"term": {"parent_snapshot_uuid": parent_snapshot_uuid}},
                         {"term": {"is_compacted": False}},
-                        _committed_or_legacy_clause(),
+                        {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
                     ]
                 }
             },
@@ -282,6 +259,34 @@ class ConversationSearcher(ABC):
         hits = response["hits"]["hits"]
         return hits[0]["_source"] if hits else None
 
+    async def find_latest_active_snapshot_uuid(self, conversation_uuid: str) -> str | None:
+        """`snapshot_uuid` of the most recently modified non-compacted committed snapshot for this conversation.
+
+        Used by harnesses with no client echoing a `snapshot_uuid` back (the Slack harness re-attaching a cold thread
+        after Redis eviction). The result seeds the exact-load / ancestor-chain rebuild; `None` means no active
+        snapshot exists (no snapshot at all, or only compacted ones) and the caller should start a fresh
+        `Conversation`.
+
+        `put_conversation` always stamps `compaction_state="committed"`, so a committed-only filter is complete —
+        there are no legacy state-less docs to fall back to.
+        """
+        response = await self.es.search(
+            index=CONVERSATIONS_INDEX,
+            query={
+                "bool": {
+                    "must": [
+                        {"term": {"conversation_uuid": conversation_uuid}},
+                        {"term": {"is_compacted": False}},
+                        {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
+                    ]
+                }
+            },
+            sort=[{"dt_modified": "desc"}],
+            size=1,
+        )
+        hits = response["hits"]["hits"]
+        return hits[0]["_source"]["snapshot_uuid"] if hits else None
+
     async def get_conversation(self, snapshot_uuid: str) -> dict | None:
         try:
             result = await self.es.get(index=CONVERSATIONS_INDEX, id=snapshot_uuid)
@@ -289,9 +294,7 @@ class ConversationSearcher(ABC):
         except Exception:
             return None
 
-    async def get_turn_execution(
-        self, conversation_uuid: str, bot_message_source_id: str
-    ) -> TurnExecution | None:
+    async def get_turn_execution(self, conversation_uuid: str, bot_message_source_id: str) -> TurnExecution | None:
         doc_id = _turn_execution_doc_id(conversation_uuid, bot_message_source_id)
         try:
             result = await self.es.get(index=TURN_EXECUTIONS_INDEX, id=doc_id)
@@ -320,8 +323,7 @@ class ConversationSearcher(ABC):
         out: dict[str, TurnExecution] = {}
         for hit in response["hits"]["hits"]:
             turn = turn_execution_from_doc(hit["_source"])
-            if turn is not None:
-                out[turn.bot_message_source_id] = turn
+            out[turn.bot_message_source_id] = turn
         return out
 
     async def put_conversation(
@@ -350,10 +352,9 @@ class ConversationSearcher(ABC):
             "is_compacted": False,
             "summary": None,
             "ancestor_summaries": conversation.ancestor_summaries,
-            "lifted_turn_items_json": json.dumps(
-                {"items": [item.model_dump() for item in conversation.lifted_turn_items]}
+            "working_file_windows_json": json.dumps(
+                {"windows": [window.model_dump() for window in conversation.working_file_windows]}
             ),
-            "lifted_anchor_source_id": conversation.lifted_anchor_source_id,
             "messages_json": json.dumps({"messages": [m.model_dump() for m in conversation.messages]}),
             "message_content": _extract_message_content(conversation.messages),
             "dt_created": now,
@@ -399,7 +400,7 @@ class ConversationSearcher(ABC):
                 "bool": {
                     "must": [
                         {"term": {"conversation_uuid": conversation_uuid}},
-                        _committed_or_legacy_clause(),
+                        {"term": {"compaction_state": COMPACTION_STATE_COMMITTED}},
                         {
                             "multi_match": {
                                 "query": query,
@@ -424,14 +425,4 @@ class ConversationSearcher(ABC):
             id=snapshot_uuid,
             doc=fields,
             refresh=refresh,
-        )
-
-    async def update_turn_execution(
-        self, conversation_uuid: str, bot_message_source_id: str, **fields
-    ) -> None:
-        fields["dt_modified"] = datetime.now(UTC).isoformat()
-        await self.es.update(
-            index=TURN_EXECUTIONS_INDEX,
-            id=_turn_execution_doc_id(conversation_uuid, bot_message_source_id),
-            doc=fields,
         )

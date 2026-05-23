@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 
 from prokaryotes.api_v1.models import (
     FunctionToolCallback,
@@ -9,24 +11,44 @@ from prokaryotes.api_v1.models import (
     ToolParameters,
     ToolSpec,
 )
-from prokaryotes.conversation_v1.models import ProjectedItem, TurnItem
+from prokaryotes.conversation_v1.models import ProjectedItem, TurnItem, WorkingFileWindow
+from prokaryotes.tools_v1.file_tool.paths import _resolve_path
 
 logger = logging.getLogger(__name__)
 
 
-class ThinkTool(FunctionToolCallback):
-    """Tool to give the model a scratchpad for structured reasoning between tool calls."""
+WorkingFileProvider = Callable[[], list[WorkingFileWindow]]
 
-    def __init__(self, llm_client: LLMClient, model: str, reasoning_effort: str | None = None):
+
+class ThinkTool(FunctionToolCallback):
+    """Tool to give the model a scratchpad for structured reasoning between tool calls.
+
+    Optionally accepts `paths` — workspace-relative or absolute file paths whose active working-file windows
+    (`status == "live"`) should be injected into the think subprompt. This lets the outer model name files it
+    wants the inner think call to ground on without nested tool access. If `paths` is empty or no matching live
+    window exists, the call proceeds without working-file content.
+    """
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        model: str,
+        reasoning_effort: str | None = None,
+        working_file_provider: WorkingFileProvider | None = None,
+        workspace_root: Path | None = None,
+    ):
         self.llm_client = llm_client
         self.model = model
         self.reasoning_effort = reasoning_effort or os.getenv("THINK_TOOL_REASONING_EFFORT", "low")
+        self._working_file_provider = working_file_provider
+        self._workspace_root = workspace_root or Path.cwd()
 
     async def call(self, arguments: str, call_id: str) -> TurnItem | None:
         args = json.loads(arguments)
         context = args["context"]
         goal = args["goal"]
         perspectives = args["perspectives"]
+        paths = args.get("paths") or []
         # Per-call UUID suffixes prevent payload text from closing the delimiters.
         s = uuid.uuid4().hex[:8]
         prompt_parts = [
@@ -89,6 +111,9 @@ class ThinkTool(FunctionToolCallback):
                 f"You MUST address each perspective in <perspectives-{s}>..</perspectives-{s}> with a dedicated"
                 " labeled section in the order listed. Do not merge, skip, or reorder them."
             )
+        working_file_block = self._build_working_file_block(paths, s)
+        if working_file_block is not None:
+            prompt_parts.append(working_file_block)
         instruction = "\n".join(system_parts)
         items = [ProjectedItem(type="message", role="user", content="\n\n".join(prompt_parts))]
         output = await self.llm_client.complete(
@@ -102,6 +127,33 @@ class ThinkTool(FunctionToolCallback):
             call_id=call_id,
             output=output,
             type="function_call_output",
+        )
+
+    def _build_working_file_block(self, paths: list[str], suffix: str) -> str | None:
+        if not paths or self._working_file_provider is None:
+            return None
+        resolved: list[str] = []
+        for raw_path in paths:
+            try:
+                resolved.append(str(_resolve_path(raw_path, self._workspace_root)))
+            except Exception:
+                continue
+        if not resolved:
+            return None
+        resolved_set = set(resolved)
+        windows = [
+            w
+            for w in self._working_file_provider()
+            if w.status == "live" and w.path in resolved_set
+        ]
+        if not windows:
+            return None
+        rendered = "\n\n".join(w.rendered_output for w in windows)
+        return (
+            f"<active-working-files-{suffix}>\n"
+            "The following active working file windows were supplied by the harness:\n\n"
+            f"{rendered}\n"
+            f"</active-working-files-{suffix}>"
         )
 
     @property
@@ -133,6 +185,10 @@ class ThinkTool(FunctionToolCallback):
                 " interpretations, opinions, hypotheses, or conclusions."
             ),
             "  - `perspectives`: choose the angles of analysis most likely to provide useful insights.",
+            (
+                "  - `paths`: name workspace-relative or absolute file paths whose active working-file windows you"
+                " want the inner think call to ground on. Pass an empty list when no file context is needed."
+            ),
             "- You MUST NOT use the think tool for straightforward tasks where the next action is clear.",
         ]
         return lines
@@ -185,7 +241,15 @@ class ThinkTool(FunctionToolCallback):
                             " etc. Use an empty list when multiple perspectives are not needed."
                         ),
                     },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Absolute or workspace-relative file paths whose active working-file windows should be"
+                            " included if available. Use an empty list when no working files are needed."
+                        ),
+                    },
                 },
-                required=["context", "goal", "perspectives"],
+                required=["context", "goal", "paths", "perspectives"],
             ),
         )

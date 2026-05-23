@@ -1,19 +1,19 @@
 """WebHarness._summarize_and_compact — summarization input invariants.
 
-Under the unified model, ancestor summaries are NOT re-fed into the summarization LLM call; they're already
-accumulated on the parent and carry forward to the new compacted child verbatim. The summarization input is the
-pre-tail messages projected, with an explicit summarization prompt as the final user message, and
-`instruction=None`. Live-window bodies are stripped from pre-tail TurnExecutions before projection so current
-file contents don't fossilize into the summary.
+Ancestor summaries and working-file windows are NOT re-fed into the summarization LLM call. The compactor's
+`pre_tail_conv` carries `ancestor_summaries=[]` and `working_file_windows=[]` so summaries-of-summaries and live
+file bodies cannot fossilize into the new summary. The summarization input is the pre-tail messages projected,
+with an explicit summarization prompt as the final user message, and `instruction=None`.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from prokaryotes.context_v1.compaction import _CompactionPrep, _LiftPlan
+from prokaryotes.context_v1.compaction import _CompactionPrep
 from prokaryotes.conversation_v1.models import ProjectedItem, TurnItem
-from prokaryotes.harness_v1.web import _SUMMARIZATION_PROMPT, WebHarness
+from prokaryotes.harness_v1.base import _SUMMARIZATION_PROMPT
+from prokaryotes.harness_v1.web import WebHarness
 from tests.unit_tests._builders import bot_msg, msg, turn
 from tests.unit_tests._llm_fakes import FakeAnthropicClient, LLMRound, LLMScript
 
@@ -26,22 +26,6 @@ def _make_harness() -> tuple[WebHarness, FakeAnthropicClient]:
     harness = object.__new__(WebHarness)
     harness.llm_client = fake
     return harness, fake
-
-
-def _live_window_item(call_id: str, path: str, output: str) -> TurnItem:
-    """A function_call_output annotated as a live file window."""
-    return TurnItem(
-        call_id=call_id,
-        type="function_call_output",
-        output=output,
-        prokaryotes_annotations={
-            "file_tool.path": path,
-            "file_tool.status": "live",
-            "file_tool.revision": "rev1",
-            "file_tool.view_start_line": "1",
-            "file_tool.view_end_line": "3",
-        },
-    )
 
 
 def _function_call(call_id: str, name: str) -> TurnItem:
@@ -60,32 +44,44 @@ def _make_prep_with_pre_tail_turns(pre_tail_turns: dict) -> _CompactionPrep:
         tail_offset=len(pre_tail_messages),
         pre_tail_turns=pre_tail_turns,
         recency_tail_turns={},
-        lift_plan=_LiftPlan(lifted_turn_items=[], lifted_anchor_source_id=None),
     )
 
 
 @pytest.mark.asyncio
-async def test_summarize_strips_live_window_bodies_from_pre_tail():
-    """Live windows in pre-tail TurnExecutions must be replaced with the placeholder so the LLM doesn't
-    fossilize current file contents into `ancestor_summaries`."""
+async def test_summarize_omits_working_file_windows_from_pre_tail_conv():
+    """`pre_tail_conv` is constructed with `working_file_windows=[]`, so the projected items never carry a
+    `<working_files>` block — replacing the older strip_live_window_bodies mechanism."""
+    from prokaryotes.conversation_v1.models import WorkingFileWindow
     from tests.unit_tests._builders import conversation
 
     harness, fake = _make_harness()
-    pre_tail_turns = {
-        "2.000000": turn(
-            "2.000000", _function_call("c1", "file_tool"), _live_window_item("c1", "/tmp/x", "the file body")
-        ),
-    }
-    prep = _make_prep_with_pre_tail_turns(pre_tail_turns)
-    snapshot = conversation(*prep.pre_tail_messages, *prep.recency_tail_messages, snapshot_uuid="s1")
+    prep = _make_prep_with_pre_tail_turns({})
+    snapshot = conversation(
+        *prep.pre_tail_messages,
+        *prep.recency_tail_messages,
+        snapshot_uuid="s1",
+        working_file_windows=[
+            WorkingFileWindow(
+                window_id="c1",
+                path="/tmp/x",
+                status="live",
+                revision="r1",
+                rendered_output="FILE path=/tmp/x revision=r1 status=live\nLIVE-WINDOW-BODY-MARKER",
+                view_start_line=1,
+                view_end_line=3,
+                requested_end_line=3,
+                source_kind="read_lines",
+            )
+        ],
+    )
 
     await harness._summarize_and_compact(model="claude-opus-4-7", snapshot=snapshot, prep=prep)
 
     items = fake.complete_calls[0]["items"]
-    # The body "the file body" must NOT appear in any projected item's content/output.
     for it in items:
         haystack = (it.content or "") + (it.output or "")
-        assert "the file body" not in haystack
+        assert "LIVE-WINDOW-BODY-MARKER" not in haystack
+        assert "<working_files" not in haystack
 
 
 @pytest.mark.asyncio
@@ -175,3 +171,54 @@ async def test_summarize_does_not_inject_ancestor_summaries_into_items():
     for it in items:
         haystack = (it.content or "") + (it.output or "")
         assert "ancestor-summary-marker-XYZ" not in haystack
+
+
+@pytest.mark.asyncio
+async def test_summarize_omits_compacted_summary_block_delimiters():
+    """`project_for_llm` now emits a `<compacted_summary>` block whenever `ancestor_summaries` is non-empty.
+    The compactor must blank that field on its summarization-input snapshot, so no opening or closing
+    delimiter should reach the LLM."""
+    from tests.unit_tests._builders import conversation
+
+    harness, fake = _make_harness()
+    prep = _make_prep_with_pre_tail_turns({})
+    snapshot = conversation(
+        *prep.pre_tail_messages,
+        *prep.recency_tail_messages,
+        snapshot_uuid="s1",
+        ancestor_summaries=["earlier summary should not enter the input"],
+    )
+
+    await harness._summarize_and_compact(model="claude-opus-4-7", snapshot=snapshot, prep=prep)
+
+    items = fake.complete_calls[0]["items"]
+    for it in items:
+        haystack = (it.content or "") + (it.output or "")
+        assert "<compacted_summary" not in haystack
+        assert "</compacted_summary>" not in haystack
+
+
+@pytest.mark.asyncio
+async def test_summarize_opts_out_under_multi_generation_chain():
+    """Multi-generation compaction leaves multiple entries on `ancestor_summaries`. The opt-out must blank
+    all of them, not just the head."""
+    from tests.unit_tests._builders import conversation
+
+    harness, fake = _make_harness()
+    prep = _make_prep_with_pre_tail_turns({})
+    snapshot = conversation(
+        *prep.pre_tail_messages,
+        *prep.recency_tail_messages,
+        snapshot_uuid="s1",
+        ancestor_summaries=["gen-1-marker", "gen-2-marker", "gen-3-marker"],
+    )
+
+    await harness._summarize_and_compact(model="claude-opus-4-7", snapshot=snapshot, prep=prep)
+
+    items = fake.complete_calls[0]["items"]
+    for it in items:
+        haystack = (it.content or "") + (it.output or "")
+        assert "gen-1-marker" not in haystack
+        assert "gen-2-marker" not in haystack
+        assert "gen-3-marker" not in haystack
+        assert "<compacted_summary" not in haystack

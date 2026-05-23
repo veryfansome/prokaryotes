@@ -8,6 +8,7 @@ from prokaryotes.conversation_v1.models import (
     NormalizedMessage,
     TurnExecution,
     TurnItem,
+    WorkingFileWindow,
 )
 
 BOT_ID = "__bot__"
@@ -20,9 +21,8 @@ def conversation(
     snapshot_uuid: str = "s-1",
     parent_snapshot_uuid: str | None = None,
     ancestor_summaries: list[str] | None = None,
-    lifted_turn_items: list[TurnItem] | None = None,
-    lifted_anchor_source_id: str | None = None,
     raw_message_start_index: int = 0,
+    working_file_windows: list[WorkingFileWindow] | None = None,
 ) -> Conversation:
     return Conversation(
         conversation_uuid=conversation_uuid,
@@ -30,10 +30,9 @@ def conversation(
         parent_snapshot_uuid=parent_snapshot_uuid,
         bot_author_id=bot_author_id,
         ancestor_summaries=ancestor_summaries or [],
-        lifted_turn_items=lifted_turn_items or [],
-        lifted_anchor_source_id=lifted_anchor_source_id,
         raw_message_start_index=raw_message_start_index,
         messages=list(messages),
+        working_file_windows=working_file_windows or [],
     )
 
 

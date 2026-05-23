@@ -71,11 +71,9 @@ def _compacted_doc(
         "ancestor_summaries": [],
         "boundary_hash": boundary_hash_override or compute_boundary_hash(boundary),
         "boundary_message_count": boundary_message_count_override or len(boundary),
-        "boundary_user_count": sum(1 for m in boundary if m.author_id != bot_author_id),
         "tail_hash": compute_tail_hash(boundary, bot_author_id),
         "messages_json": json.dumps({"messages": [m.model_dump() for m in boundary]}),
-        "lifted_turn_items_json": json.dumps({"items": []}),
-        "lifted_anchor_source_id": None,
+        "working_file_windows_json": json.dumps({"windows": []}),
         "raw_message_start_index": 0,
     }
 
@@ -263,60 +261,10 @@ async def test_rebuild_from_chain_uses_deepest_valid_compacted_ancestor():
 
 
 @pytest.mark.asyncio
-async def test_rebuild_from_chain_restores_lifted_state_from_active_descendant():
-    """Cold rebuild against a compacted ancestor must restore the descendant's `lifted_turn_items` +
-    `lifted_anchor_source_id`. Without this, a Redis miss with the client anchored at the parent silently drops
-    the file-tool live windows carried forward by compaction."""
-    syncer, _, search = make_syncer()
-    p0_boundary = [msg("1", "U1"), bot_msg("2", "A1")]
-    p1_boundary = p0_boundary + [msg("3", "U2"), bot_msg("4", "A2")]
-
-    # Compacted ancestor (matched_ancestor in the rebuild path).
-    _seed_doc(
-        search,
-        _compacted_doc(boundary=p1_boundary, snapshot_uuid="p1", parent_snapshot_uuid=None, summary="S1"),
-    )
-    # Active descendant the compactor wrote with lifted state.
-    from prokaryotes.conversation_v1.models import TurnItem
-    lifted_items = [
-        TurnItem(type="function_call", call_id="c1", name="file_tool"),
-        TurnItem(type="function_call_output", call_id="c1", output="FILE ..."),
-    ]
-    _seed_doc(
-        search,
-        {
-            "snapshot_uuid": "child",
-            "conversation_uuid": "conv",
-            "parent_snapshot_uuid": "p1",
-            "bot_author_id": BOT_ID,
-            "compaction_state": "committed",
-            "is_compacted": False,
-            "lifted_turn_items_json": json.dumps({"items": [i.model_dump() for i in lifted_items]}),
-            "lifted_anchor_source_id": "4",
-            "raw_message_start_index": len(p1_boundary),
-            "messages_json": json.dumps({"messages": []}),
-            "dt_modified": "2024-01-01T00:00:00",
-        },
-    )
-
-    incoming = p1_boundary + [msg("5", "U3")]
-    rebuilt = await syncer._rebuild_from_chain(
-        conversation_uuid="conv",
-        snapshot_uuid="p1",
-        bot_author_id=BOT_ID,
-        partial=_make_partial(incoming),
-        head_doc=None,
-    )
-
-    assert rebuilt.parent_snapshot_uuid == "p1"
-    assert len(rebuilt.lifted_turn_items) == 2
-    assert rebuilt.lifted_anchor_source_id == "4"
-
-
-@pytest.mark.asyncio
-async def test_rebuild_from_chain_lifted_state_empty_when_no_descendant():
-    """When the compacted ancestor has no active descendant (e.g. orphan parent), rebuilt lifted state is
-    empty — `anchor=None iff lifted_turn_items==[]`."""
+async def test_rebuild_from_chain_working_file_windows_empty_when_no_descendant():
+    """When the compacted ancestor has no active descendant, the rebuild target's working_file_windows is empty.
+    The descendant-based restore is the only path; otherwise the rebuilt branch starts with no working memory.
+    """
     syncer, _, search = make_syncer()
     boundary = [msg("1", "U1"), bot_msg("2", "A1")]
     _seed_doc(
@@ -334,8 +282,7 @@ async def test_rebuild_from_chain_lifted_state_empty_when_no_descendant():
     )
 
     assert rebuilt.parent_snapshot_uuid == "p1"
-    assert rebuilt.lifted_turn_items == []
-    assert rebuilt.lifted_anchor_source_id is None
+    assert rebuilt.working_file_windows == []
 
 
 @pytest.mark.asyncio
@@ -376,13 +323,22 @@ class _StubHarness(HarnessBase):
     def conversation_cache_ex(self) -> int:
         return 3600
 
-    async def finalize_turn(self, *, conversation, bot_message_source_id, bot_message_content, turn_items):
+    async def finalize_turn(
+        self,
+        *,
+        conversation,
+        bot_message_source_id,
+        bot_message_content,
+        turn_items,
+        triggering_source_id,
+    ):
         self._finalize_calls.append(
             {
                 "snapshot_uuid": conversation.snapshot_uuid,
                 "bot_message_source_id": bot_message_source_id,
                 "bot_message_content": bot_message_content,
                 "turn_items": list(turn_items),
+                "triggering_source_id": triggering_source_id,
             }
         )
 
@@ -422,7 +378,6 @@ async def test_stream_and_finalize_emits_handshake_first_and_compaction_pending_
         sync_result=sync_result,
         bot_message_source_id_provider=lambda c: "2.000000",
         response_generator_factory=factory,
-        compact_fn=compact_fn,
         pending_compaction=[True],
     ):
         chunks.append(chunk)
@@ -463,7 +418,6 @@ async def test_stream_and_finalize_skips_duplicate_compaction_when_lock_held():
         sync_result=sync_result,
         bot_message_source_id_provider=lambda c: "2.000000",
         response_generator_factory=factory,
-        compact_fn=compact_fn,
         pending_compaction=[True],
     ):
         chunks.append(chunk)
@@ -491,7 +445,6 @@ async def test_stream_and_finalize_omits_bot_message_when_no_final_text():
         sync_result=sync_result,
         bot_message_source_id_provider=lambda c: "2.000000",
         response_generator_factory=factory,
-        compact_fn=None,
         pending_compaction=None,
     ):
         chunks.append(chunk)

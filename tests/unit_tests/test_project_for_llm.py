@@ -123,82 +123,105 @@ class TestDeletedMessagesSkipped:
         assert contents == ["first", "bot reply"]
 
 
-class TestLiftedItems:
-    def test_lifted_items_emit_before_anchor_bot_turn(self):
-        """Lifted items are inserted immediately before the anchor bot turn's tool round —
-        after any leading user prefix, adjacent to first file activity."""
-        c = conversation(
-            msg("1", "after-compaction question"),
-            bot_msg("2", "anchor bot"),
-            bot_msg("3", "later bot"),
-            lifted_turn_items=[
-                function_call("lifted-call", "FileTool", arguments='{"path": "/a"}'),
-                function_call_output("lifted-call", "<file body>"),
-            ],
-            lifted_anchor_source_id="2",
-        )
-        historical_turns = {
-            "2": turn(
-                "2",
-                function_call("turn-call", "FileTool"),
-                function_call_output("turn-call", "ok"),
-            ),
-        }
-        items = project_for_llm(c, historical_turns)
-        types = [p.type for p in items]
-        # user, lifted call+output, anchor's call+output, merged bot ("anchor bot\n\nlater bot")
-        assert types == [
-            "message",
-            "function_call",
-            "function_call_output",
-            "function_call",
-            "function_call_output",
-            "message",
-        ]
-        assert items[-1].role == "assistant"
-        assert items[-1].content == "anchor bot\n\nlater bot"
-        # Lifted call leads; identified by its arguments
-        call_args = [p.arguments for p in items if p.type == "function_call"]
-        assert call_args[0] == '{"path": "/a"}'
-        assert call_args[1] is None or call_args[1] == "{}"
-
-    def test_lifted_items_skipped_when_anchor_is_later_bot(self):
-        """Anchor at a later bot puts lifted items between earlier bot and anchor."""
-        c = conversation(
-            msg("1", "q"),
-            bot_msg("2", "first bot"),
-            msg("3", "q2"),
-            bot_msg("4", "anchor bot"),
-            lifted_turn_items=[
-                function_call("lifted-call", "FileTool", arguments='{"path": "/a"}'),
-                function_call_output("lifted-call", "<file body>"),
-            ],
-            lifted_anchor_source_id="4",
-        )
+class TestAncestorSummaryProjection:
+    def test_empty_summaries_produce_no_leading_summary_item(self):
+        c = conversation(msg("1", "hi"), bot_msg("2", "hello"))
         items = project_for_llm(c)
-        types = [p.type for p in items]
-        # Lifted items emit just before bot "4" — after the merged user "q\n\nq2" (since first bot has no turn, it
-        # stays plain assistant).
-        assert types == [
-            "message",  # user q
-            "message",  # first bot
-            "message",  # user q2
-            "function_call",
-            "function_call_output",
-            "message",  # anchor bot
+        assert [(p.role, p.content) for p in items] == [
+            ("user", "hi"),
+            ("assistant", "hello"),
         ]
 
-    def test_no_lift_when_anchor_none(self):
+    def test_non_empty_summaries_lead_with_xml_block_when_first_message_is_bot(self):
         c = conversation(
-            msg("1", "q"),
-            bot_msg("2", "bot"),
-            lifted_turn_items=[
-                function_call("lifted-call", "FileTool"),
-                function_call_output("lifted-call", "<body>"),
-            ],
-            lifted_anchor_source_id=None,
+            bot_msg("1", "first-assistant"),
+            ancestor_summaries=["body"],
         )
         items = project_for_llm(c)
-        # No insertion point → no lifted items emitted (will be cleaned up by compactor's invariant in practice, but the
-        # projection itself stays defensive)
-        assert all(p.type == "message" for p in items)
+        assert items[0].role == "user"
+        assert items[0].content is not None
+        assert items[0].content.startswith('<compacted_summary trust="bot-summarized">\n')
+        assert items[0].content.rstrip().endswith("</compacted_summary>")
+        assert items[1].role == "assistant"
+
+    def test_summary_merges_with_adjacent_user_first_message(self):
+        c = conversation(
+            msg("1", "real first user"),
+            bot_msg("2", "bot reply"),
+            ancestor_summaries=["body"],
+        )
+        items = project_for_llm(c)
+        assert items[0].role == "user"
+        assert items[0].content is not None
+        assert items[0].content.startswith('<compacted_summary trust="bot-summarized">\n')
+        assert items[0].content.endswith("\n\nreal first user")
+        assert items[0].content.count("</compacted_summary>") == 1
+
+
+class TestLeadingContextBlocks:
+    def test_default_none_behaves_as_no_leading_blocks(self):
+        c = conversation(msg("1", "hi"), bot_msg("2", "hello"))
+        items = project_for_llm(c)
+        assert [(p.role, p.content) for p in items] == [
+            ("user", "hi"),
+            ("assistant", "hello"),
+        ]
+
+    def test_empty_list_behaves_as_no_leading_blocks(self):
+        c = conversation(msg("1", "hi"), bot_msg("2", "hello"))
+        items = project_for_llm(c, leading_context_blocks=[])
+        assert [(p.role, p.content) for p in items] == [
+            ("user", "hi"),
+            ("assistant", "hello"),
+        ]
+
+    def test_block_merges_after_summary_and_before_first_user(self):
+        c = conversation(
+            msg("1", "user-msg"),
+            bot_msg("2", "bot-reply"),
+            ancestor_summaries=["body"],
+        )
+        items = project_for_llm(
+            c,
+            leading_context_blocks=["<extra_block>X</extra_block>"],
+        )
+        assert items[0].role == "user"
+        content = items[0].content or ""
+        assert content.startswith('<compacted_summary trust="bot-summarized">\n')
+        summary_end = content.index("</compacted_summary>") + len("</compacted_summary>")
+        block_idx = content.index("<extra_block>X</extra_block>")
+        user_idx = content.index("user-msg")
+        assert summary_end < block_idx < user_idx
+
+    def test_two_blocks_emit_in_list_order(self):
+        c = conversation(
+            msg("1", "user-msg"),
+            bot_msg("2", "bot-reply"),
+            ancestor_summaries=["body"],
+        )
+        items = project_for_llm(
+            c,
+            leading_context_blocks=["<block-a/>", "<block-b/>"],
+        )
+        content = items[0].content or ""
+        a_idx = content.index("<block-a/>")
+        b_idx = content.index("<block-b/>")
+        user_idx = content.index("user-msg")
+        assert a_idx < b_idx < user_idx
+
+    def test_standalone_block_when_no_summary_and_no_adjacent_user(self):
+        c = conversation(bot_msg("1", "bot-only"))
+        items = project_for_llm(c, leading_context_blocks=["<solo/>"])
+        assert [(p.role, p.content) for p in items] == [
+            ("user", "<solo/>"),
+            ("assistant", "bot-only"),
+        ]
+
+    def test_blocks_emit_as_user_role_messages_only(self):
+        """Callers supply raw block content; projection wraps into user-role ProjectedItems. No path for an
+        assistant or function item to enter via this parameter."""
+        c = conversation(msg("1", "hi"))
+        items = project_for_llm(c, leading_context_blocks=["<a/>", "<b/>"])
+        leading = [p for p in items if (p.content or "").startswith("<")]
+        assert leading
+        assert all(p.type == "message" and p.role == "user" for p in leading)

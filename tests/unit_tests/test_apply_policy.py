@@ -4,7 +4,9 @@ Web (default `ConversationSyncer._apply_result`): edit, delete, divergence all b
 The parent snapshot stays intact.
 
 Slack (`SlackConversationSyncerMixin._apply_result`): edit / delete / divergence mutate the stored snapshot in
-place. Delete also triggers tombstone re-keying of the bot's `TurnExecution` and `lifted_anchor_source_id`.
+place. Delete also triggers tombstone re-keying of the bot's `TurnExecution` ownership (the lifted-anchor
+re-key the previous design carried is gone — working-file state is no longer anchor-positioned by bot
+source_id).
 """
 
 from __future__ import annotations
@@ -255,13 +257,16 @@ class TestSlackDivergenceOverwrites:
             session_user_id="u-alice",
             session_display_name="Alice",
         )
-        # Same snapshot, content replaced.
+        # Same snapshot, content reconciled in place. The mixed-kind divergence applies as
+        # edit(u1) + edit(b1) + delete(u2) — u2 is tombstoned rather than dropped from the list.
         assert result.is_new_branch is False
         assert result.conversation.snapshot_uuid == "s-slack"
-        assert [m.content for m in result.conversation.messages] == [
+        assert [m.content for m in result.conversation.messages if not m.deleted] == [
             "u1-canonical",
             "b1-canonical",
         ]
+        u2 = result.conversation.message_by_source_id("1.000002")
+        assert u2 is not None and u2.deleted is True
 
 
 class TestTombstoneRekey:
@@ -270,18 +275,12 @@ class TestTombstoneRekey:
 
     @pytest.mark.asyncio
     async def test_rekey_single_bot_run_orphans_turn_execution(self):
-        """Bot run of one: tombstoning it leaves no replacement, so the `TurnExecution` is deleted and the
-        anchor falls to `None`."""
+        """Bot run of one: tombstoning it leaves no replacement, so the `TurnExecution` is deleted."""
         syncer, _redis, search = _make_slack_syncer()
         stored = conversation(
             msg("1.000000", "u1"),
             bot_msg("1.000001", "b1"),
             snapshot_uuid="s-slack",
-            lifted_turn_items=[
-                TurnItem(type="function_call", call_id="c1", name="ft"),
-                TurnItem(type="function_call_output", call_id="c1", output="<body>"),
-            ],
-            lifted_anchor_source_id="1.000001",
         )
         # Pre-seed the TurnExecution for b1.
         await search.put_turn_execution(
@@ -300,9 +299,6 @@ class TestTombstoneRekey:
         # No replacement bot → TurnExecution deleted from ES.
         assert search.delete_turn_execution_calls == [("c-1", "1.000001")]
         assert search.rekey_turn_execution_calls == []
-        # Anchor cleared; lifted items cleared too (invariant).
-        assert stored.lifted_anchor_source_id is None
-        assert stored.lifted_turn_items == []
 
     @pytest.mark.asyncio
     async def test_rekey_chain_promotes_next_bot(self):
@@ -337,17 +333,13 @@ class TestTombstoneRekey:
     @pytest.mark.asyncio
     async def test_rekey_full_run_tombstone_orphans(self):
         """Bot run of two with both already tombstoned by the time the helper runs: no replacement →
-        `TurnExecution` deleted, anchor → None."""
+        `TurnExecution` deleted."""
         syncer, _redis, search = _make_slack_syncer()
         stored = conversation(
             msg("1.000000", "u1"),
             bot_msg("1.000001", "b1-part-a"),
             bot_msg("1.000002", "b1-part-b"),
             snapshot_uuid="s-slack",
-            lifted_anchor_source_id="1.000001",
-            lifted_turn_items=[
-                TurnItem(type="function_call", call_id="c1", name="ft"),
-            ],
         )
         await search.put_turn_execution(
             TurnExecution(
@@ -365,8 +357,6 @@ class TestTombstoneRekey:
 
         assert search.delete_turn_execution_calls == [("c-1", "1.000001")]
         assert search.rekey_turn_execution_calls == []
-        assert stored.lifted_anchor_source_id is None
-        assert stored.lifted_turn_items == []
 
     def test_user_tombstone_no_rekey(self):
         """Tombstoning a user message — `_next_non_tombstoned_bot_in_run` returns None because the deleted
