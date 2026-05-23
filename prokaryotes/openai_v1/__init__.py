@@ -184,8 +184,8 @@ class OpenAIClient(LLMClient):
                 type="function_call",
                 status=getattr(event.item, "status", "completed"),
             )
-            # Mirror the model's function_call into the working buffer so subsequent rounds within this stream
-            # see it; persistence is deferred to the main loop's atomic commit after gather + round-limit check.
+            # Persistence is deferred to the main loop's atomic commit (after gather + round-limit check), so
+            # mirror into `working_input` to keep later rounds in this stream consistent.
             working_input.append(_turn_item_to_openai_dict(fc_item))
             task: asyncio.Task[TurnItem | None] | None = None
             if tool_callbacks and event.item.name in tool_callbacks:

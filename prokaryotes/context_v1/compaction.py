@@ -15,8 +15,8 @@ After commit, the parent is marked `is_compacted=true` (its `messages_json` is r
 guardrail requires walking the parent chain after compaction), and `compaction_status:{pending_snapshot_uuid}`
 is written to Redis with the child's `snapshot_uuid` as the relabel target.
 
-The summarization step is invoked via `compact_fn`; callers (WebHarness) build the summarization input — it now
-projects `pre_tail_conv` with `working_file_windows=[]` and `ancestor_summaries=[]`, so live file bodies and
+The summarization step is invoked via `compact_fn`; the input is built by `HarnessBase._summarize_and_compact`,
+which projects `pre_tail_conv` with `working_file_windows=[]` and `ancestor_summaries=[]` so live file bodies and
 prior summaries don't fossilize into the new summary.
 """
 
@@ -190,9 +190,7 @@ class ConversationCompactor(ConversationSyncer):
 
                     post_snapshot_messages = current.messages[len(snapshot.messages) :]
                     pre_tail_call_ids = _file_tool_call_ids_in(prep.pre_tail_turns)
-                    carried_windows = [
-                        w for w in current.working_file_windows if w.window_id not in pre_tail_call_ids
-                    ]
+                    carried_windows = [w for w in current.working_file_windows if w.window_id not in pre_tail_call_ids]
                     swapped = Conversation(
                         conversation_uuid=conversation_uuid,
                         snapshot_uuid=child_snapshot_uuid,

@@ -1,6 +1,5 @@
 """Working-file window helpers: refresh, tombstone, normalize.
 
-The lift-related helpers and the `strip_live_window_bodies` summarization shim are removed in this design.
 Working files are first-class state on `Conversation.working_file_windows`; the compactor blanks them on its
 summarization-input snapshot rather than rewriting historical TurnItems.
 

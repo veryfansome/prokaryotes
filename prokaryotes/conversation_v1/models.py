@@ -225,8 +225,8 @@ def _hash_payload(messages: Iterable[ConversationMessage]) -> list[dict[str, str
 
 
 def compute_boundary_hash(messages: Iterable[ConversationMessage]) -> str:
-    """Stable hash over non-deleted messages. Payload is `{author_id, content}` — role is no longer stored; it's
-    derived at projection time."""
+    """Stable hash over non-deleted messages. Payload is `{author_id, content}`; role is derived at projection
+    time."""
     payload = _hash_payload(messages)
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()

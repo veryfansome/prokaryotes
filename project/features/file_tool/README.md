@@ -2,36 +2,9 @@
 
 ## Overview
 
-`FileTool` gives the web harness LLMs a structured way to read line windows from files, create new UTF-8 text files, and edit existing text files by line range.
+`FileTool` gives the web harness LLMs structured `read_lines`, `create_file`, `replace_lines`, `insert_lines`, and `delete_lines` actions, with the central invariant that `read_lines` outputs are **live windows**: when the file later changes (model edit, disk edit), the harness refreshes those older windows in place so the next turn sees current file state. Edits use line ranges guarded by `expected_revision`, write records stay frozen as an audit trail, and the compactor blanks live windows on its summarization input so file bodies don't fossilize into summaries.
 
-The feature is designed around one core idea: a `read_lines` output should not become a stale, historical snapshot the moment the file changes. Instead, `read_lines` outputs are treated as **live windows** into the current file. When the file changes later, either because the model edits it or because something else edits it on disk, the harness refreshes those older live windows in place so the next turn sees the current file state rather than an outdated copy.
-
-This is a significant behavior change from a generic shell-based read/edit workflow:
-
-- the model edits by line range instead of rewriting whole files by default
-- every line edit is protected by `expected_revision`
-- older reads for the same path stay synchronized with the file
-- compaction avoids fossilizing live file contents into conversation summaries
-
-Today the feature is wired into the Anthropic and OpenAI web harnesses. It is not yet registered in the script or eval harnesses.
-
----
-
-## Why This Exists
-
-The ordinary "read file, then edit based on what you saw" workflow breaks down quickly in an agentic chat setting:
-
-- a file can change after the model reads it
-- older tool outputs remain in the transcript and can mislead later turns
-- line numbers in past edits drift after subsequent changes
-- compaction can summarize stale file contents and make them impossible to refresh later
-
-`FileTool` addresses those problems with a tracked-context model:
-
-- reads become live windows
-- writes become frozen audit records
-- the harness reconciles tracked windows against disk before each turn
-- compaction preserves file activity without summarizing live file bodies
+Wired into the Anthropic and OpenAI web harnesses; not yet registered in the script or eval harnesses.
 
 ---
 
@@ -288,11 +261,9 @@ Common function-call output shapes:
 
 ## Request Lifecycle in the Web Harness
 
-### 1. Conversation Sync
+The harness resolves the active `Conversation` snapshot for the request (see [conversation/README.md](../conversation/README.md)). `working_file_windows` is a first-class field on the snapshot; FileTool reads and mutates that list directly.
 
-The harness first resolves the active `Conversation` snapshot for the request. The snapshot carries `working_file_windows` as a first-class field; FileTool reads and mutates that list directly.
-
-### 2. Working-File Reconciliation
+### 1. Working-File Reconciliation
 
 Before any `FileTool` call runs in the turn, the harness runs:
 
@@ -311,7 +282,7 @@ This is the point where:
 - transient diagnostic source_kinds (`range_truncated`, `already_exists`, `conflict`, `range_error`) normalize back to `read_lines` against fresh on-disk text
 - inaccessible files are tombstoned (`status="stale"`, `source_kind="tombstone"`)
 
-### 3. Tool Registration
+### 2. Tool Registration
 
 The web harness then constructs:
 
@@ -324,7 +295,7 @@ file_tool = FileTool(
 
 The `working_file_provider` is called by `FileTool` on every action so same-turn calls see prior windows minted earlier in the same turn — the tool mutates the list in place, no `_pending_result_items` bridge needed.
 
-### 4. Tool Guidance to the Model
+### 3. Tool Guidance to the Model
 
 The harness inserts FileTool-specific usage guidance into the system or developer message.
 
@@ -337,17 +308,9 @@ That guidance tells the model to:
 - use `expected_revision` for all line edits
 - page through larger files with later `start_line` values
 
-### 5. Same-Turn Refresh
+### 4. Same-Turn Refresh
 
-Provider SDKs may batch multiple tool calls in one round. `FileTool` keeps references to pending output items that have been returned but not yet appended to the active turn's items, so a later file-tool call in the same round can still refresh them.
-
-This matters for patterns like:
-
-- call `read_lines` for a file window
-- edit same file
-- call `read_lines` for a later window of the same file
-
-All within one model turn.
+Provider SDKs may batch multiple tool calls in one round. Because `working_file_provider` returns the live `conversation.working_file_windows` list and `FileTool` mutates it in place, a later file-tool call in the same round sees windows minted by earlier calls — covering patterns like read → edit → read-another-range within one model turn.
 
 Because live windows mutate earlier `function_call_output` items in place, provider-side prompt caches can lose reuse when a refreshed file window sits inside the cached prefix. In practice that means editing a tracked file may turn the next turn back into fresh input-token billing until a new stable prefix forms. Unchanged files do not churn cache state because windows are only re-rendered when the file revision changes or a transient diagnostic normalizes back into an ordinary `FILE ...` view.
 
@@ -427,15 +390,11 @@ Writes are protected against cooperating concurrent readers and writers, but the
 
 ## Compaction Integration
 
-`FileTool` is tightly integrated with conversation compaction because live windows are mutable and normal conversation history is otherwise append-only.
-
-### Why Compaction Needs Special Handling
-
-If a live window body were copied into an ancestor summary, the file contents inside that summary could never be refreshed later. The summary would become a fossilized, stale copy of the file.
+Live windows are mutable; if their bodies fossilized into a summary, the summary would carry a stale copy of the file that could never be refreshed. Two mechanisms prevent this.
 
 ### Keeping File Bodies Out of the Summary Input
 
-`_summarize_and_compact` projects `pre_tail_conv` with `working_file_windows=[]` and `ancestor_summaries=[]`, so the summarizer's input carries no leading `<working_files>` block at all. Historical `function_call_output`s annotated `file_tool.persistence="working_file"` (and their paired `function_call`s) are also dropped from projection on later turns, so no live-window bodies reach the summarizer through the transcript either. Frozen edit records (`persistence="history"`) and non-file-tool tool history ride through unchanged.
+`HarnessBase._summarize_and_compact` projects `pre_tail_conv` with `working_file_windows=[]` and `ancestor_summaries=[]`, so the summarizer's input carries no leading `<working_files>` block at all. Historical `function_call_output`s annotated `file_tool.persistence="working_file"` (and their paired `function_call`s) are also dropped from projection on later turns, so no live-window bodies reach the summarizer through the transcript either. Frozen edit records (`persistence="history"`) and non-file-tool tool history ride through unchanged.
 
 ### Carrying Working Files into the New Tail
 
@@ -457,10 +416,6 @@ Three keep-buckets survive:
 
 The behavioral tradeoff: a window minted in the pre-tail is dropped even when a recency-tail turn touches the same path via edit/REDUNDANT_READ (which refreshes the existing window without minting a new one). The model can re-read for that range if it still needs it — the deliberate cost of a simple, race-safe filter. The alternative, per-window bot-source provenance, would keep the window but reintroduce the anchor machinery first-class working files removed.
 
-### Pending and Committed Child Snapshots
-
-Compaction writes child snapshots through explicit `pending` and `committed` states with a `compaction_attempt_uuid`. That is primarily compaction infrastructure, but it matters for FileTool because `working_file_windows` is part of the child snapshot state that must survive the CAS swap safely.
-
 ### Branch Divergence
 
 Case A branch divergence (and cold rebuild) apply a two-gate filter to `working_file_windows`: keep a window if its path is active in the kept turns AND (its `window_id` is in shared-prefix TurnExecutions OR its `window_id` is in no `TurnExecution` reachable from the source snapshot — the carryforward bucket). Active paths come from `file_tool.path` annotations on the kept turns' file-tool outputs, which cover every call shape including edits and REDUNDANT_READs that don't mint a new window. See [conversation/README.md — Branches and Snapshots](../conversation/README.md#branches-and-snapshots).
@@ -475,75 +430,13 @@ For deeper compaction details, see [Conversation Compaction](../compaction/READM
 
 ## UI Behavior
 
-The browser UI formats `file_tool` activity entries into concise, user-readable summaries.
-
-Examples:
-
-- `read_lines` -> `Reading /path/to/file from line N`
-- `create_file` -> `Creating /path/to/file`
-- `replace_lines` -> `Editing /path/to/file lines A-B`
-- `insert_lines` -> `Inserting at /path/to/file line N`
-- `delete_lines` -> `Deleting /path/to/file lines A-B`
-
-The formatter intentionally hides strict-mode `null` parameters so the activity tray does not show noisy `expected_revision: null` style output for `read_lines` and create calls.
-
-Tool calls remain separate activity entries attached to assistant nodes; they are not rendered as ordinary conversation messages.
+The browser UI formats `file_tool` activity entries into concise summaries (`Reading /path from line N`, `Editing /path lines A-B`, etc.) attached to assistant nodes. The formatter hides strict-mode `null` parameters so the activity tray doesn't show noisy `expected_revision: null` output for `read_lines` and create calls.
 
 ---
 
 ## Testing
 
-The feature has coverage at several levels.
-
-### Unit Tests
-
-Key areas covered:
-
-- action validation and output shapes
-- live-window refresh after same-turn writes
-- transient diagnostic normalization
-- tombstoning when files disappear
-- workspace escape protection
-- symlink refusal
-- provider-schema serialization quirks
-
-Primary files:
-
-- `tests/unit_tests/test_file_tool.py`
-- `tests/unit_tests/test_file_tool_working_files.py`
-- `tests/unit_tests/test_working_file_models.py`
-- `tests/unit_tests/test_reconcile_working_files.py`
-- `tests/unit_tests/test_compaction_pre_tail_filter.py`
-- `tests/unit_tests/test_origin_filter.py`
-- `tests/unit_tests/test_compaction_swap.py`
-- `tests/unit_tests/test_anthropic_v1.py`
-
-### Integration Tests
-
-Tier B coverage exercises the real web stack with fake LLM clients:
-
-- multi-window reads
-- refresh across writes and next-turn reconciliation
-- create-file flow
-- `ALREADY_EXISTS`, `CONFLICT`, and `RANGE_ERROR`
-- missing-file tombstones
-- symlink-escape tombstones
-- live-window survival across compaction
-- summary input omitting `working_file_windows`
-
-Primary file:
-
-- `tests/integration_tests/tier_b/test_file_tool_flow.py`
-
-### UI Tests
-
-The client-side formatter for `file_tool` activity entries is covered in:
-
-- `tests/ui_tests/file_tool_ui.test.js`
-
-### Live Provider Smoke
-
-Tier A passes with FileTool enabled in both the Anthropic and OpenAI web harnesses.
+Unit coverage lives in `tests/unit_tests/test_file_tool*.py`, `test_working_file_models.py`, `test_reconcile_working_files.py`, `test_compaction_pre_tail_filter.py`, and `test_origin_filter.py`. Tier B end-to-end coverage is in `tests/integration_tests/tier_b/test_file_tool_flow.py`; UI-side formatting is in `tests/ui_tests/file_tool_ui.test.js`. Tier A passes with FileTool enabled on both Anthropic and OpenAI web harnesses.
 
 ---
 

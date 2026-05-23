@@ -3,7 +3,7 @@
 Web (default `ConversationSyncer._apply_result`): edit, delete, divergence all branch via `_apply_divergence`.
 The parent snapshot stays intact.
 
-Slack (`SlackConversationSyncerMixin._apply_result`): edit / delete / divergence mutate the stored snapshot in
+Slack (`SlackApplyPolicy._apply_result`): edit / delete / divergence mutate the stored snapshot in
 place. Delete also triggers tombstone re-keying of the bot's `TurnExecution` ownership (the lifted-anchor
 re-key the previous design carried is gone — working-file state is no longer anchor-positioned by bot
 source_id).
@@ -16,7 +16,7 @@ import pytest
 from prokaryotes.api_v1.models import IncomingMessage
 from prokaryotes.context_v1.conversation_sync import (
     ConversationSyncer,
-    SlackConversationSyncerMixin,
+    SlackApplyPolicy,
     _next_non_tombstoned_bot_in_run,
 )
 from prokaryotes.conversation_v1.models import TurnExecution, TurnItem
@@ -30,7 +30,7 @@ def _store_redis_snapshot(redis_client, conversation_obj):
     )
 
 
-class _SlackSyncerForTest(SlackConversationSyncerMixin, ConversationSyncer):
+class _SlackSyncerForTest(SlackApplyPolicy, ConversationSyncer):
     """Concrete Slack syncer wired to fakes for tests."""
 
     def __init__(self, *, redis_client, search_client):

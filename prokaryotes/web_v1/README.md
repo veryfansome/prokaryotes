@@ -21,7 +21,7 @@ Connection factories live in `prokaryotes/utils_v1/db_utils.py`: `get_postgres_p
 
 - Call `super().init()` before adding your own routes or initializing your LLM client — `self.app` does not exist until then.
 - Call `await super().on_stop()` before closing provider-specific clients — the base teardown drains background tasks and closes the search and Redis clients.
-- Pass `compact_fn` and a mutable `pending_compaction` list into `stream_and_finalize()` when you want compaction. Never call `finalize_turn()` directly: `stream_and_finalize()` wraps it to coordinate with the Redis compaction lock, and bypassing the wrapper causes a double-finalize race.
+- Pass a mutable `pending_compaction` list into `stream_and_finalize()` to participate in compaction; the compaction closure itself is built internally via `HarnessBase._build_compact_fn`. Never call `finalize_turn()` directly: `stream_and_finalize()` wraps it to coordinate with the Redis compaction lock, and bypassing the wrapper causes a double-finalize race.
 
 ## Related
 

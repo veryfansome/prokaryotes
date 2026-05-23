@@ -40,7 +40,7 @@ A summary is only valid if the branch that produced it is provably identical to 
 
 ### Working-file carry-forward
 
-When compaction commits, the child's `working_file_windows` are carried forward from the **live Redis snapshot at CAS time** (`current.working_file_windows`, not the deep-copy snapshot taken at compaction start), filtered to drop windows whose `window_id` (== file-tool `call_id`) appears in any `pre_tail` `TurnExecution.items`. Three keep-buckets survive: windows minted by recency-tail turns, windows minted by post-snapshot turns finalized during in-flight summarization (race-safe by construction — the filter never reads post-snapshot TurnExecutions), and carryforward windows whose call_ids live in no current `TurnExecution.items` (they originated in a compacted ancestor). The summary input keeps `working_file_windows=[]` on its `pre_tail_conv` so live file bodies don't fossilize into the summary. See [file_tool/README.md](../file_tool/README.md#compaction) for the full filter rule and behavioral tradeoff.
+The child's `working_file_windows` are carried forward from the live Redis snapshot at CAS time, filtered to drop windows whose `window_id` appears in any `pre_tail` `TurnExecution.items`. The summary input keeps `working_file_windows=[]` so live file bodies don't fossilize into the summary. See [file_tool/README.md — Compaction Integration](../file_tool/README.md#compaction-integration) for the keep-buckets and race-safety argument.
 
 ---
 
@@ -135,8 +135,8 @@ See [conversation/README.md](../conversation/README.md#branches-and-snapshots) f
 |---|---|
 | `prokaryotes/context_v1/compaction.py` | `ConversationCompactor`: `_compact_conversation`, `_cas_swap_child` (with the pre_tail call_id filter on `working_file_windows`), `_prepare_compaction`, `_write_compaction_status`; `_file_tool_call_ids_in`, `_recency_tail_messages`, `_retry_compaction_search_write`. |
 | `prokaryotes/context_v1/conversation_sync.py` | `_split_compacted_prefix` and `_rebuild_from_chain` chain-rebuild handling; the working-file carry-forward filters for Case A divergence and cold rebuild (`_active_paths_in_turns`, `_file_tool_call_ids_in`, `_filter_windows_by_active_path_and_origin`). Cold rebuild restores windows from the donor returned by `find_latest_active_child` (defined in `search_v1/conversations.py`). |
-| `prokaryotes/harness_v1/web.py` | `on_usage` / `pending_compaction`, `_summarize_and_compact`. |
-| `prokaryotes/harness_v1/base.py` | `stream_and_finalize` compaction sequencing. |
+| `prokaryotes/harness_v1/web.py` | `on_usage` / `pending_compaction` wiring on the `/chat` flow. |
+| `prokaryotes/harness_v1/base.py` | `stream_and_finalize` compaction sequencing; `_build_compact_fn` and `_summarize_and_compact` (the summarization-input projection lives here). |
 | `prokaryotes/web_v1/compaction.py` | `CompactionStatusHandler`: the `/compaction-status` endpoint. |
 | `prokaryotes/tools_v1/file_tool/live_windows.py` | `refresh_windows_for_path`, `tombstone_windows_for_path`, `reconcile_working_files` — window refresh/tombstone/normalize over `working_file_windows`. |
 | `prokaryotes/utils_v1/llm_utils.py` | `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS`. |

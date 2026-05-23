@@ -88,11 +88,9 @@ def _project_messages(
     reply to an earlier mention A. Without it, source-id-order projection collapses `[A, B, botA, botB]` into one
     `user` run and one `assistant` run, permanently losing which reply answered which mention.
 
-    A harness-bot message whose `reply_to_source_id` is unset (legacy snapshots that predate the field, the web
-    harness's pre-`reply_to_source_id` history) falls back to source-id-ordered emission: all preceding
-    non-bot messages are pulled forward before the bot itself emits, so legacy data still projects as the
-    interleaved user/assistant sequence it used to. New harness-bot messages always carry `reply_to_source_id`,
-    so the fallback only kicks in for historical data.
+    A harness-bot message whose `reply_to_source_id` is unset falls back to source-id-ordered emission: all
+    preceding non-emitted non-bot messages are pulled forward before the bot itself emits, producing the
+    interleaved user/assistant sequence in source-id order.
 
     When a Slack-style mention prefix (`<@addressee_id> `) leads the stored bot content, the projection strips it
     so the LLM sees the bare reply body. The addressee is resolved via the bot message's own
@@ -115,8 +113,7 @@ def _project_messages(
 
     # Pass 1 — harness-bot messages in source-id order. Each pulls its `reply_to_source_id` user forward (when not
     # already emitted) so the turn pair stays adjacent. A bot with `reply_to_source_id=None` falls back to pulling
-    # every preceding non-emitted non-bot message in source-id order — that restores the pre-`reply_to` linear
-    # ordering for legacy snapshots and for tests built without the field.
+    # every preceding non-emitted non-bot message in source-id order.
     for msg in sorted_msgs:
         if msg.deleted or msg.author_id != bot_author_id:
             continue

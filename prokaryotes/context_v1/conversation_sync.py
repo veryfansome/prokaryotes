@@ -1,19 +1,21 @@
 """Three-tier conversation reconciliation: Redis fast path → exact ES load → ancestor-chain rebuild.
 
 Reconciliation is source-ID-based via `prokaryotes.conversation_v1.reconcile`; the syncer applies the result
-per-surface — divergence creates a new branch snapshot on web; Slack-specific subclasses can override
-`_apply_divergence` for in-place recovery.
+per-surface — divergence creates a new branch snapshot on web; the `SlackApplyPolicy` mixin overrides
+`_apply_result` to mutate the stored snapshot in place for Slack.
 
-Case A branch divergence and cold rebuild apply the shared-prefix origin filter on `working_file_windows`:
+Case A branch divergence and cold rebuild apply a two-gate filter on `working_file_windows`
+(`_filter_windows_by_active_path_and_origin`):
+- `active_paths` = `file_tool.path` annotations on file-tool `function_call_output`s in the kept TurnExecutions.
 - `kept_call_ids` = file-tool call_ids in TurnExecutions kept by the new branch (shared-prefix turns or rebuild
-  target's own turns)
+  target's own turns).
 - `source_call_ids` = file-tool call_ids in the source/donor snapshot's own TurnExecution.items (post-compaction
-  tail only — not the parent-snapshot chain)
-- Keep a window if `window_id ∈ kept_call_ids` OR `window_id ∉ source_call_ids`. The second clause is the
-  carryforward bucket: a window whose `call_id` lives nowhere in the source's own turns must have originated in a
-  compacted ancestor and ridden through one or more compactions — keep it. Windows from discarded sibling turns
-  (or donor-tail turns past the rebuild target) are in `source_call_ids` but not in `kept_call_ids` and are
-  dropped.
+  tail only — not the parent-snapshot chain).
+- Keep a window if its `path` is in `active_paths` AND (`window_id ∈ kept_call_ids` OR `window_id ∉
+  source_call_ids`). The origin clause's second disjunct is the carryforward bucket — a window whose `call_id`
+  lives nowhere in the source's own turns originated in a compacted ancestor and rode through one or more
+  compactions. Windows from discarded sibling turns (or donor-tail turns past the rebuild target) are in
+  `source_call_ids` but not in `kept_call_ids` and are dropped.
 
 The web flow also handles two stream-loss recovery scenarios:
 - Pre-commit (handshake-stamp invariant): managed by the client; the syncer produces a `snapshot_uuid` in the
@@ -21,7 +23,7 @@ The web flow also handles two stream-loss recovery scenarios:
   instead of re-diverging.
 - Post-commit (resync handshake): if the stored snapshot has trailing bot-authored messages immediately after the
   last source_id shared with incoming and incoming has new content beyond that, the syncer emits an
-  `unacknowledged_bot_messages` payload and does *not* start the LLM. See the design doc.
+  `unacknowledged_bot_messages` payload and does *not* start the LLM.
 """
 
 from __future__ import annotations
@@ -639,13 +641,13 @@ class ConversationSyncer(ABC):
         return chain
 
 
-class SlackConversationSyncerMixin:
+class SlackApplyPolicy:
     """Slack-flavored apply policy: edit, delete, and divergence all mutate the stored snapshot in place rather than
     branching.
 
     Delete still triggers tombstone re-keying for the deleted bot's `TurnExecution` (the next non-tombstoned bot in
-    the same consecutive run becomes the new owner). The previous design also re-keyed `lifted_anchor_source_id`;
-    that anchor no longer exists — working_file_windows are not positioned by bot source_id at projection time.
+    the same consecutive run becomes the new owner). Working-file windows aren't positioned by bot source_id, so
+    no anchor re-key is needed.
 
     `stored.messages` is kept in `source_id`-sorted order as an invariant: same-thread turn serialization can
     deliver messages out of chronological order (a later mention's sync sees a prior turn's bot reply that landed
