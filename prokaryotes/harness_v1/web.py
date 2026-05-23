@@ -8,7 +8,6 @@ Compaction summarization and triggering are inherited from `HarnessBase` (`_buil
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 
 from fastapi import HTTPException, Query, Request
@@ -22,6 +21,7 @@ from prokaryotes.conversation_v1.models import (
     TurnExecution,
 )
 from prokaryotes.conversation_v1.project import project_for_llm
+from prokaryotes.conversation_v1.source_id import bump_source_id, format_source_id_now
 from prokaryotes.harness_v1 import build_llm_client
 from prokaryotes.harness_v1.base import _StreamFinalizationContext
 from prokaryotes.tools_v1.file_tool import FileTool
@@ -253,28 +253,7 @@ def _assign_bot_source_id(conversation: Conversation) -> str:
         (m.source_id for m in conversation.messages if not m.deleted),
         default=None,
     )
-    candidate = _format_now()
+    candidate = format_source_id_now()
     if last_id is not None and candidate <= last_id:
-        candidate = _bump(last_id)
+        candidate = bump_source_id(last_id)
     return candidate
-
-
-def _bump(source_id: str) -> str:
-    seconds_str, _, micros_str = source_id.partition(".")
-    try:
-        seconds = int(seconds_str)
-        micros = int(micros_str or "0")
-    except ValueError:
-        return _format_now()
-    micros += 1
-    if micros >= 1_000_000:
-        seconds += 1
-        micros = 0
-    return f"{seconds}.{micros:06d}"
-
-
-def _format_now() -> str:
-    ts = time.time()
-    seconds = int(ts)
-    micros = int((ts - seconds) * 1_000_000)
-    return f"{seconds}.{micros:06d}"
