@@ -1,4 +1,5 @@
 """Helpers for collecting NDJSON streams and scoping background-task waits."""
+
 from __future__ import annotations
 
 import asyncio

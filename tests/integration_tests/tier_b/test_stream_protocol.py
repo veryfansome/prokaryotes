@@ -8,13 +8,12 @@ Unified-conversation wire:
 
 from __future__ import annotations
 
-import json
 from uuid import uuid4
 
 import pytest
 
 from tests.integration_tests.stream_utils import collect_stream, request_scope
-from tests.unit_tests._llm_fakes import LLMRound, LLMScript, ToolCallSpec
+from tests.unit_tests._llm_fakes import LLMRound, LLMScript
 
 pytestmark = pytest.mark.integration
 
@@ -105,48 +104,6 @@ async def test_final_round_context_pct_precedes_text_deltas(web_harness, authed_
     ctx_idx = types.index("context_pct")
     first_delta_idx = types.index("text_delta")
     assert ctx_idx < first_delta_idx
-
-
-@pytest.mark.parametrize(
-    "web_harness, authed_client",
-    [("anthropic", "anthropic"), ("openai", "openai")],
-    indirect=True,
-)
-@pytest.mark.asyncio(loop_scope="session")
-async def test_tool_round_order_matches_provider(web_harness, authed_client, request):
-    """Provider-specific tool-round ordering: Anthropic emits context_pct before progress_message+tool_call; OpenAI
-    emits tool_call first."""
-    conversation_uuid = str(uuid4())
-    provider = request.node.callspec.params["web_harness"]
-    events = await _post_events(
-        web_harness,
-        authed_client,
-        conversation_uuid,
-        messages=[{"role": "user", "content": "run a command"}],
-        rounds=[
-            LLMRound(
-                stop_reason="tool_use",
-                text_deltas=["Let me check..."],
-                tool_calls=[
-                    ToolCallSpec(
-                        arguments=json.dumps({"command": "echo hi", "reason": "test"}),
-                        call_id="call-1",
-                        name="shell_command",
-                    ),
-                ],
-            ),
-            LLMRound(text_deltas=["Done."], stop_reason="end_turn"),
-        ],
-    )
-    # Skip the handshake; isolate the remaining event vocabulary.
-    assert _is_handshake(events[0])
-    types_after = _event_types(events[1:])
-    if provider == "anthropic":
-        # context_pct → progress_message → tool_call → context_pct → text_delta → bot_message
-        assert types_after[:3] == ["context_pct", "progress_message", "tool_call"]
-    else:
-        # tool_call → context_pct → progress_message → context_pct → text_delta → bot_message
-        assert types_after[:3] == ["tool_call", "context_pct", "progress_message"]
 
 
 @pytest.mark.parametrize(

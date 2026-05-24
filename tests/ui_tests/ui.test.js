@@ -79,33 +79,21 @@ describe("parseStreamPayloadLine — bot_message", () => {
 });
 
 describe("parseStreamPayloadLine — other event shapes survive", () => {
-    it("text_delta", () => {
-        const parsed = parseStreamPayloadLine(JSON.stringify({ text_delta: "hi" }));
-        expect(parsed).toEqual({ type: "text_delta", text_delta: "hi" });
-    });
-
-    it("progress_message", () => {
-        const parsed = parseStreamPayloadLine(
-            JSON.stringify({ progress_message: "Checking…" }),
-        );
-        expect(parsed).toEqual({ type: "progress_message", progress_message: "Checking…" });
-    });
-
-    it("tool_call", () => {
-        const parsed = parseStreamPayloadLine(
-            JSON.stringify({ tool_call: { name: "shell_command", arguments: "{}" } }),
-        );
-        expect(parsed.type).toBe("tool_call");
-        expect(parsed.tool_call.name).toBe("shell_command");
-    });
-
-    it("context_pct", () => {
-        const parsed = parseStreamPayloadLine(JSON.stringify({ context_pct: 42 }));
-        expect(parsed).toEqual({ type: "context_pct", context_pct: 42 });
-    });
-
-    it("compaction_pending", () => {
-        const parsed = parseStreamPayloadLine(JSON.stringify({ compaction_pending: true }));
-        expect(parsed).toEqual({ type: "compaction_pending" });
+    it.each([
+        ["text_delta", { text_delta: "hi" }, { type: "text_delta", text_delta: "hi" }],
+        [
+            "progress_message",
+            { progress_message: "Checking…" },
+            { type: "progress_message", progress_message: "Checking…" },
+        ],
+        [
+            "tool_call",
+            { tool_call: { name: "shell_command", arguments: "{}" } },
+            { type: "tool_call", tool_call: { name: "shell_command", arguments: "{}" } },
+        ],
+        ["context_pct", { context_pct: 42 }, { type: "context_pct", context_pct: 42 }],
+        ["compaction_pending", { compaction_pending: true }, { type: "compaction_pending" }],
+    ])("%s", (_label, payload, expected) => {
+        expect(parseStreamPayloadLine(JSON.stringify(payload))).toEqual(expected);
     });
 });

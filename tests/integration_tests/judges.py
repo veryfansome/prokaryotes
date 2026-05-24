@@ -3,6 +3,7 @@
 Binary, falsifiable verdicts only — `{"passed": bool, "reason": str}`. Each judged assertion runs three judge calls
 and uses 2-of-3 majority for flake insurance.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,9 +56,7 @@ async def llm_judge_majority(
     *,
     n: int = 3,
 ) -> JudgeVerdict:
-    verdicts = await asyncio.gather(
-        *[llm_judge(client, criterion, response) for _ in range(n)]
-    )
+    verdicts = await asyncio.gather(*[llm_judge(client, criterion, response) for _ in range(n)])
     passed = sum(1 for v in verdicts if v.passed) > n // 2
     return JudgeVerdict(
         passed=passed,
@@ -68,6 +67,6 @@ async def llm_judge_majority(
 def _build_judge_prompt(criterion: str, response: str) -> str:
     return (
         f"{criterion}\n\n"
-        f"Reply with structured JSON: {{\"passed\": <bool>, \"reason\": \"<short string>\"}}.\n\n"
+        f'Reply with structured JSON: {{"passed": <bool>, "reason": "<short string>"}}.\n\n'
         f"Response to evaluate:\n{response}"
     )

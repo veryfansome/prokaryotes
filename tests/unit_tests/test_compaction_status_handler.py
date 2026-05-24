@@ -52,10 +52,19 @@ async def test_lock_present_returns_pending():
 
 
 @pytest.mark.asyncio
-async def test_no_relabel_target_returns_done_without_snapshot_uuid():
-    """Lock released, no compaction_status key: client clears the indicator without relabeling (this is the
-    long-idle-past-TTL case too)."""
+@pytest.mark.parametrize(
+    "seed",
+    [
+        pytest.param(None, id="no_key_or_long_idle_past_ttl"),
+        pytest.param("", id="empty_sentinel"),
+    ],
+)
+async def test_done_without_snapshot_uuid(seed):
+    """Lock released and no relabel target — same response shape whether the key was never written, was
+    written as the empty sentinel, or has TTL-elapsed away."""
     redis = FakeRedis()
+    if seed is not None:
+        await redis.set(f"compaction_status:{PENDING}", seed)
     handler = StubHandler(redis)
 
     response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
@@ -75,33 +84,6 @@ async def test_relabel_target_returns_done_with_snapshot_uuid():
 
     assert response.done is True
     assert response.snapshot_uuid == "child-snap-1"
-
-
-@pytest.mark.asyncio
-async def test_empty_sentinel_returns_done_without_snapshot_uuid():
-    """Empty-string sentinel marks "lock released without a relabel target" — distinct from "key never
-    written" but indistinguishable in response shape."""
-    redis = FakeRedis()
-    await redis.set(f"compaction_status:{PENDING}", "")
-    handler = StubHandler(redis)
-
-    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
-
-    assert response.done is True
-    assert response.snapshot_uuid is None
-
-
-@pytest.mark.asyncio
-async def test_long_idle_past_ttl_returns_done_without_snapshot_uuid():
-    """Missing compaction_status key (e.g. TTL elapsed) returns done=True with no snapshot_uuid — same shape
-    as the fresh-no-key case."""
-    redis = FakeRedis()
-    handler = StubHandler(redis)
-
-    response = await handler.get_compaction_status(_make_request_with_session(), CONVO, PENDING)
-
-    assert response.done is True
-    assert response.snapshot_uuid is None
 
 
 @pytest.mark.asyncio

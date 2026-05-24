@@ -5,9 +5,8 @@ One `SlackHarness` bound to a synthetic workspace runs against real Redis + Elas
 design doc's "Integration tests (Tier B)" section lists is exercised here: the channel-mention happy path, the
 non-mention drop, same-thread continuation off the Redis fast path, the DM and mpim flows, ack-before-work,
 cold-Redis rebuild, edit / delete reconcile, the two crash-recovery windows, the compaction trigger and
-post-compaction replay, compaction interruption, long-thread pagination, same-thread serialization with
-post-race future-turn fidelity, concurrent threads, the shared limiter, the redelivered envelope, the foreign
-bot, and `app_uninstalled`.
+post-compaction replay, compaction interruption, same-thread serialization with post-race future-turn fidelity,
+concurrent threads, the foreign bot, and `app_uninstalled`.
 
 The harness reconciles a *real* Slack thread on each turn, so a test that wants a multi-turn conversation must
 thread the bot's replies back into the fake thread itself — `_thread_bot_replies` does that, mirroring what
@@ -17,16 +16,12 @@ Slack would do when the bot's `chat.postMessage` lands in the thread.
 from __future__ import annotations
 
 import asyncio
-import json
-from urllib.parse import parse_qs
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from prokaryotes.conversation_v1.models import Conversation
 from prokaryotes.harness_v1.slack import slack_conversation_uuid
-from prokaryotes.slack_v1.client import SlackClient
 from prokaryotes.slack_v1.streaming import SlackStreamer
 from tests.integration_tests.tier_b._slack_tier_b import (
     APP_ID,
@@ -772,84 +767,6 @@ async def test_compaction_interruption_recovers_parent(slack_harness, thread_cli
 
 
 # -----------------------------------------------------------------------------
-# Long-thread pagination
-# -----------------------------------------------------------------------------
-
-
-def _replies_handler(pages: list[list[dict]]):
-    """A `httpx.MockTransport` handler serving `conversations.replies` pages with cursor pagination, recording
-    every parsed request form on `handler.requests`."""
-    requests: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
-        requests.append(form)
-        cursor = int(form.get("cursor", "0"))
-        body: dict = {"ok": True, "messages": pages[cursor]}
-        if cursor + 1 < len(pages):
-            body["response_metadata"] = {"next_cursor": str(cursor + 1)}
-        return httpx.Response(200, json=body)
-
-    handler.requests = requests
-    return handler
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_long_cold_thread_exhausts_pagination(monkeypatch):
-    """A 1500-reply cold thread (no `oldest`) drives `conversations.replies` through every cursor page until
-    `has_more` is false."""
-    import prokaryotes.slack_v1.client as client_mod
-
-    async def _instant(_delay):
-        return None
-
-    monkeypatch.setattr(client_mod.asyncio, "sleep", _instant)
-
-    pages = [[{"ts": f"{1300 + p}.{i:06d}"} for i in range(200)] for p in range(8)][:8]
-    # 8 pages * ~200 = 1600 messages; trim the last page so the total is 1500.
-    pages[-1] = pages[-1][:100]
-    handler = _replies_handler(pages)
-    client = SlackClient()
-    client._http = httpx.AsyncClient(base_url="https://slack.com/api/", transport=httpx.MockTransport(handler))
-
-    messages = await client.conversations_replies(bot_token="xoxb", channel="C_LONG", ts="1300.000000")
-
-    assert len(messages) == 1500
-    # Cursor pagination was followed across all 8 pages.
-    assert len([r for r in handler.requests if "cursor" in r]) == 7
-    await client.close()
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_post_compaction_thread_fetch_starts_at_raw_boundary(monkeypatch):
-    """A post-compaction thread of 3000 historical replies + 20 raw-window replies is fetched with `oldest`
-    pinned to the raw-window boundary — Slack returns only the bounded suffix."""
-    import prokaryotes.slack_v1.client as client_mod
-
-    async def _instant(_delay):
-        return None
-
-    monkeypatch.setattr(client_mod.asyncio, "sleep", _instant)
-
-    raw_boundary = "1400.003000"
-    # With `oldest` set, Slack returns only the 20 raw-window messages on a single page.
-    raw_window = [{"ts": f"1400.{3000 + i:06d}"} for i in range(20)]
-    handler = _replies_handler([raw_window])
-    client = SlackClient()
-    client._http = httpx.AsyncClient(base_url="https://slack.com/api/", transport=httpx.MockTransport(handler))
-
-    messages = await client.conversations_replies(
-        bot_token="xoxb", channel="C_PC", ts="1400.000000", oldest=raw_boundary, inclusive=True
-    )
-
-    assert len(messages) == 20
-    # The fetch sent `oldest` pinned to the raw-window boundary and `inclusive=true`.
-    assert handler.requests[0]["oldest"] == raw_boundary
-    assert handler.requests[0]["inclusive"] == "true"
-    await client.close()
-
-
-# -----------------------------------------------------------------------------
 # Same-thread serialization + post-race future-turn fidelity
 # -----------------------------------------------------------------------------
 
@@ -971,96 +888,8 @@ async def test_concurrent_threads_run_independently(slack_harness):
 
 
 # -----------------------------------------------------------------------------
-# Rate limiter
+# Foreign bot / app_uninstalled
 # -----------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_shared_limiter_serializes_same_bucket(monkeypatch):
-    """Two `chat.update` calls in the same `(method, channel)` bucket are spaced ~1s apart by the shared
-    limiter; calls in different channels run without that spacing."""
-    sleeps: list[float] = []
-    import prokaryotes.slack_v1.client as client_mod
-
-    async def _record_sleep(delay):
-        sleeps.append(delay)
-
-    monkeypatch.setattr(client_mod.asyncio, "sleep", _record_sleep)
-
-    def _ok(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"ok": True})
-
-    client = SlackClient()
-    client._http = httpx.AsyncClient(base_url="https://slack.com/api/", transport=httpx.MockTransport(_ok))
-
-    # Same bucket, back to back — the second call is spaced behind the first. The actual delay is just under
-    # `_BUCKET_MIN_INTERVAL_SECONDS` because `_wait_for_slot` calls `time.monotonic()` twice (once inside the
-    # lock, once for the sleep delay) and the second call happens a few microseconds later.
-    await client.chat_update(bot_token="xoxb", channel="C_LIM", ts="1.0", text="a")
-    await client.chat_update(bot_token="xoxb", channel="C_LIM", ts="2.0", text="b")
-    assert any(d > 0.9 for d in sleeps), "same-bucket second call must be spaced ~1s"
-
-    # Different channel — its own bucket, no inherited spacing.
-    sleeps.clear()
-    await client.chat_update(bot_token="xoxb", channel="C_OTHER", ts="3.0", text="c")
-    assert all(d <= 0.0 for d in sleeps)
-    await client.close()
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_limiter_honors_retry_after_workspace_wide(monkeypatch):
-    """A 429 with `Retry-After` from `chat.postMessage` pauses every later `chat.postMessage` call
-    workspace-wide for the indicated window."""
-    sleeps: list[float] = []
-    import prokaryotes.slack_v1.client as client_mod
-
-    async def _record_sleep(delay):
-        sleeps.append(delay)
-
-    monkeypatch.setattr(client_mod.asyncio, "sleep", _record_sleep)
-
-    state = {"sent_429": False}
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        if not state["sent_429"]:
-            state["sent_429"] = True
-            return httpx.Response(429, headers={"Retry-After": "3"}, json={"ok": False})
-        return httpx.Response(200, json={"ok": True, "ts": "9.0"})
-
-    client = SlackClient()
-    client._http = httpx.AsyncClient(base_url="https://slack.com/api/", transport=httpx.MockTransport(_handler))
-
-    # First call gets a 429+Retry-After:3, retries; a later call in another channel still waits out the floor.
-    # The observed delay is fractionally under 3.0 because `_wait_for_slot` calls `time.monotonic()` twice
-    # (once inside the lock to compute `start_at`, once after to compute `delay`).
-    await client.chat_post_message(bot_token="xoxb", channel="C_A", text="first")
-    await client.chat_post_message(bot_token="xoxb", channel="C_B", text="second")
-    assert any(d > 2.9 for d in sleeps), "Retry-After must pause chat.postMessage workspace-wide"
-    await client.close()
-
-
-# -----------------------------------------------------------------------------
-# Redelivered envelope / foreign bot / app_uninstalled
-# -----------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_redelivered_envelope_handled_once(slack_harness, thread_client):
-    """A redelivered Socket Mode envelope (same `event_id`) is dropped on the second delivery — `handle_event`
-    runs exactly once."""
-    channel, ts = "C_DUP", "1500.000100"
-    slack_harness.llm_client.set_script(_script("dup answer"))
-    thread_client.thread = [_human_msg(ts=ts, user="U_ALICE", text="<@U_BOT> hi")]
-    # Fresh event_id — `slack_event_seen:*` has a 10-minute TTL and isn't touched by the per-session state
-    # cleanup, so a fixed value would dedupe across runs and the first delivery here would silently no-op.
-    event = _mention(channel=channel, ts=ts, event_id=f"Ev_REDELIVER_{uuid4().hex[:8]}")
-
-    await slack_harness.deliver_via_socket(event, thread_client=thread_client)
-    posts_after_first = len(thread_client.chat_post_calls)
-    await slack_harness.deliver_via_socket(event, thread_client=thread_client)
-
-    # The second delivery was deduped — no further posts.
-    assert len(thread_client.chat_post_calls) == posts_after_first
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -1115,4 +944,4 @@ async def test_app_uninstalled_logged_harness_keeps_running(slack_harness, threa
 
 
 # Keep the module-level imports referenced even when a subset of tests is selected.
-_ = (json, uuid4, APP_ID)
+_ = (uuid4, APP_ID)

@@ -40,36 +40,42 @@ def _hash(text: str) -> str:
 
 
 def _read_args(path: Path, start_line: int) -> str:
-    return json.dumps({
-        "action": "read_lines",
-        "path": str(path),
-        "expected_revision": None,
-        "start_line": start_line,
-        "end_line": None,
-        "new_text": None,
-    })
+    return json.dumps(
+        {
+            "action": "read_lines",
+            "path": str(path),
+            "expected_revision": None,
+            "start_line": start_line,
+            "end_line": None,
+            "new_text": None,
+        }
+    )
 
 
 def _replace_args(path: Path, expected_revision: str, start_line: int, end_line: int, new_text: str) -> str:
-    return json.dumps({
-        "action": "replace_lines",
-        "path": str(path),
-        "expected_revision": expected_revision,
-        "start_line": start_line,
-        "end_line": end_line,
-        "new_text": new_text,
-    })
+    return json.dumps(
+        {
+            "action": "replace_lines",
+            "path": str(path),
+            "expected_revision": expected_revision,
+            "start_line": start_line,
+            "end_line": end_line,
+            "new_text": new_text,
+        }
+    )
 
 
 def _create_args(path: Path, new_text: str) -> str:
-    return json.dumps({
-        "action": "create_file",
-        "path": str(path),
-        "expected_revision": None,
-        "start_line": None,
-        "end_line": None,
-        "new_text": new_text,
-    })
+    return json.dumps(
+        {
+            "action": "create_file",
+            "path": str(path),
+            "expected_revision": None,
+            "start_line": None,
+            "end_line": None,
+            "new_text": new_text,
+        }
+    )
 
 
 def _resolved(path: Path | str) -> str:
@@ -99,8 +105,7 @@ def _outputs_by_call_id(items, call_ids: set[str]) -> dict[str, str]:
     return {
         item.call_id: (item.output or "")
         for item in items
-        if getattr(item, "type", None) == "function_call_output"
-        and getattr(item, "call_id", None) in call_ids
+        if getattr(item, "type", None) == "function_call_output" and getattr(item, "call_id", None) in call_ids
     }
 
 
@@ -184,21 +189,27 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
         # Turn 1: two reads (top + tail), no writes.
         messages = [user_message("Inspect the file in two windows.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading the top."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading the tail."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["I inspected it."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading the top."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading the tail."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["I inspected it."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
@@ -215,19 +226,23 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
         # Turn 2: in-tool write. Live windows should reflect the new revision.
         messages.append(user_message("Update the middle lines."))
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Editing the file."],
-                    tool_calls=[ToolCallSpec(
-                        arguments=_replace_args(target, _hash(initial), 2, 3, "TWO\nTHREE_X\n"),
-                        call_id="call-write-1",
-                        name="file_tool",
-                    )],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["It is updated."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Editing the file."],
+                        tool_calls=[
+                            ToolCallSpec(
+                                arguments=_replace_args(target, _hash(initial), 2, 3, "TWO\nTHREE_X\n"),
+                                call_id="call-write-1",
+                                name="file_tool",
+                            )
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["It is updated."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
@@ -257,9 +272,7 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Checked."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         block_t4 = _working_files_block_content(_last_stream_items(web_harness))
         assert f"revision={_hash(after_external_edit)}" in block_t4
         assert "status=live" in block_t4
@@ -319,17 +332,17 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
                     LLMRound(
                         stop_reason="tool_use",
                         text_deltas=["Reading the top."],
-                        tool_calls=[ToolCallSpec(
-                            arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool"
-                        )],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                        ],
                         input_tokens=500,
                     ),
                     LLMRound(
                         stop_reason="tool_use",
                         text_deltas=["Reading the tail."],
-                        tool_calls=[ToolCallSpec(
-                            arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool"
-                        )],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")
+                        ],
                         input_tokens=500,
                     ),
                     LLMRound(text_deltas=["Inspected."], stop_reason="end_turn", input_tokens=5000),
@@ -337,18 +350,14 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
                 summary_text="EARLIER CHAT SUMMARY",
             )
         )
-        record = await post_chat(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         pending_snapshot_uuid = record.snapshot_uuid
         types = event_types(record.events)
         assert "compaction_pending" in types
         assert types[-1] == "compaction_pending"
         apply_assignments(messages, record.source_id_assignments)
         echo_assistant(messages, record)
-        post_compaction_uuid = await _wait_for_compaction(
-            authed_client, conversation_uuid, pending_snapshot_uuid
-        )
+        post_compaction_uuid = await _wait_for_compaction(authed_client, conversation_uuid, pending_snapshot_uuid)
 
         cached = Conversation.model_validate_json(
             await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
@@ -369,9 +378,7 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Continuing."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=post_compaction_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=post_compaction_uuid)
         block_t4 = _working_files_block_content(_last_stream_items(web_harness))
         assert f"revision={_hash(after_external)}" in block_t4
         assert "status=live" in block_t4
@@ -396,19 +403,23 @@ async def test_file_tool_create_file_persists_created_record_across_turns(web_ha
         # Turn 1: create the file.
         messages = [user_message("Create the file.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Creating it."],
-                    tool_calls=[ToolCallSpec(
-                        arguments=_create_args(target, "alpha\nbeta\n"),
-                        call_id="call-create-1",
-                        name="file_tool",
-                    )],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["Created."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Creating it."],
+                        tool_calls=[
+                            ToolCallSpec(
+                                arguments=_create_args(target, "alpha\nbeta\n"),
+                                call_id="call-create-1",
+                                name="file_tool",
+                            )
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Created."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
@@ -416,8 +427,7 @@ async def test_file_tool_create_file_persists_created_record_across_turns(web_ha
 
         turn1 = await _get_turn_execution(web_harness, conversation_uuid, record.bot_message_source_id)
         created_item = next(
-            item for item in turn1.items
-            if item.call_id == "call-create-1" and item.type == "function_call_output"
+            item for item in turn1.items if item.call_id == "call-create-1" and item.type == "function_call_output"
         )
         assert created_item.output.startswith("CREATED ")
         assert (created_item.prokaryotes_annotations or {}).get("file_tool.path") == _resolved(target)
@@ -428,9 +438,7 @@ async def test_file_tool_create_file_persists_created_record_across_turns(web_ha
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Continuing."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         outputs_t2 = _outputs_by_call_id(_last_stream_items(web_harness), {"call-create-1"})
         assert outputs_t2["call-create-1"].startswith("CREATED ")
         assert _resolved(target) in outputs_t2["call-create-1"]
@@ -454,19 +462,23 @@ async def test_file_tool_already_exists_window_normalizes_on_next_turn(web_harne
 
         messages = [user_message("Create the file if needed.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Trying to create it."],
-                    tool_calls=[ToolCallSpec(
-                        arguments=_create_args(target, "ignored\n"),
-                        call_id="call-exists-1",
-                        name="file_tool",
-                    )],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["I checked."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Trying to create it."],
+                        tool_calls=[
+                            ToolCallSpec(
+                                arguments=_create_args(target, "ignored\n"),
+                                call_id="call-exists-1",
+                                name="file_tool",
+                            )
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["I checked."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
@@ -483,9 +495,7 @@ async def test_file_tool_already_exists_window_normalizes_on_next_turn(web_harne
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Done."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         block = _working_files_block_content(_last_stream_items(web_harness))
         assert "FILE " in block
         assert "ALREADY_EXISTS " not in block
@@ -512,15 +522,19 @@ async def test_file_tool_conflict_window_normalizes_on_next_turn(web_harness, au
         # Turn 1: read to seed the revision.
         messages = [user_message("Read the file.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading it."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading it."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
@@ -531,19 +545,23 @@ async def test_file_tool_conflict_window_normalizes_on_next_turn(web_harness, au
         # Turn 2: write against the old revision → CONFLICT.
         messages.append(user_message("Apply the original edit."))
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Trying the edit."],
-                    tool_calls=[ToolCallSpec(
-                        arguments=_replace_args(target, _hash(initial), 1, 1, "alpha-updated\n"),
-                        call_id="call-conflict-1",
-                        name="file_tool",
-                    )],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["Handled."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Trying the edit."],
+                        tool_calls=[
+                            ToolCallSpec(
+                                arguments=_replace_args(target, _hash(initial), 1, 1, "alpha-updated\n"),
+                                call_id="call-conflict-1",
+                                name="file_tool",
+                            )
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Handled."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
@@ -563,9 +581,7 @@ async def test_file_tool_conflict_window_normalizes_on_next_turn(web_harness, au
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Done."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         block = _working_files_block_content(_last_stream_items(web_harness))
         assert f"revision={_hash(after_external_edit)}" in block
         assert "status=live" in block
@@ -591,34 +607,42 @@ async def test_file_tool_range_error_window_normalizes_on_next_turn(web_harness,
 
         messages = [user_message("Read the file.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading it."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading it."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
 
         messages.append(user_message("Replace the nonexistent range."))
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Trying the range."],
-                    tool_calls=[ToolCallSpec(
-                        arguments=_replace_args(target, _hash(initial), 5, 9, "X\n"),
-                        call_id="call-range-1",
-                        name="file_tool",
-                    )],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["Handled."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Trying the range."],
+                        tool_calls=[
+                            ToolCallSpec(
+                                arguments=_replace_args(target, _hash(initial), 5, 9, "X\n"),
+                                call_id="call-range-1",
+                                name="file_tool",
+                            )
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Handled."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(
             web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
@@ -637,9 +661,7 @@ async def test_file_tool_range_error_window_normalizes_on_next_turn(web_harness,
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Done."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         block = _working_files_block_content(_last_stream_items(web_harness))
         assert "FILE " in block
         assert "RANGE_ERROR " not in block
@@ -662,15 +684,19 @@ async def test_file_tool_missing_file_tombstones_on_next_turn(web_harness, authe
 
         messages = [user_message("Read the file.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading it."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading it."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
@@ -681,9 +707,7 @@ async def test_file_tool_missing_file_tombstones_on_next_turn(web_harness, authe
         web_harness.llm_client.set_script(
             LLMScript(rounds=[LLMRound(text_deltas=["Done."], stop_reason="end_turn", input_tokens=500)])
         )
-        await _advance_turn(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         block = _working_files_block_content(_last_stream_items(web_harness))
         assert "status=stale" in block
         assert "no longer accessible" in block
@@ -712,17 +736,19 @@ async def test_file_tool_symlink_escape_tombstones_on_next_turn(web_harness, aut
 
             messages = [user_message("Read the file.")]
             web_harness.llm_client.set_script(
-                LLMScript(rounds=[
-                    LLMRound(
-                        stop_reason="tool_use",
-                        text_deltas=["Reading it."],
-                        tool_calls=[ToolCallSpec(
-                            arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool"
-                        )],
-                        input_tokens=500,
-                    ),
-                    LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
-                ])
+                LLMScript(
+                    rounds=[
+                        LLMRound(
+                            stop_reason="tool_use",
+                            text_deltas=["Reading it."],
+                            tool_calls=[
+                                ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                            ],
+                            input_tokens=500,
+                        ),
+                        LLMRound(text_deltas=["Read."], stop_reason="end_turn", input_tokens=500),
+                    ]
+                )
             )
             record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
             snapshot_uuid = record.snapshot_uuid
@@ -734,9 +760,7 @@ async def test_file_tool_symlink_escape_tombstones_on_next_turn(web_harness, aut
             web_harness.llm_client.set_script(
                 LLMScript(rounds=[LLMRound(text_deltas=["Done."], stop_reason="end_turn", input_tokens=500)])
             )
-            await _advance_turn(
-                web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-            )
+            await _advance_turn(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
             block = _working_files_block_content(_last_stream_items(web_harness))
             assert "status=stale" in block
             assert "no longer accessible" in block
@@ -764,21 +788,27 @@ async def test_compaction_summary_input_omits_working_file_windows(web_harness, 
         # Turn 1: open two live windows.
         messages = [user_message("Inspect the file in two windows.")]
         web_harness.llm_client.set_script(
-            LLMScript(rounds=[
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading the top."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(
-                    stop_reason="tool_use",
-                    text_deltas=["Reading the tail."],
-                    tool_calls=[ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")],
-                    input_tokens=500,
-                ),
-                LLMRound(text_deltas=["I inspected it."], stop_reason="end_turn", input_tokens=500),
-            ])
+            LLMScript(
+                rounds=[
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading the top."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(
+                        stop_reason="tool_use",
+                        text_deltas=["Reading the tail."],
+                        tool_calls=[
+                            ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")
+                        ],
+                        input_tokens=500,
+                    ),
+                    LLMRound(text_deltas=["I inspected it."], stop_reason="end_turn", input_tokens=500),
+                ]
+            )
         )
         record = await _advance_turn(web_harness, authed_client, conversation_uuid, messages)
         snapshot_uuid = record.snapshot_uuid
@@ -801,11 +831,13 @@ async def test_compaction_summary_input_omits_working_file_windows(web_harness, 
                     LLMRound(
                         stop_reason="tool_use",
                         text_deltas=["Editing the file."],
-                        tool_calls=[ToolCallSpec(
-                            arguments=_replace_args(target, _hash(initial), 2, 3, "TWO\nTHREE_X\n"),
-                            call_id="call-write-1",
-                            name="file_tool",
-                        )],
+                        tool_calls=[
+                            ToolCallSpec(
+                                arguments=_replace_args(target, _hash(initial), 2, 3, "TWO\nTHREE_X\n"),
+                                call_id="call-write-1",
+                                name="file_tool",
+                            )
+                        ],
                         input_tokens=500,
                     ),
                     LLMRound(text_deltas=["It is updated and compacted."], stop_reason="end_turn", input_tokens=5000),
@@ -813,9 +845,7 @@ async def test_compaction_summary_input_omits_working_file_windows(web_harness, 
                 summary_text="LIVE WINDOW SUMMARY",
             )
         )
-        record = await post_chat(
-            web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid
-        )
+        record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=snapshot_uuid)
         pending_snapshot_uuid = record.snapshot_uuid
         types = event_types(record.events)
         assert "compaction_pending" in types

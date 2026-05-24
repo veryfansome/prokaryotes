@@ -32,39 +32,27 @@ def _fco(call_id: str, output: str = "ok") -> TurnItem:
     return TurnItem(type="function_call_output", call_id=call_id, output=output)
 
 
-class TestCountTurns:
-    def test_zero_tool_calls_one_final_message(self):
-        """Pure text completion — one LLM call, no tools."""
-        assert EvalHarness.count_turns([], had_final_assistant=True) == 1
-
-    def test_one_round_then_final(self):
-        """One tool round then a final answer — two LLM calls."""
-        items = [_fc("c1"), _fco("c1")]
-        assert EvalHarness.count_turns(items, had_final_assistant=True) == 2
-
-    def test_two_rounds_then_final(self):
-        items = [_fc("c1"), _fco("c1"), _fc("c2"), _fco("c2")]
-        assert EvalHarness.count_turns(items, had_final_assistant=True) == 3
-
-    def test_max_rounds_hit_no_final(self):
-        """Tool-call loop exhausted max rounds without producing a final message."""
-        items = [_fc("c1"), _fco("c1"), _fc("c2"), _fco("c2")]
-        assert EvalHarness.count_turns(items, had_final_assistant=False) == 2
-
-    def test_parallel_tool_calls_in_one_round(self):
-        """Multiple function_calls before any function_call_output count as one round."""
-        items = [_fc("c1"), _fc("c2"), _fco("c1"), _fco("c2")]
-        assert EvalHarness.count_turns(items, had_final_assistant=True) == 2
-
-    def test_only_function_call_no_output(self):
-        """A tool call without its output yet still counts as one round."""
-        items = [_fc("c1")]
-        assert EvalHarness.count_turns(items, had_final_assistant=False) == 1
-
-    def test_think_call_counts_like_any_tool(self):
-        """Think tool calls are regular function_calls and participate in rounds."""
-        items = [_fc("c1", name="think"), _fco("c1"), _fc("c2", name="shell_command"), _fco("c2")]
-        assert EvalHarness.count_turns(items, had_final_assistant=True) == 3
+@pytest.mark.parametrize(
+    "items, had_final, expected",
+    [
+        pytest.param([], True, 1, id="zero_tool_calls_one_final_message"),
+        pytest.param([_fc("c1"), _fco("c1")], True, 2, id="one_round_then_final"),
+        pytest.param([_fc("c1"), _fco("c1"), _fc("c2"), _fco("c2")], True, 3, id="two_rounds_then_final"),
+        pytest.param([_fc("c1"), _fco("c1"), _fc("c2"), _fco("c2")], False, 2, id="max_rounds_hit_no_final"),
+        pytest.param([_fc("c1"), _fc("c2"), _fco("c1"), _fco("c2")], True, 2, id="parallel_tool_calls_in_one_round"),
+        pytest.param([_fc("c1")], False, 1, id="only_function_call_no_output"),
+        pytest.param(
+            [_fc("c1", name="think"), _fco("c1"), _fc("c2", name="shell_command"), _fco("c2")],
+            True,
+            3,
+            id="think_call_counts_like_any_tool",
+        ),
+    ],
+)
+def test_count_turns(items, had_final, expected):
+    """`count_turns` counts function_call → function_call_output rounds, plus one trailing call if a final
+    assistant message was produced. Parallel tool calls in the same round count once."""
+    assert EvalHarness.count_turns(items, had_final_assistant=had_final) == expected
 
 
 @dataclass

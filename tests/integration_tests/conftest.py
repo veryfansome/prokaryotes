@@ -6,6 +6,7 @@ prokaryotes.utils_v1.llm_utils import …`, so the bindings freeze at import tim
 above any `from prokaryotes…` import, with harness imports deferred into fixtures — is the only way to make the
 override actually take effect.
 """
+
 import os
 
 import pytest

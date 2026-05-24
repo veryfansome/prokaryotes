@@ -8,11 +8,13 @@ from prokaryotes.tools_v1.think import ThinkTool
 
 
 def make_args(goal="my goal", context="my context", perspectives=None):
-    return json.dumps({
-        "goal": goal,
-        "context": context,
-        "perspectives": perspectives if perspectives is not None else ["trade-offs", "risks"],
-    })
+    return json.dumps(
+        {
+            "goal": goal,
+            "context": context,
+            "perspectives": perspectives if perspectives is not None else ["trade-offs", "risks"],
+        }
+    )
 
 
 @pytest.fixture
@@ -51,11 +53,14 @@ async def test_call_wraps_goal_context_and_perspectives_in_uuid_delimiters(mock_
     assert "perspectives" in system_content
 
 
-@pytest.mark.parametrize("kwarg,env_var,expected", [
-    ("high", "medium", "high"),
-    (None, "medium", "medium"),
-    (None, None, "low"),
-])
+@pytest.mark.parametrize(
+    "kwarg,env_var,expected",
+    [
+        ("high", "medium", "high"),
+        (None, "medium", "medium"),
+        (None, None, "low"),
+    ],
+)
 def test_reasoning_effort_precedence(monkeypatch, kwarg, env_var, expected):
     if env_var is not None:
         monkeypatch.setenv("THINK_TOOL_REASONING_EFFORT", env_var)

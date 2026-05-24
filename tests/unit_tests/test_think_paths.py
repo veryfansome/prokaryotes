@@ -60,7 +60,7 @@ async def test_paths_injects_matching_live_windows(tmp_path: Path):
         workspace_root=tmp_path,
     )
     await tool.call(_args(paths=[str(target)]), call_id="t-1")
-    body = (fake.last_items[0].content or "")
+    body = fake.last_items[0].content or ""
     assert "<active-working-files-" in body
     assert f"FILE path={target}" in body
 
@@ -78,7 +78,7 @@ async def test_paths_skips_stale_windows(tmp_path: Path):
         workspace_root=tmp_path,
     )
     await tool.call(_args(paths=[str(target)]), call_id="t-1")
-    body = (fake.last_items[0].content or "")
+    body = fake.last_items[0].content or ""
     assert "<active-working-files-" not in body
 
 
@@ -93,7 +93,7 @@ async def test_empty_paths_omits_block(tmp_path: Path):
         workspace_root=tmp_path,
     )
     await tool.call(_args(paths=[]), call_id="t-1")
-    body = (fake.last_items[0].content or "")
+    body = fake.last_items[0].content or ""
     assert "<active-working-files-" not in body
 
 
@@ -102,5 +102,5 @@ async def test_no_provider_omits_block(tmp_path: Path):
     fake = _FakeLLM()
     tool = ThinkTool(fake, model="m", working_file_provider=None, workspace_root=tmp_path)
     await tool.call(_args(paths=["/abs/a.py"]), call_id="t-1")
-    body = (fake.last_items[0].content or "")
+    body = fake.last_items[0].content or ""
     assert "<active-working-files-" not in body

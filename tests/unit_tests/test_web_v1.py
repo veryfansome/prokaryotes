@@ -39,23 +39,11 @@ from tests.unit_tests._fakes import FakeRedis, FakeSearchClient, make_syncer
 # -----------------------------------------------------------------------------
 
 
-def test_webbase_inherits_new_shared_layers_without_new_abstractmethods():
-    """WebBase composes HarnessBase + AuthHandler + CompactionStatusHandler.
-    All abstract methods must be satisfied so WebBase can be instantiated."""
-    from prokaryotes.harness_v1.base import HarnessBase
-    from prokaryotes.web_v1.compaction import CompactionStatusHandler
-
-    assert issubclass(WebBase, HarnessBase)
-    assert issubclass(WebBase, AuthHandler)
-    assert issubclass(WebBase, CompactionStatusHandler)
-    assert WebBase.__abstractmethods__ == frozenset()
-    wb = WebBase("scripts/static")  # must not raise
-    assert wb.html_dir.name == "html"
-
-
-def test_web_v1_surface_re_exports_context_v1_helpers():
-    """web_v1 re-exports context_v1 helpers, pinning a stable import surface
-    for downstream callers."""
+def test_web_v1_import_surface_locks_down_documented_re_exports():
+    """`web_v1/README.md` documents the re-export surface as contract: `ConversationCompactor`,
+    `ConversationSyncer`, `_conversation_can_follow_client`, `get_redis_client`, `AuthHandler`,
+    `hash_password`, `verify_password`, `get_postgres_pool`, and `WebBase` itself. Also asserts
+    `WebBase`'s composed-ABC contract is fully satisfied — instantiation must not raise."""
     from prokaryotes.context_v1 import (
         ConversationCompactor as _Compactor,
     )
@@ -68,14 +56,7 @@ def test_web_v1_surface_re_exports_context_v1_helpers():
     from prokaryotes.context_v1 import (
         get_redis_client as _redis,
     )
-
-    assert ConversationCompactor is _Compactor
-    assert ConversationSyncer is _Syncer
-    assert _conversation_can_follow_client is _follow
-    assert get_redis_client is _redis
-
-
-def test_web_v1_surface_re_exports_auth_and_db_helpers():
+    from prokaryotes.harness_v1.base import HarnessBase
     from prokaryotes.utils_v1.db_utils import get_postgres_pool as _pool
     from prokaryotes.web_v1.auth import (
         AuthHandler as _Auth,
@@ -86,11 +67,22 @@ def test_web_v1_surface_re_exports_auth_and_db_helpers():
     from prokaryotes.web_v1.auth import (
         verify_password as _verify,
     )
+    from prokaryotes.web_v1.compaction import CompactionStatusHandler
 
+    assert ConversationCompactor is _Compactor
+    assert ConversationSyncer is _Syncer
+    assert _conversation_can_follow_client is _follow
+    assert get_redis_client is _redis
     assert AuthHandler is _Auth
     assert hash_password is _hash
     assert verify_password is _verify
     assert get_postgres_pool is _pool
+
+    assert issubclass(WebBase, HarnessBase)
+    assert issubclass(WebBase, AuthHandler)
+    assert issubclass(WebBase, CompactionStatusHandler)
+    wb = WebBase("scripts/static")  # composed-ABC contract: instantiation must not raise.
+    assert wb.html_dir.name == "html"
 
 
 # -----------------------------------------------------------------------------

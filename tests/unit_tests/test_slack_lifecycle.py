@@ -144,8 +144,15 @@ async def test_on_stop_drains_in_flight_tasks_before_closing_slack_client():
 
 
 @pytest.mark.asyncio
-async def test_run_installs_signal_handlers_and_runs_on_stop(monkeypatch: pytest.MonkeyPatch):
-    """Delivering SIGTERM to the running loop sets the stop event, `run()` unblocks, and `on_stop` executes."""
+@pytest.mark.parametrize(
+    "sig",
+    [
+        pytest.param(signal.SIGTERM, id="sigterm_docker_stop"),
+        pytest.param(signal.SIGINT, id="sigint_ctrl_c"),
+    ],
+)
+async def test_run_installs_signal_handlers_and_runs_on_stop(monkeypatch: pytest.MonkeyPatch, sig):
+    """SIGTERM (docker compose stop) and SIGINT (Ctrl-C) both set the stop event so `on_stop` runs."""
     os.environ.pop("SLACK_HARNESS_IMPL", None)
 
     started = asyncio.Event()
@@ -166,35 +173,7 @@ async def test_run_installs_signal_handlers_and_runs_on_stop(monkeypatch: pytest
     run_task = asyncio.create_task(slack_script.run(app_token="xapp-test", bot_token="xoxb-test"))
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
-    # Deliver SIGTERM to the running loop, the way `docker compose stop` does.
-    signal.raise_signal(signal.SIGTERM)
-
-    await asyncio.wait_for(run_task, timeout=1.0)
-    assert stopped.is_set()
-
-
-@pytest.mark.asyncio
-async def test_run_handles_sigint(monkeypatch: pytest.MonkeyPatch):
-    """SIGINT (Ctrl-C) is wired to the same stop event so `on_stop` still runs."""
-    started = asyncio.Event()
-    stopped = asyncio.Event()
-
-    class _ScriptHarness:
-        def __init__(self, *, impl: str, app_token: str, bot_token: str) -> None:
-            pass
-
-        async def on_start(self) -> None:
-            started.set()
-
-        async def on_stop(self) -> None:
-            stopped.set()
-
-    monkeypatch.setattr(slack_script, "SlackHarness", _ScriptHarness)
-
-    run_task = asyncio.create_task(slack_script.run(app_token="xapp-test", bot_token="xoxb-test"))
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    signal.raise_signal(signal.SIGINT)
+    signal.raise_signal(sig)
 
     await asyncio.wait_for(run_task, timeout=1.0)
     assert stopped.is_set()
