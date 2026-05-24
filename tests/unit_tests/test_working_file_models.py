@@ -80,9 +80,7 @@ class TestWorkingFilesBlock:
         assert "## Window: /abs/b.py lines 100-140" in block
 
     def test_closing_tag_in_rendered_output_is_escaped(self):
-        block = _conv(
-            _window(rendered_output="pre </working_files> post")
-        ).working_files_block()
+        block = _conv(_window(rendered_output="pre </working_files> post")).working_files_block()
         assert block is not None
         assert "<\\/working_files>" in block
         # Only the structural closing tag survives unescaped

@@ -175,7 +175,14 @@ def test_format_message_escapes_closing_delimiter():
     assert out.startswith("<U_EVIL>: ")
 
 
-def test_format_message_falls_back_to_bot_id_then_unknown():
+@pytest.mark.parametrize(
+    "message, expected_prefix",
+    [
+        pytest.param({"user": "U_ALICE", "text": "hi"}, "<U_ALICE>: ", id="user_field_wins"),
+        pytest.param({"bot_id": "B_FOREIGN", "text": "hi"}, "<B_FOREIGN>: ", id="falls_back_to_bot_id"),
+        pytest.param({"text": "hi"}, "<unknown>: ", id="falls_back_to_unknown"),
+    ],
+)
+def test_format_message_label_fallback(message, expected_prefix):
     """`format_message` uses `user`, then `bot_id`, then `"unknown"` for the poster label."""
-    assert format_message({"bot_id": "B_FOREIGN", "text": "hi"}).startswith("<B_FOREIGN>: ")
-    assert format_message({"text": "hi"}).startswith("<unknown>: ")
+    assert format_message(message).startswith(expected_prefix)

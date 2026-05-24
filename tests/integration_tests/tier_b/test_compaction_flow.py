@@ -156,18 +156,14 @@ async def _establish_two_generation_compacted_snapshot(
             summary_text="GEN-2",
         )
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=active_uuid
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=active_uuid)
     types = event_types(record.events)
     assert "compaction_pending" in types
     assert types[-1] == "compaction_pending"
     second_pending_uuid = record.snapshot_uuid
     apply_assignments(messages, record.source_id_assignments)
     echo_assistant(messages, record)
-    post_second_compaction_uuid = await _wait_for_compaction(
-        authed_client, conversation_uuid, second_pending_uuid
-    )
+    post_second_compaction_uuid = await _wait_for_compaction(authed_client, conversation_uuid, second_pending_uuid)
 
     cached = await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
     conv = Conversation.model_validate_json(cached)
@@ -224,9 +220,7 @@ async def test_forced_compaction_marks_parent_and_redirects_stale_anchor(web_har
     """Beyond the relabel: parent doc is marked is_compacted with summary + boundary fields, and a follow-up turn
     anchored at the (stale) pre-compaction snapshot still lands on the post-compaction snapshot via the relabel
     path."""
-    conversation_uuid, pre_id, post_id, messages = await _establish_compacted_snapshot(
-        web_harness, authed_client
-    )
+    conversation_uuid, pre_id, post_id, messages = await _establish_compacted_snapshot(web_harness, authed_client)
 
     parent_doc = await web_harness.search_client.get_conversation(pre_id)
     assert parent_doc is not None
@@ -249,9 +243,7 @@ async def test_forced_compaction_marks_parent_and_redirects_stale_anchor(web_har
     web_harness.llm_client.set_script(
         LLMScript(rounds=[LLMRound(text_deltas=["ok"], stop_reason="end_turn", input_tokens=500)])
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=pre_id
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=pre_id)
     assert record.snapshot_uuid == post_id
 
 
@@ -311,9 +303,7 @@ async def test_compaction_carries_forward_messages_added_during_summary(web_harn
     assert follow_up.snapshot_uuid == pending_snapshot_uuid
     assert "compaction_pending" not in event_types(follow_up.events)
 
-    post_compaction_uuid = await _wait_for_compaction(
-        authed_client, conversation_uuid, pending_snapshot_uuid
-    )
+    post_compaction_uuid = await _wait_for_compaction(authed_client, conversation_uuid, pending_snapshot_uuid)
     cached = await web_harness.redis_client.get(f"conversation:{conversation_uuid}")
     conv = Conversation.model_validate_json(cached)
     assert conv.snapshot_uuid == post_compaction_uuid
@@ -356,9 +346,7 @@ async def test_rebuild_from_compacted_ancestor_after_redis_miss(web_harness, aut
     """After compaction, evict Redis and post anchored at the stale pre-compaction snapshot. The syncer must walk
     the chain via ES, find the compacted ancestor, and rebuild a fresh active snapshot that inherits the ancestor's
     summaries."""
-    conversation_uuid, pre_id, post_id, messages = await _establish_compacted_snapshot(
-        web_harness, authed_client
-    )
+    conversation_uuid, pre_id, post_id, messages = await _establish_compacted_snapshot(web_harness, authed_client)
 
     await web_harness.redis_client.delete(f"conversation:{conversation_uuid}")
 
@@ -366,9 +354,7 @@ async def test_rebuild_from_compacted_ancestor_after_redis_miss(web_harness, aut
     web_harness.llm_client.set_script(
         LLMScript(rounds=[LLMRound(text_deltas=["restored"], stop_reason="end_turn", input_tokens=500)])
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=pre_id
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=pre_id)
     rebuilt_uuid = record.snapshot_uuid
     assert rebuilt_uuid != pre_id
     assert rebuilt_uuid != post_id
@@ -411,9 +397,7 @@ async def test_rebuild_from_multigeneration_compacted_ancestor_after_redis_miss(
     web_harness.llm_client.set_script(
         LLMScript(rounds=[LLMRound(text_deltas=["restored-again"], stop_reason="end_turn", input_tokens=500)])
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=second_pending_uuid
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=second_pending_uuid)
     rebuilt_uuid = record.snapshot_uuid
     assert rebuilt_uuid != second_pending_uuid
     assert rebuilt_uuid != post_second_compaction_uuid
@@ -442,9 +426,7 @@ async def test_rebuild_from_multigeneration_compacted_ancestor_after_redis_miss(
 async def test_retry_within_recency_tail(web_harness, authed_client):
     """Divergence within the raw window — client edits a user message in the tail (keeps the same source_id, changes
     content). Result: branched snapshot rooted at the parent's shared prefix; ancestor_summaries inherited."""
-    conversation_uuid, _pre, post_id, messages = await _establish_compacted_snapshot(
-        web_harness, authed_client
-    )
+    conversation_uuid, _pre, post_id, messages = await _establish_compacted_snapshot(web_harness, authed_client)
 
     # Edit `u4` in place (keep source_id, change content). The reconcile step classifies this as an `edit`, which
     # the web syncer branches by policy.
@@ -454,9 +436,7 @@ async def test_retry_within_recency_tail(web_harness, authed_client):
     web_harness.llm_client.set_script(
         LLMScript(rounds=[LLMRound(text_deltas=["a4-fresh"], stop_reason="end_turn", input_tokens=500)])
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, edited, snapshot_uuid=post_id
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, edited, snapshot_uuid=post_id)
     branched_uuid = record.snapshot_uuid
     assert branched_uuid != post_id
 
@@ -483,18 +463,14 @@ async def test_retry_within_recency_tail(web_harness, authed_client):
 async def test_retry_before_recency_tail(web_harness, authed_client):
     """Divergence before the compaction boundary — the rebuild falls through Case B (no matching compacted ancestor)
     and starts a fresh branch with no ancestors, `raw_message_start_index=0`."""
-    conversation_uuid, pre_id, post_id, _messages = await _establish_compacted_snapshot(
-        web_harness, authed_client
-    )
+    conversation_uuid, pre_id, post_id, _messages = await _establish_compacted_snapshot(web_harness, authed_client)
 
     # Truncate to a single user message — fresh start from the user's POV.
     fresh_messages = [user_message("u1-only")]
     web_harness.llm_client.set_script(
         LLMScript(rounds=[LLMRound(text_deltas=["fresh"], stop_reason="end_turn", input_tokens=500)])
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, fresh_messages, snapshot_uuid=pre_id
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, fresh_messages, snapshot_uuid=pre_id)
     branched_uuid = record.snapshot_uuid
     assert branched_uuid != pre_id
     assert branched_uuid != post_id
@@ -523,9 +499,7 @@ async def test_branch_switch(web_harness, authed_client):
     """After establishing branch A (post-compaction) and branch B (alternate from pre-compaction), the user can
     switch back to branch A by anchoring at A's snapshot. Redis was last written by branch B; branch A is restored
     from ES."""
-    conversation_uuid, pre_id, post_id, messages = await _establish_compacted_snapshot(
-        web_harness, authed_client
-    )
+    conversation_uuid, pre_id, post_id, messages = await _establish_compacted_snapshot(web_harness, authed_client)
 
     # Branch B: alternate from pre-compaction.
     alternate_messages = [user_message("u1-only")]
@@ -547,9 +521,7 @@ async def test_branch_switch(web_harness, authed_client):
     web_harness.llm_client.set_script(
         LLMScript(rounds=[LLMRound(text_deltas=["branch-a"], stop_reason="end_turn", input_tokens=500)])
     )
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=post_id
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, messages, snapshot_uuid=post_id)
     assert record.snapshot_uuid == post_id
 
     cached = await web_harness.redis_client.get(f"conversation:{conversation_uuid}")

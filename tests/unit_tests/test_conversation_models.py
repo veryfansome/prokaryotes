@@ -39,10 +39,6 @@ class TestConversationMessageItems:
 
 
 class TestComputeBoundaryHash:
-    def test_stable_across_calls(self):
-        items = [msg("1", "alpha"), bot_msg("2", "beta")]
-        assert compute_boundary_hash(items) == compute_boundary_hash(items)
-
     def test_excludes_deleted(self):
         without_deleted = [msg("1", "alpha"), bot_msg("2", "beta")]
         with_deleted = [

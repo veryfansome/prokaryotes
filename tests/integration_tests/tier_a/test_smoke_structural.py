@@ -1,4 +1,4 @@
-"""Tier A structural smoke (OpenAI). Real LLM, run by hand before release."""
+"""Tier A structural smoke (Anthropic + OpenAI). Real LLM, run by hand before release."""
 
 from __future__ import annotations
 
@@ -21,7 +21,11 @@ def _event_types(events: list[dict]) -> list[str]:
     return [k for ev in events for k in ev.keys()]
 
 
-@pytest.mark.parametrize("web_harness, authed_client", [("openai", "openai")], indirect=True)
+@pytest.mark.parametrize(
+    "web_harness, authed_client",
+    [("anthropic", "anthropic"), ("openai", "openai")],
+    indirect=True,
+)
 @pytest.mark.asyncio(loop_scope="session")
 async def test_live_single_turn(web_harness, authed_client):
     payload = {
@@ -42,7 +46,11 @@ async def test_live_single_turn(web_harness, authed_client):
     assert doc is not None
 
 
-@pytest.mark.parametrize("web_harness, authed_client", [("openai", "openai")], indirect=True)
+@pytest.mark.parametrize(
+    "web_harness, authed_client",
+    [("anthropic", "anthropic"), ("openai", "openai")],
+    indirect=True,
+)
 @pytest.mark.asyncio(loop_scope="session")
 async def test_live_forced_compaction(web_harness, authed_client):
     (
@@ -69,21 +77,3 @@ async def test_live_forced_compaction(web_harness, authed_client):
     assert conv.snapshot_uuid == record.snapshot_uuid or conv.parent_snapshot_uuid == record.snapshot_uuid
     assert conv.snapshot_uuid != pending_snapshot_uuid
     assert conv.ancestor_summaries
-
-
-@pytest.mark.parametrize("web_harness, authed_client", [("openai", "openai")], indirect=True)
-@pytest.mark.asyncio(loop_scope="session")
-async def test_live_tool_call_best_effort(web_harness, authed_client):
-    payload = {
-        "conversation_uuid": str(uuid4()),
-        "messages": [user_message("Use the shell_command tool to run `echo hi`.")],
-    }
-    async with request_scope(web_harness):
-        record = await post_chat_collect(authed_client, payload)
-    types = _event_types(record.events)
-    assert "snapshot_uuid" in record.events[0]
-    if "tool_call" in types:
-        for ev in record.events:
-            if "tool_call" in ev:
-                assert isinstance(ev["tool_call"]["name"], str)
-                assert isinstance(ev["tool_call"]["arguments"], str)

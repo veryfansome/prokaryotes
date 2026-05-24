@@ -1,4 +1,5 @@
 """Tier A fixtures: real-client harnesses gated on per-provider API keys."""
+
 from __future__ import annotations
 
 import asyncio

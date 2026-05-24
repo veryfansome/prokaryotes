@@ -99,9 +99,7 @@ async def test_regenerate_last_reply_branches_and_preserves_parent(web_harness, 
     # UI regenerate: re-POST the conversation up to u2, dropping the bot reply.
     regenerated = [dict(m) for m in messages[:3]]
     web_harness.llm_client.set_script(_single_round("a2-regenerated"))
-    record = await post_chat(
-        web_harness, authed_client, conversation_uuid, regenerated, snapshot_uuid=snapshot_uuid
-    )
+    record = await post_chat(web_harness, authed_client, conversation_uuid, regenerated, snapshot_uuid=snapshot_uuid)
 
     branched_uuid = record.snapshot_uuid
     assert branched_uuid != snapshot_uuid

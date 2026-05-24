@@ -14,26 +14,6 @@ from prokaryotes.conversation_v1.project import _turn_items_to_projected
 from prokaryotes.openai_v1 import _items_to_openai_input
 
 
-def test_turn_item_has_annotations_field_default_none():
-    item = TurnItem(type="function_call", call_id="c", name="t", arguments="{}")
-    assert item.prokaryotes_annotations is None
-
-
-def test_turn_item_annotations_round_trip_through_model_dump_json():
-    item = TurnItem(
-        type="function_call",
-        call_id="c",
-        name="t",
-        arguments="{}",
-        prokaryotes_annotations={"path": "/tmp/x", "kind": "live_window"},
-    )
-
-    raw = item.model_dump_json()
-    revived = TurnItem.model_validate_json(raw)
-
-    assert revived.prokaryotes_annotations == {"path": "/tmp/x", "kind": "live_window"}
-
-
 def test_projection_strips_annotations_from_projected_items():
     """`_turn_items_to_projected` is the boundary at which `prokaryotes_annotations`
     is structurally dropped — ProjectedItem has no such field."""

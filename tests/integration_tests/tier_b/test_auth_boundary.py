@@ -22,9 +22,10 @@ async def _unauth_client(harness):
         yield client
 
 
-@pytest.mark.parametrize("web_harness", ["anthropic", "openai"], indirect=True)
+@pytest.mark.parametrize("web_harness", ["anthropic"], indirect=True)
 @pytest.mark.asyncio(loop_scope="session")
 async def test_chat_rejects_missing_session(web_harness):
+    """Pre-auth — request rejected before any LLM client is touched, so only one provider is exercised."""
     async with _unauth_client(web_harness) as client:
         response = await client.post(
             "/chat",
@@ -36,11 +37,12 @@ async def test_chat_rejects_missing_session(web_harness):
 
 @pytest.mark.parametrize(
     "web_harness, authed_client",
-    [("anthropic", "anthropic"), ("openai", "openai")],
+    [("anthropic", "anthropic")],
     indirect=True,
 )
 @pytest.mark.asyncio(loop_scope="session")
 async def test_chat_rejects_empty_messages(web_harness, authed_client):
+    """Validation runs before any LLM client is touched, so only one provider is exercised."""
     response = await authed_client.post(
         "/chat",
         json={"conversation_uuid": str(uuid4()), "messages": []},

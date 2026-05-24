@@ -116,9 +116,7 @@ async def test_conflict_diagnostic_mints_window_with_conflict_source_kind(tmp_pa
     windows: list[WorkingFileWindow] = []
     tool = FileTool(lambda: windows, workspace_root=_workspace(tmp_path))
     # Read for revision
-    read_result = await tool.call(
-        _arguments("read_lines", str(target), start_line=1, end_line=3), call_id="c-read"
-    )
+    read_result = await tool.call(_arguments("read_lines", str(target), start_line=1, end_line=3), call_id="c-read")
     assert read_result.prokaryotes_annotations.get("file_tool.persistence") == "working_file"
     # Edit with a stale revision → CONFLICT
     edit_result = await tool.call(
@@ -146,9 +144,7 @@ async def test_edited_record_uses_history_persistence(tmp_path: Path):
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
     windows: list[WorkingFileWindow] = []
     tool = FileTool(lambda: windows, workspace_root=_workspace(tmp_path))
-    await tool.call(
-        _arguments("read_lines", str(target), start_line=1, end_line=3), call_id="c-read"
-    )
+    await tool.call(_arguments("read_lines", str(target), start_line=1, end_line=3), call_id="c-read")
     revision = next(w.revision for w in windows if w.window_id == "c-read")
     edit_result = await tool.call(
         _arguments(

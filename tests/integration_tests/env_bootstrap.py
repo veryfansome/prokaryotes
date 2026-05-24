@@ -1,4 +1,5 @@
 """Shared environment bootstrap for the integration test tiers."""
+
 from __future__ import annotations
 
 import os

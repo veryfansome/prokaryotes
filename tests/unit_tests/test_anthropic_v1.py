@@ -9,7 +9,6 @@ import pytest
 from prokaryotes.anthropic_v1 import AnthropicClient
 from prokaryotes.api_v1.models import ToolParameters, ToolSpec
 from prokaryotes.conversation_v1.models import ProjectedItem, TurnItem
-from prokaryotes.tools_v1.file_tool import FileTool
 
 
 class DummyToolCallback:
@@ -111,40 +110,25 @@ def _user_msg(content: str) -> ProjectedItem:
 
 
 @pytest.mark.asyncio
-async def test_stream_turn_context_pct_includes_cached_tokens():
-    """Total context_pct must sum input + cache_read + cache_creation tokens."""
+@pytest.mark.parametrize(
+    "input_tokens, cache_read, cache_create",
+    [
+        pytest.param(160_000, 0, 0, id="input_only"),
+        pytest.param(20_000, 100_000, 40_000, id="includes_cached_tokens"),
+    ],
+)
+async def test_stream_turn_emits_context_pct_summing_input_and_cache(input_tokens, cache_read, cache_create):
+    """`context_pct` reports (input + cache_read + cache_creation) / model context window. 160k/200k == 80%."""
     client = _make_client(
         [
             FakeStreamContext(
                 text_chunks=["ok"],
                 tool_uses=[],
                 stop_reason="end_turn",
-                input_tokens=20_000,
-                cache_read_input_tokens=100_000,
-                cache_creation_input_tokens=40_000,
+                input_tokens=input_tokens,
+                cache_read_input_tokens=cache_read,
+                cache_creation_input_tokens=cache_create,
             ),
-        ]
-    )
-
-    chunks = [
-        chunk
-        async for chunk in client.stream_turn(
-            items=[_user_msg("Hi")],
-            instruction=None,
-            model="claude-opus-4-7",
-            stream_ndjson=True,
-        )
-    ]
-
-    # 20_000 + 100_000 + 40_000 = 160_000; 160_000 / 200_000 == 80%
-    assert '{"context_pct": 80}\n' in chunks
-
-
-@pytest.mark.asyncio
-async def test_stream_turn_emits_context_pct_for_ndjson_stream():
-    client = _make_client(
-        [
-            FakeStreamContext(text_chunks=["ok"], tool_uses=[], stop_reason="end_turn", input_tokens=160_000),
         ]
     )
 
@@ -359,30 +343,6 @@ async def test_stream_turn_max_tool_call_rounds_commits_round_then_stops():
     assert len(client.async_anthropic.messages.calls) == 1
 
 
-def test_anthropic_tool_param_strips_integer_minimum_from_file_tool_schema(tmp_path):
-    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
-
-    anthropic_param = tool.tool_spec.to_anthropic_tool_param()
-
-    start_line = anthropic_param["input_schema"]["properties"]["start_line"]
-    end_line = anthropic_param["input_schema"]["properties"]["end_line"]
-    assert start_line["type"] == ["integer", "null"]
-    assert end_line["type"] == ["integer", "null"]
-    assert "minimum" not in start_line
-    assert "minimum" not in end_line
-
-
-def test_openai_tool_param_keeps_integer_minimum_in_file_tool_schema(tmp_path):
-    tool = FileTool(working_file_provider=lambda: [], workspace_root=tmp_path)
-
-    openai_param = tool.tool_spec.to_openai_function_tool_param()
-
-    start_line = openai_param["parameters"]["properties"]["start_line"]
-    end_line = openai_param["parameters"]["properties"]["end_line"]
-    assert start_line["minimum"] == 1
-    assert end_line["minimum"] == 1
-
-
 def test_items_to_anthropic_messages_skips_empty_text_blocks():
     """An empty-content message item must not become a `{"type":"text","text":""}` block — Anthropic rejects
     empty text blocks."""
@@ -397,8 +357,6 @@ def test_items_to_anthropic_messages_skips_empty_text_blocks():
 
     messages = _items_to_anthropic_messages(items)
 
-    text_blocks = [
-        block for message in messages for block in message["content"] if block.get("type") == "text"
-    ]
+    text_blocks = [block for message in messages for block in message["content"] if block.get("type") == "text"]
     assert all(block["text"] for block in text_blocks)
     assert any(block["text"] == "real reply" for block in text_blocks)

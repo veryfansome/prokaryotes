@@ -39,9 +39,7 @@ async def test_call_nonzero_exit_and_stderr():
 async def test_call_truncates_long_output():
     tool = ShellCommandTool()
     line_count = tool.max_output_lines + 50
-    result = await tool.call(
-        f'{{"command": "seq 1 {line_count}", "reason": "test"}}', "call_3"
-    )
+    result = await tool.call(f'{{"command": "seq 1 {line_count}", "reason": "test"}}', "call_3")
 
     assert f"Truncated after {tool.max_output_lines} lines" in result.output
     stdout_section = result.output.split("# STDOUT")[1].split("# STDERR")[0]
