@@ -4,13 +4,20 @@
 Each inbound `@`-mention or DM message runs one LLM turn: `handle_event` derives the deterministic
 `conversation_uuid`, takes the per-thread turn lock, and runs `_locked_turn` under a shared
 `SLACK_TURN_TIMEOUT_SECONDS` budget. `_locked_turn` reconciles the Slack thread into the active `Conversation`
-(`sync_slack_thread`), builds the channel prelude, and drives `_run_turn` — projection, `stream_turn`, NDJSON →
-Slack via `SlackStreamer`, and finalize.
+(`sync_slack_thread`), writes the Site A humans/engaged cache, builds the channel prelude, and drives
+`_run_turn` — projection, `stream_turn`, NDJSON → Slack via `SlackStreamer`, and finalize.
 
 Slack does not use `HarnessBase.stream_and_finalize`: bot `source_id`s are real Slack `ts`s known only after
 posting, a long reply is several posts, and the failure path needs the same finalize call to make the failure
 notice durable. `_finalize_slack_turn` commits one bot `ConversationMessage` per `PostedMessage`, each stamped
 with `reply_to_source_id = event["ts"]`.
+
+Single-human-thread continuation cache: three Redis write sites populate
+`slack_thread_humans:{conversation_uuid}` (set of human author IDs) and `slack_thread_engaged:{conversation_uuid}`
+(string flag set once Site A has reconciled the thread). Site C (`_on_dispatch_accept`) writes humans eagerly
+on `@`-mention dispatch; Site A (`_write_thread_state_post_sync`, called from `_locked_turn` after
+`sync_slack_thread`) adds historical participants and sets engaged; Site B (`_should_continue_threaded`)
+records dropped non-mention senders into humans and evaluates the continuation predicate.
 """
 
 from __future__ import annotations
@@ -33,12 +40,14 @@ from prokaryotes.harness_v1 import build_llm_client
 from prokaryotes.slack_v1 import SlackBase
 from prokaryotes.slack_v1.client import SlackClientWithToken
 from prokaryotes.slack_v1.replay import (
+    SLACK_THREAD_HUMANS_TTL_SECONDS,
     _earliest_raw_window_ts,
     _human_user_ids_in,
     _mentioned_user_ids_in,
     _slack_author_id,
     _strip_in_flight_orphans,
     build_prelude,
+    distinct_human_author_ids,
     resolve_display_names,
     sanitize_mentions,
 )
@@ -258,6 +267,15 @@ class SlackHarness(SlackBase):
         )
         return parts
 
+    def _dispatch_conversation_uuid(self, event: dict) -> str | None:
+        """Per-thread key for the dispatch lock. Returns `None` for events that cannot be keyed to a thread
+        (missing channel or ts) — the base then makes `_dispatch_lock` a no-op so dispatch still works."""
+        channel = event.get("channel")
+        thread_ts = event.get("thread_ts") or event.get("ts")
+        if not channel or not thread_ts:
+            return None
+        return slack_conversation_uuid(self.team_id, channel, thread_ts)
+
     async def _finalize_slack_turn(
         self,
         *,
@@ -337,7 +355,8 @@ class SlackHarness(SlackBase):
         slack: SlackClientWithToken,
         thread_ts: str,
     ) -> None:
-        """Run one turn under the per-thread lock: reconcile the thread, build the prelude, drive `_run_turn`."""
+        """Run one turn under the per-thread lock: reconcile the thread, write Site A's humans/engaged cache,
+        build the prelude, drive `_run_turn`."""
         conversation = await self.sync_slack_thread(
             channel_id=channel_id,
             conversation_uuid=conversation_uuid,
@@ -345,6 +364,12 @@ class SlackHarness(SlackBase):
             thread_ts=thread_ts,
             triggering_ts=event["ts"],
         )
+        # Site A — write the full reconciled human set and set the engaged flag. Must run before streaming
+        # starts so any non-mention follow-up that races in during the LLM turn sees the predicate-ready
+        # cache. `_write_thread_state_post_sync` no-ops for DMs (`channel_type == "im"`). mpim mentions still
+        # write here as harmless dead state — see the helper's docstring for the channel_type-fallback
+        # rationale.
+        await self._write_thread_state_post_sync(conversation, channel_type=channel_type)
         prelude = await build_prelude(
             channel_id=channel_id,
             channel_type=channel_type,
@@ -362,6 +387,27 @@ class SlackHarness(SlackBase):
             slack_client=slack,
             thread_ts=thread_ts,
         )
+
+    async def _on_dispatch_accept(self, event: dict) -> None:
+        """Site C — eager humans-cache seed for accepted `@`-mention events. Runs inside the dispatch lock,
+        before `background_and_forget(handle_event)`. Writes only the humans set; does *not* set the engaged
+        flag (that is Site A's exclusive responsibility — it gates predicate evaluation in Site B).
+
+        No `channel_type` filter: `app_mention` events do not carry `channel_type` (see the matching comment in
+        `handle_event`), so this hook cannot reliably distinguish channel from mpim mentions at dispatch time.
+        Writing humans for an mpim or DM mention is *dead state*, not a correctness bug — Site B's eligibility
+        check vetoes `channel_type != "channel"|"group"` events against the incoming non-mention event (which
+        does carry the field), so the cache is never evaluated for mpim or DM threads.
+        """
+        if event.get("type") != "app_mention":
+            return
+        user = event.get("user")
+        conversation_uuid = self._dispatch_conversation_uuid(event)
+        if not user or conversation_uuid is None:
+            return
+        key = f"slack_thread_humans:{conversation_uuid}"
+        await self.redis_client.sadd(key, user)
+        await self.redis_client.expire(key, SLACK_THREAD_HUMANS_TTL_SECONDS)
 
     async def _run_turn(
         self,
@@ -506,3 +552,94 @@ class SlackHarness(SlackBase):
             # stored` and preserves the message.
             await streamer.clear_in_flight_metadata(posted)
             await self._maybe_compact(conversation, pending_compaction[0])
+
+    async def _should_continue_threaded(self, event: dict) -> bool:
+        """Site B — async fallback when `_should_handle` returns `False`. Returns `True` iff this non-mention
+        thread-reply event should be dispatched as a single-human continuation; otherwise records the sender
+        into the humans cache (when the bot has ever seen this thread) and returns `False`.
+
+        Steps 1a–1b carry the same `hidden` / required-field guard the base `_should_handle` applies, because
+        a dispatched event without `ts` would KeyError in `handle_event` / `_locked_turn`.
+          1a. Hidden + required-field guard (channel, ts, user, text present).
+          1b. Eligibility (channel/group, real thread reply, message type, no subtype).
+          2. Bot-identity guard shared with `_should_handle`.
+          3. Derive `conversation_uuid` and key names.
+          4. EXISTS humans: drop without recording if the bot has never seen this thread.
+          5. SADD humans + EXPIRE — record the sender's participation regardless of engagement state.
+          6. EXISTS engaged: drop while engagement is pending (Site A has not reconciled yet).
+          7. EXPIRE engaged — refresh TTL on the engaged flag too.
+          8. SMEMBERS == {event["user"]} → dispatch; otherwise drop.
+        """
+        # 1a. Hidden + required-field guard — parity with `_should_handle`.
+        if not self._is_well_formed_handleable_event(event):
+            return False
+        # 1b. Eligibility.
+        if event.get("channel_type") not in {"channel", "group"}:
+            return False
+        if event.get("type") != "message":
+            return False
+        if event.get("subtype") is not None:
+            return False
+        thread_ts = event.get("thread_ts")
+        if not thread_ts or thread_ts == event["ts"]:
+            return False
+        user = event["user"]
+        channel = event["channel"]
+
+        # 2. Bot-identity guard.
+        if self._is_self_or_foreign_bot(event):
+            return False
+
+        # 3. Keys.
+        conversation_uuid = slack_conversation_uuid(self.team_id, channel, thread_ts)
+        key_humans = f"slack_thread_humans:{conversation_uuid}"
+        key_engaged = f"slack_thread_engaged:{conversation_uuid}"
+
+        # 4. Drop without recording if the bot has never seen this thread.
+        if not await self.redis_client.exists(key_humans):
+            return False
+
+        # 5. Record sender; idempotent for already-present members.
+        await self.redis_client.sadd(key_humans, user)
+        await self.redis_client.expire(key_humans, SLACK_THREAD_HUMANS_TTL_SECONDS)
+
+        # 6. Drop while engagement is pending.
+        if not await self.redis_client.exists(key_engaged):
+            return False
+
+        # 7. Refresh engaged TTL.
+        await self.redis_client.expire(key_engaged, SLACK_THREAD_HUMANS_TTL_SECONDS)
+
+        # 8. Predicate: single-human continuation iff the post-SADD set is exactly {user}.
+        members_raw = await self.redis_client.smembers(key_humans)
+        members = {m.decode() if isinstance(m, bytes) else m for m in members_raw}
+        return members == {user}
+
+    async def _write_thread_state_post_sync(self, conversation: Conversation, *, channel_type: str) -> None:
+        """Site A — after `sync_slack_thread` returns, SADD the reconciled humans into `slack_thread_humans`
+        and SET `slack_thread_engaged` so Site B can evaluate the predicate against a complete cache. Both
+        keys' TTLs are refreshed.
+
+        Runs before `_run_turn` (and therefore before any streaming) so historical participants are in the
+        cache before any non-mention follow-up could race against the predicate. SADD is union-only — prior
+        participants survive deletion and compaction even if `distinct_human_author_ids` no longer surfaces
+        them.
+
+        No-ops for DMs (when `channel_type == "im"`). mpim mentions arriving via `app_mention` events DO
+        still write here because `app_mention` events don't carry `channel_type` and `handle_event` falls
+        back to `"channel"` — so the gate can't distinguish a channel mention from an mpim mention without an
+        extra `conversations.info` call. The resulting mpim cache entries are harmless dead state: Site B's
+        eligibility check vetoes incoming non-mention `message` events with `channel_type == "mpim"` (which
+        DO carry the field), so the cache is never read for an mpim thread. Per-mpim-thread cost is two small
+        Redis keys at 90-day TTL, deduped by `conversation_uuid` across mentions in the same thread. Accepted
+        as v1 behavior; eliminate later via `conversations.info` if Redis pressure ever matters.
+        """
+        if channel_type not in {"channel", "group"}:
+            return
+        key_humans = f"slack_thread_humans:{conversation.conversation_uuid}"
+        key_engaged = f"slack_thread_engaged:{conversation.conversation_uuid}"
+        humans = distinct_human_author_ids(conversation)
+        if humans:
+            await self.redis_client.sadd(key_humans, *humans)
+        await self.redis_client.set(key_engaged, "1", ex=SLACK_THREAD_HUMANS_TTL_SECONDS)
+        await self.redis_client.expire(key_humans, SLACK_THREAD_HUMANS_TTL_SECONDS)

@@ -6,6 +6,9 @@
 `_mentioned_user_ids_in`), Redis-cached display-name resolution (`resolve_display_names`), mention rewriting
 (`sanitize_mentions`), and the channel-tail prelude (`build_prelude`, `format_message`).
 
+`distinct_human_author_ids` returns the human-author set the single-human-thread continuation cache (Site A)
+writes into `slack_thread_humans:{conversation_uuid}`.
+
 `SLACK_USER_MENTION_RE` is shared by `sanitize_mentions` (rewriting) and `_mentioned_user_ids_in` (extracting).
 """
 
@@ -32,6 +35,10 @@ _DISPLAY_NAME_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7
 # Prelude cache TTL — intentionally longer than the conversation cache TTL so a rebuilt-from-ES conversation
 # still reuses the channel tail snapshotted at the time of the original `@`-mention.
 _PRELUDE_CACHE_TTL_SECONDS = 60 * 60 * 24 * 90
+
+# Single-human-thread continuation cache TTL — matches `_PRELUDE_CACHE_TTL_SECONDS` so the two thread-level
+# caches age out on the same horizon. After 90d of silence the entry is reseeded by the next `@`-mention.
+SLACK_THREAD_HUMANS_TTL_SECONDS = 60 * 60 * 24 * 90
 
 
 async def build_prelude(
@@ -93,6 +100,29 @@ async def build_prelude(
     prelude = "\n".join(lines) if lines else ""
     await redis_client.set(cache_key, prelude or "", ex=_PRELUDE_CACHE_TTL_SECONDS)
     return prelude or None
+
+
+def distinct_human_author_ids(conversation: Conversation) -> set[str]:
+    """Set of human author IDs currently visible in the active raw window of `conversation`.
+
+    Excludes the bot's own ID, foreign-bot IDs (`bot:` prefix), the `"unknown"` sentinel, and tombstoned
+    messages. Used by Site A (post-`sync_slack_thread`) to populate `slack_thread_humans:{conversation_uuid}`
+    with the historical participant set, which is what makes the sticky multi-human rule actually sticky for
+    pre-existing threads.
+
+    Stickiness across deletion / compaction is *not* the helper's job — it returns the currently visible set.
+    The append-only `SADD` semantics at the call site make prior participants survive deletion and compaction
+    even though they vanish from `conversation.messages`.
+    """
+    bot_author_id = conversation.bot_author_id
+    return {
+        m.author_id
+        for m in conversation.messages
+        if not m.deleted
+        and m.author_id != bot_author_id
+        and not m.author_id.startswith("bot:")
+        and m.author_id != "unknown"
+    }
 
 
 def format_message(message: dict) -> str:
