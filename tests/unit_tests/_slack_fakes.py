@@ -3,6 +3,10 @@
 In-memory stand-ins for Redis, the search client, the Slack `SocketModeClient`, and the Slack Web-API client.
 Everything the Slack harness tests touch is faked here so the suite runs in the plain unit tier with no Docker
 and no live Slack / LLM credentials.
+
+`FakeRedis` carries two stores so the single-human-thread continuation cache (a Redis SET) does not alias the
+existing string-valued cache: `_store: dict[str, bytes]` for string keys (used by `set`/`get`) and
+`_sets: dict[str, set[bytes]]` for set keys (used by `sadd`/`smembers`). `exists` checks both.
 """
 
 from __future__ import annotations
@@ -18,13 +22,21 @@ from prokaryotes.search_v1.conversations import turn_execution_from_doc
 class FakeRedis:
     """In-memory dict-shaped fake for the subset of `redis.asyncio.Redis` the Slack harness uses.
 
-    Stores values as bytes (what the real client returns on `get`); `set` accepts str or bytes and honors `nx`.
-    `ex` is recorded but not enforced — the unit tests do not measure TTL.
+    Stores string values as bytes (what the real client returns on `get`); `set` accepts str or bytes and honors
+    `nx`. Set-typed keys live in a separate `_sets` map so string and set commands don't alias on the same key.
+    `ex` and `expire` are recorded but not enforced — the unit tests do not measure TTL.
+
+    `sadd_hook` is an optional async callable awaited at the *start* of every `sadd` call. Tests use it to inject
+    deterministic delays for cross-envelope race tests.
     """
 
     def __init__(self) -> None:
         self._store: dict[str, bytes] = {}
+        self._sets: dict[str, set[bytes]] = {}
         self.set_calls: list[tuple[str, bytes, int | None, bool]] = []
+        self.sadd_calls: list[tuple[str, tuple[bytes, ...]]] = []
+        self.expire_calls: list[tuple[str, int]] = []
+        self.sadd_hook: Any = None
 
     async def aclose(self) -> None:
         pass
@@ -35,13 +47,33 @@ class FakeRedis:
             if key in self._store:
                 self._store.pop(key)
                 removed += 1
+            if key in self._sets:
+                self._sets.pop(key)
+                removed += 1
         return removed
 
     async def exists(self, key: str) -> int:
-        return 1 if key in self._store else 0
+        return 1 if (key in self._store or key in self._sets) else 0
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expire_calls.append((key, seconds))
+        return key in self._store or key in self._sets
 
     async def get(self, key: str) -> bytes | None:
         return self._store.get(key)
+
+    async def sadd(self, key: str, *members: str) -> int:
+        if self.sadd_hook is not None:
+            await self.sadd_hook(key, members)
+        encoded = tuple(m.encode("utf-8") if isinstance(m, str) else m for m in members)
+        self.sadd_calls.append((key, encoded))
+        current = self._sets.setdefault(key, set())
+        added = 0
+        for m in encoded:
+            if m not in current:
+                current.add(m)
+                added += 1
+        return added
 
     async def set(self, key: str, value: str | bytes, ex: int | None = None, nx: bool = False) -> bool | None:
         if nx and key in self._store:
@@ -51,6 +83,9 @@ class FakeRedis:
         self._store[key] = value
         self.set_calls.append((key, value, ex, nx))
         return True
+
+    async def smembers(self, key: str) -> set[bytes]:
+        return set(self._sets.get(key, set()))
 
 
 class FakeSearchClient:
@@ -392,3 +427,5 @@ def envelope(event: dict, *, event_id: str | None = "Ev1", team_id: str | None =
     if team_id is not None:
         payload["team_id"] = team_id
     return {"type": "events_api", "payload": payload}
+
+

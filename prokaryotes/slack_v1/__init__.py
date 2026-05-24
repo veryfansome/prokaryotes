@@ -4,6 +4,12 @@ Owns the single per-workspace Socket Mode connection, acks envelopes inside the 
 applies the trigger gate (`_should_handle`), and fires `handle_event` into a background task. The LLM / tool
 wiring and the per-turn flow live in `prokaryotes.harness_v1.slack.SlackHarness`. See the `SlackBase` class
 docstring below for the apply-policy MRO contract.
+
+Dispatch also wraps the gate in a per-`conversation_uuid` dispatch lock (`_dispatch_lock`) and exposes three
+hook methods — `_dispatch_conversation_uuid` (lock-key derivation), `_should_continue_threaded` (async fallback
+when `_should_handle` returns `False`, for non-mention thread continuations), and `_on_dispatch_accept` (async
+hook fired on accept, used to eagerly seed the humans cache so concurrent envelopes for the same thread record
+into a real key). All three default to no-ops on the base; `SlackHarness` overrides them.
 """
 
 from __future__ import annotations
@@ -27,8 +33,8 @@ from prokaryotes.slack_v1.client import SlackClient
 
 logger = logging.getLogger(__name__)
 
-# `_turn_locks` reclamation tuning. The idle threshold is deliberately far longer than any turn could run, so the
-# sweep only ever removes truly cold entries.
+# `_turn_locks` / `_dispatch_locks` reclamation tuning. The idle threshold is deliberately far longer than any
+# turn could run, so the sweep only ever removes truly cold entries.
 _TURN_LOCK_IDLE_SECONDS = 2 * 24 * 60 * 60  # reclaim locks untouched for 2 days
 _TURN_LOCK_SWEEP_SECONDS = 60 * 60  # run the sweep at most hourly
 
@@ -48,11 +54,12 @@ def build_socket_mode_client(app_token: str) -> SocketModeClient:
 
 @dataclass
 class _LockEntry:
-    """Per-`conversation_uuid` turn lock plus its last-use timestamp.
+    """Per-`conversation_uuid` lock plus its last-use timestamp.
 
-    `last_used_monotonic` is refreshed on every turn that touches the entry; the coarse `_sweep_turn_locks` pass
-    reclaims entries that are both unlocked and idle past `_TURN_LOCK_IDLE_SECONDS`. No refcount, no per-release
-    bookkeeping.
+    Shared between `_turn_locks` (long-held per LLM turn) and `_dispatch_locks` (short-held across the dispatch
+    gate). `last_used_monotonic` is refreshed on every turn that touches the entry; the coarse
+    `_sweep_turn_locks` pass reclaims entries that are both unlocked and idle past `_TURN_LOCK_IDLE_SECONDS`. No
+    refcount, no per-release bookkeeping.
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -76,6 +83,8 @@ class SlackBase(SlackApplyPolicy, HarnessBase, ABC):
         # release; `_sweep_turn_locks` reclaims those idle past `_TURN_LOCK_IDLE_SECONDS`, bounding the dict over a
         # long run.
         self._turn_locks: dict[str, _LockEntry] = {}
+        # Separate dispatch-lock dict; see `_dispatch_lock` for why this can't share `_turn_locks`.
+        self._dispatch_locks: dict[str, _LockEntry] = {}
         self._last_lock_sweep_monotonic = time.monotonic()
 
         # Resolved at startup via auth.test:
@@ -143,6 +152,27 @@ class SlackBase(SlackApplyPolicy, HarnessBase, ABC):
         async with entry.lock:
             yield
 
+    @asynccontextmanager
+    async def _dispatch_lock(self, conversation_uuid: str | None):
+        """Serialize the dispatch gate for one thread. Held only across `_should_handle` evaluation plus the one
+        Redis round-trip in Site C / Site B — sub-millisecond. If `conversation_uuid is None` (event the harness
+        cannot key to a thread) the context manager is a no-op so dispatch keeps working for all event shapes.
+
+        Mirrors `_conversation_turn_lock`'s cold-sweep policy. The lock dict is *separate* — reusing the turn
+        lock would queue all dispatch behind in-flight turns and defeat async.
+        """
+        if conversation_uuid is None:
+            yield
+            return
+        self._sweep_turn_locks()
+        entry = self._dispatch_locks.get(conversation_uuid)
+        if entry is None:
+            entry = _LockEntry()
+            self._dispatch_locks[conversation_uuid] = entry
+        entry.last_used_monotonic = time.monotonic()
+        async with entry.lock:
+            yield
+
     async def _dispatch_event(self, *, envelope: dict) -> None:
         if envelope.get("type") != "events_api":
             return
@@ -166,45 +196,72 @@ class SlackBase(SlackApplyPolicy, HarnessBase, ABC):
             )
             return
 
-        if not self._should_handle(event):
-            return
+        conversation_uuid = self._dispatch_conversation_uuid(event)
+        async with self._dispatch_lock(conversation_uuid):
+            if not self._should_handle(event):
+                if not await self._should_continue_threaded(event):
+                    return
+            else:
+                await self._on_dispatch_accept(event)
+            self.background_and_forget(self.handle_event(event=event))
 
-        self.background_and_forget(self.handle_event(event=event))
+    def _dispatch_conversation_uuid(self, event: dict) -> str | None:
+        """Stable per-thread key for the dispatch lock. Default returns `None` — `_dispatch_lock` then becomes a
+        no-op so non-`SlackHarness` subclasses are unaffected. `SlackHarness` overrides this with a real
+        derivation."""
+        return None
+
+    def _is_self_or_foreign_bot(self, event: dict) -> bool:
+        """True iff this event originated from our own bot or a foreign-bot integration.
+
+        Shared by `_should_handle` (drops these at the trigger gate) and `_should_continue_threaded` (refuses to
+        record bot IDs into the human cache on the drop path). Extracted so the two callers cannot drift.
+
+        Every comparison guards on `self.<field>` being non-None first — otherwise a failed startup resolution
+        (e.g. users.info couldn't find profile.api_app_id) would compare `None == None` and drop every normal
+        human event. The `app_id` check is strictly a fallback for events with no `bot_id`: multiple bot users
+        can share one Slack app (e.g. a test user-bot installed under the same app), so a mismatched-bot_id +
+        matching-app_id event is a *different* bot, not us — must not be filtered there.
+        """
+        if self.bot_user_id and event.get("user") == self.bot_user_id:
+            return True
+        if self.bot_id and event.get("bot_id") == self.bot_id:
+            return True
+        if self.app_id and event.get("bot_id") is None and event.get("bot_profile", {}).get("app_id") == self.app_id:
+            return True
+        if event.get("subtype") == "bot_message":
+            return True
+        return False
+
+    @staticmethod
+    def _is_well_formed_handleable_event(event: dict) -> bool:
+        """True iff `event` is not hidden and carries the fields downstream code dereferences without `.get`.
+
+        Hidden events (`message_replied` etc.) are metadata-only and carry no real content. The required-field
+        set (`channel`, `ts`, `user`, `text`) is what `handle_event` / `_locked_turn` / `_run_turn` index into;
+        a malformed event without them would KeyError mid-turn. Shared by `_should_handle` and
+        `_should_continue_threaded` so both gates drop the same shapes.
+        """
+        if event.get("hidden"):
+            return False
+        return bool(event.get("channel") and event.get("ts") and event.get("user") and event.get("text") is not None)
 
     async def _listener(self, client, request) -> None:
         # Ack first so Slack doesn't redeliver while we run the LLM turn.
         await client.send_socket_mode_response(SocketModeResponse(envelope_id=request.envelope_id))
         await self._dispatch_event(envelope=request.to_dict())
 
-    def _should_handle(self, event: dict) -> bool:
-        # Hidden events (message_replied and other metadata-only deliveries) carry no real message content and
-        # should never reach handle_event. Slack flags them with hidden=true.
-        if event.get("hidden"):
-            return False
-        # Required-field guard. handle_event and _run_turn assume these are present (channel for routing, ts for
-        # source_id derivation, user for the originator display name, text for content). A malformed event
-        # without them would KeyError mid-turn — drop it cleanly at the gate.
-        if not (event.get("channel") and event.get("ts") and event.get("user") and event.get("text") is not None):
-            return False
+    async def _on_dispatch_accept(self, event: dict) -> None:
+        """Hook fired inside `_dispatch_event` after `_should_handle` accepts an event, before
+        `background_and_forget(handle_event)`. Default no-op. `SlackHarness` overrides this to implement Site C
+        (eager humans-cache seed for `@`-mention dispatches)."""
+        return
 
-        # Bot self-guard runs ahead of the app_mention branch. A bot post can identify itself via any of three
-        # fields (Slack's chat.postMessage and event shapes are not uniform):
-        # - event["user"] for the standard user-attributed path
-        # - event["bot_id"] for bot_message-subtype posts (no `user` field)
-        # - event["bot_profile"]["app_id"] when bot_profile is included
-        # Every comparison guards on `self.<field>` being non-None first — otherwise a failed startup resolution
-        # (e.g. users.info couldn't find profile.api_app_id) would compare None == None and drop every normal
-        # human event. The app_id check is strictly a fallback for events with no bot_id: multiple bot users can
-        # share one Slack app (e.g. a test user-bot installed under the same app), so a mismatched-bot_id +
-        # matching-app_id event is a *different* bot, not us — must not be filtered.
-        if self.bot_user_id and event.get("user") == self.bot_user_id:
+    def _should_handle(self, event: dict) -> bool:
+        if not self._is_well_formed_handleable_event(event):
             return False
-        if self.bot_id and event.get("bot_id") == self.bot_id:
+        if self._is_self_or_foreign_bot(event):
             return False
-        if self.app_id and event.get("bot_id") is None and event.get("bot_profile", {}).get("app_id") == self.app_id:
-            return False
-        if event.get("subtype") == "bot_message":
-            return False  # defensive — bot_message from another integration also drops here
         if event.get("type") == "app_mention":
             # app_mention subtypes other than the plain message form (e.g. `document_mention` for Canvas
             # mentions) need product decisions we haven't made yet. Drop them rather than processing as if they
@@ -221,23 +278,30 @@ class SlackBase(SlackApplyPolicy, HarnessBase, ABC):
             return True  # every non-bot DM message — DMs are unambiguous
         return False  # all other non-mention channel/mpim/thread chatter — ignored
 
+    async def _should_continue_threaded(self, event: dict) -> bool:
+        """Async fallback inside `_dispatch_event` when `_should_handle` returns `False`. Default returns
+        `False` (no continuation). `SlackHarness` overrides this with the Site B logic that gates non-mention
+        thread-reply continuations on the humans / engaged Redis state."""
+        return False
+
     def _sweep_turn_locks(self) -> None:
-        """Reclaim cold `_turn_locks` entries. Runs at most once per `_TURN_LOCK_SWEEP_SECONDS`; removes entries
-        that are both unlocked and idle past `_TURN_LOCK_IDLE_SECONDS`. A contended lock is `locked()` and a
-        recently-used one has a fresh `last_used_monotonic`, so neither is ever swept — which is why no
-        holder/waiter accounting is needed.
+        """Reclaim cold `_turn_locks` and `_dispatch_locks` entries. Runs at most once per
+        `_TURN_LOCK_SWEEP_SECONDS`; removes entries that are both unlocked and idle past
+        `_TURN_LOCK_IDLE_SECONDS`. A contended lock is `locked()` and a recently-used one has a fresh
+        `last_used_monotonic`, so neither is ever swept — which is why no holder/waiter accounting is needed.
         """
         now = time.monotonic()
         if now - self._last_lock_sweep_monotonic < _TURN_LOCK_SWEEP_SECONDS:
             return
         self._last_lock_sweep_monotonic = now
-        cold = [
-            conversation_uuid
-            for conversation_uuid, entry in self._turn_locks.items()
-            if not entry.lock.locked() and now - entry.last_used_monotonic > _TURN_LOCK_IDLE_SECONDS
-        ]
-        for conversation_uuid in cold:
-            self._turn_locks.pop(conversation_uuid, None)
+        for lock_dict in (self._turn_locks, self._dispatch_locks):
+            cold = [
+                conversation_uuid
+                for conversation_uuid, entry in lock_dict.items()
+                if not entry.lock.locked() and now - entry.last_used_monotonic > _TURN_LOCK_IDLE_SECONDS
+            ]
+            for conversation_uuid in cold:
+                lock_dict.pop(conversation_uuid, None)
 
     @abstractmethod
     async def handle_event(self, *, event: dict) -> None: ...
