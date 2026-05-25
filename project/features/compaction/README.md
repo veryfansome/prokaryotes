@@ -40,7 +40,7 @@ A summary is only valid if the branch that produced it is provably identical to 
 
 ### Working-file carry-forward
 
-The child's `working_file_windows` are carried forward from the live Redis snapshot at CAS time, filtered to drop windows whose `window_id` appears in any `pre_tail` `TurnExecution.items`. The summary input keeps `working_file_windows=[]` so live file bodies don't fossilize into the summary. See [file_tool/README.md — Compaction Integration](../file_tool/README.md#compaction-integration) for the keep-buckets and race-safety argument.
+The child's `working_file_windows` are carried forward from the live Redis snapshot at CAS time, filtered to keep a window iff at least one of its `origin_call_ids` escapes the `pre_tail` span (`_carry_forward_windows`). The summary input keeps `working_file_windows=[]` so live file bodies don't fossilize into the summary. See [file_tool/README.md — Compaction Integration](../file_tool/README.md#compaction-integration) for the keep-buckets and race-safety argument.
 
 ---
 
@@ -82,7 +82,7 @@ After the final assistant message commits:
 2. Return early if the recency tail is empty.
 3. **Summarize** via `compact_fn` — `_summarize_and_compact` projects a copy of the pre-tail snapshot with `working_file_windows=[]` and `ancestor_summaries=[]` (so the compactor's own input carries no leading `<working_files>` block and never re-includes prior summaries — they ride forward as storage state on the child snapshot), appends the summarization prompt, and calls `llm_client.complete(...)`. An empty summary aborts.
 4. **Compute boundary metadata** — `boundary_hash`, `tail_hash`, the counts.
-5. **`_cas_swap_child`** — under Redis `WATCH / MULTI / EXEC` on `conversation:{conversation_uuid}`: abort if the active `snapshot_uuid`, `ancestor_summaries`, `raw_message_start_index`, or message prefix changed; build the child (`messages = recency_tail + post_snapshot_messages`, `ancestor_summaries + [summary]`, and `working_file_windows` carried forward from the live `current` snapshot via the pre_tail call-id filter); persist it as `compaction_state="pending"` so Redis never points at a snapshot ES doesn't know; execute the swap, retry on `WatchError`.
+5. **`_cas_swap_child`** — under Redis `WATCH / MULTI / EXEC` on `conversation:{conversation_uuid}`: abort if the active `snapshot_uuid`, `ancestor_summaries`, `raw_message_start_index`, or message prefix changed; build the child (`messages = recency_tail + post_snapshot_messages`, `ancestor_summaries + [summary]`, and `working_file_windows` carried forward from the live `current` snapshot via the pre-tail origin filter `_carry_forward_windows`); persist it as `compaction_state="pending"` so Redis never points at a snapshot ES doesn't know; execute the swap, retry on `WatchError`.
 6. **Promote the child to `committed`** via `update_conversation`. This write uses `refresh="wait_for"` so a post-compaction cold-Redis `_rebuild_from_chain` can immediately find the new active child via `find_latest_active_child`. The wait runs on this background task — no interactive latency.
 7. **Mark the parent `is_compacted`** with the summary + boundary metadata.
 8. **Write `compaction_status:{pending_snapshot_uuid}`** to Redis — the child's `snapshot_uuid` as the relabel target, or an empty-string sentinel on abort/exception.
@@ -133,12 +133,12 @@ See [conversation/README.md](../conversation/README.md#branches-and-snapshots) f
 
 | File | Role |
 |---|---|
-| `prokaryotes/context_v1/compaction.py` | `ConversationCompactor`: `_compact_conversation`, `_cas_swap_child` (with the pre_tail call_id filter on `working_file_windows`), `_prepare_compaction`, `_write_compaction_status`; `_file_tool_call_ids_in`, `_recency_tail_messages`, `_retry_compaction_search_write`. |
+| `prokaryotes/context_v1/compaction.py` | `ConversationCompactor`: `_compact_conversation`, `_cas_swap_child` (carries `working_file_windows` forward via `_carry_forward_windows`), `_prepare_compaction`, `_write_compaction_status`; `_carry_forward_windows`, `_file_tool_call_ids_in`, `_recency_tail_messages`, `_retry_compaction_search_write`. |
 | `prokaryotes/context_v1/conversation_sync.py` | `_split_compacted_prefix` and `_rebuild_from_chain` chain-rebuild handling; the working-file carry-forward filters for Case A divergence and cold rebuild (`_active_paths_in_turns`, `_file_tool_call_ids_in`, `_filter_windows_by_active_path_and_origin`). Cold rebuild restores windows from the donor returned by `find_latest_active_child` (defined in `search_v1/conversations.py`). |
 | `prokaryotes/harness_v1/web.py` | `on_usage` / `pending_compaction` wiring on the `/chat` flow. |
 | `prokaryotes/harness_v1/base.py` | `stream_and_finalize` compaction sequencing; `_build_compact_fn` and `_summarize_and_compact` (the summarization-input projection lives here). |
 | `prokaryotes/web_v1/compaction.py` | `CompactionStatusHandler`: the `/compaction-status` endpoint. |
 | `prokaryotes/tools_v1/file_tool/live_windows.py` | `refresh_windows_for_path`, `tombstone_windows_for_path`, `reconcile_working_files` — window refresh/tombstone/normalize over `working_file_windows`. |
 | `prokaryotes/utils_v1/llm_utils.py` | `COMPACTION_TOKEN_THRESHOLD_PCT`, `COMPACTION_RECENCY_TAIL`, `COMPACTION_LOCK_TTL_SECONDS`. |
-| `tests/unit_tests/test_compaction_*.py` | Pre-tail working-file filter, CAS swap, chain rebuild, status handler, summarization input. |
+| `tests/unit_tests/test_compaction_*.py` | CAS swap, chain rebuild, status handler, summarization input. (The pre-tail working-file carry-forward filter moved to `test_file_tool_window_dedup.py`.) |
 | `tests/integration_tests/tier_b/test_compaction_flow.py` | End-to-end compaction against real ES + Redis. |

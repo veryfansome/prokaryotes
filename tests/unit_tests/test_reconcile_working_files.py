@@ -1,4 +1,9 @@
-"""`reconcile_working_files` — refresh live windows, normalize diagnostic source_kinds, tombstone on access failure."""
+"""`reconcile_working_files` — refresh live windows, normalize diagnostic source_kinds, tombstone on access failure.
+
+Exercises the `WorkingFileWindow` contract with required `line_count` / `origin_call_ids`. The fold and
+obsolete-placeholder behaviors reconcile adds are tested in `test_file_tool_window_dedup.py`; this file keeps
+the per-window refresh/normalize/tombstone contracts.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +32,8 @@ def _window(
         view_start_line=1,
         view_end_line=3,
         requested_end_line=3,
+        line_count=3,
+        origin_call_ids=[window_id],
         source_kind=source_kind,
     )
 
@@ -89,6 +96,8 @@ async def test_already_at_current_revision_is_left_alone(tmp_path: Path):
         view_start_line=1,
         view_end_line=3,
         requested_end_line=3,
+        line_count=3,
+        origin_call_ids=["c-1"],
         source_kind="read_lines",
     )
     windows = [window]
@@ -98,5 +107,6 @@ async def test_already_at_current_revision_is_left_alone(tmp_path: Path):
         max_file_bytes=1_000_000,
         max_lines=200,
     )
-    # Output preserved verbatim
+    # A no-op refresh (already current) and a pass-through fold (singleton fitting max_lines) preserve the
+    # cached output verbatim.
     assert windows[0].rendered_output == original

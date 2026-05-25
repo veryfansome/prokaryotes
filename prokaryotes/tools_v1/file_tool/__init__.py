@@ -21,6 +21,7 @@ import os
 from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
+from uuid import uuid4
 
 from prokaryotes.api_v1.models import FunctionToolCallback, ToolParameters, ToolSpec
 from prokaryotes.conversation_v1.models import (
@@ -30,6 +31,7 @@ from prokaryotes.conversation_v1.models import (
     coverage_eligible,
 )
 from prokaryotes.tools_v1.file_tool import live_windows, reads
+from prokaryotes.tools_v1.file_tool.intervals import Interval, consolidate_intervals
 from prokaryotes.tools_v1.file_tool.paths import (
     FileToolFileTooLargeError,
     _open_text_file_no_follow,
@@ -102,6 +104,21 @@ class FileTool(FunctionToolCallback):
         self._workspace_root = workspace_root or Path.cwd()
         # Serializes call() so the read → mutate → refresh sequence is atomic per request.
         self._lock = asyncio.Lock()
+        # Turn-local exposure tracking: window_id -> the revision whose content the model has actually been shown
+        # this turn. This is distinct from `WorkingFileWindow.revision` (durable cached content): a per-read
+        # `refresh_windows_for_path` advances a sibling window's `revision` mid-turn WITHOUT re-rendering it (the
+        # provider loop never rebuilds the leading <working_files> block mid-turn), so durable-fresh ≠ shown. The
+        # harness constructs FileTool *after* turn-start reconcile and *before* projection, so every current
+        # window is about to be projected — seed it as exposed at its reconciled revision. Only a model-facing
+        # render updates this map afterward (read FILE/RANGE_TRUNCATED output, empty-view marker, view-carrying
+        # diagnostic); refresh must not. REDUNDANT_READ then requires exposed == current revision.
+        self._exposed_window_revisions: dict[str, str | None] = {
+            w.window_id: w.revision for w in working_file_provider()
+        }
+
+    def _mark_exposed(self, window_id: str, revision: str) -> None:
+        """Record that the model has now been shown `window_id`'s content at `revision`."""
+        self._exposed_window_revisions[window_id] = revision
 
     async def call(self, arguments: str, call_id: str) -> TurnItem:
         async with self._lock:
@@ -129,18 +146,12 @@ class FileTool(FunctionToolCallback):
             requested_end_line = _read_end_line(payload, start_line)
         except ValueError as exc:
             return _error_item(call_id, f"ValueError: {exc}")
-        effective_requested_end_for_check = (
-            start_line + self.max_lines - 1 if requested_end_line is None else requested_end_line
-        )
-        covering = self._find_covering_window(str(path), start_line, effective_requested_end_for_check)
-        if covering is not None:
-            return self._build_redundant_read_item(
-                call_id=call_id,
-                covering=covering,
-                path=path,
-                requested_end_line=effective_requested_end_for_check,
-                requested_start_line=start_line,
-            )
+
+        cap_end_line = start_line + self.max_lines - 1
+        effective_req_end_for_check = requested_end_line if requested_end_line is not None else cap_end_line
+        new_request = Interval(start_line, effective_req_end_for_check)
+
+        # Read disk FIRST so the coverage check below runs against current content, not a stale cache.
         try:
             text = await reads._read_text_under_file_tool_lock(path, self.max_file_bytes)
         except (
@@ -150,64 +161,91 @@ class FileTool(FunctionToolCallback):
             PermissionError,
             UnicodeDecodeError,
         ) as exc:
-            live_windows.tombstone_windows_for_path(
-                self._windows(), str(path), type(exc).__name__
-            )
+            live_windows.tombstone_windows_for_path(self._windows(), str(path), type(exc).__name__)
             return _error_item(call_id, f"{type(exc).__name__}: {exc}")
         revision = sha256(text.encode("utf-8")).hexdigest()
-        live_windows.refresh_windows_for_path(self._windows(), str(path), text, revision, self.max_lines)
-        cap_end_line = start_line + self.max_lines - 1
-        effective_requested_end_line = (
-            cap_end_line if requested_end_line is not None and requested_end_line > cap_end_line else requested_end_line
-        )
         line_count = _count_lines(text)
-        if requested_end_line is not None and requested_end_line > cap_end_line and line_count > cap_end_line:
-            remaining = min(requested_end_line, line_count) - cap_end_line
-            return self._build_view_carrying_item(
-                call_id=call_id,
-                path=path,
-                current_text=text,
-                current_revision=revision,
+
+        # The file is readable, so any tombstones for this path are stale. Snapshot which windows are diagnostics
+        # BEFORE the refresh normalizes them to read_lines — a pre-existing diagnostic must not grant
+        # REDUNDANT_READ for this read (it should fold via consolidation, recording this call), and refresh
+        # erases the source_kind signal. Then refresh every surviving live window to the freshly-read revision.
+        self._retire_tombstones_for_path(str(path))
+        pre_refresh_diagnostic_ids = {
+            w.window_id
+            for w in self._windows()
+            if w.path == str(path) and w.source_kind in live_windows.DIAGNOSTIC_SOURCE_KINDS
+        }
+        live_windows.refresh_windows_for_path(self._windows(), str(path), text, revision, self.max_lines)
+
+        # Coverage check against known-fresh windows. A window grants REDUNDANT_READ only if it is
+        # coverage-eligible (read_lines), was not a diagnostic before this refresh, AND its content at the current
+        # revision has actually been shown to the model this turn (`_exposed_window_revisions[id] == revision`).
+        # The exposure gate is the key: a coverage hit returns only a pointer, and the <working_files> block is a
+        # turn-start artifact the provider loop never rebuilds mid-turn — so a window the refresh advanced to the
+        # current revision but never re-rendered (e.g. a sibling refreshed by a disjoint read, or in-place
+        # external change) must NOT short-circuit, or the model would act on stale content until next turn.
+        # Such a read falls through and renders current content. A redundant read still records provenance.
+        covering = next(
+            (
+                w
+                for w in self._windows()
+                if w.path == str(path)
+                and coverage_eligible(w)
+                and w.window_id not in pre_refresh_diagnostic_ids
+                and self._exposed_window_revisions.get(w.window_id) == w.revision
+                and _window_covers_request(w, new_request, self.max_lines)
+            ),
+            None,
+        )
+        if covering is not None:
+            covering.origin_call_ids = sorted({*covering.origin_call_ids, call_id})
+            return self._build_redundant_read_item(
+                call_id=call_id, covering=covering, path=path, request=new_request, max_lines=self.max_lines
+            )
+
+        # Empty file or past-EOF read — skip consolidation (no content / no valid Interval). Mint an empty-view
+        # placeholder preserving the requested start_line.
+        if line_count == 0 or start_line > line_count:
+            return self._mint_empty_view_window(
+                call_id,
+                path,
+                revision,
+                view_start_line=(1 if line_count == 0 else start_line),
                 line_count=line_count,
-                view_start_line=start_line,
-                source_kind="range_truncated",
-                header_lines=[
-                    (
-                        f"RANGE_TRUNCATED path={path} requested_lines={start_line}-{requested_end_line}"
-                        f" returned_lines={start_line}-{cap_end_line} line_count={line_count}"
-                    ),
-                    (
-                        f"Your requested span exceeded the {self.max_lines}-line per-call cap."
-                        f" The window below covers lines {start_line}-{cap_end_line}."
-                        f" Call `read_lines` with `start_line={cap_end_line + 1}` to page through the"
-                        f" remaining {remaining} lines."
-                    ),
-                ],
-                requested_end_line=cap_end_line,
             )
-        end_line, line_count, view_lines = render_view(
-            text, start_line, self.max_lines, requested_end_line=effective_requested_end_line
-        )
-        output = render_live_window(
+
+        # Clamp the request to what we'll render, then consolidate the reached windows around it.
+        effective_req_end = min(effective_req_end_for_check, line_count)
+        actual_view = Interval(start_line, min(cap_end_line, effective_req_end))
+        consolidation_input_windows = [
+            w
+            for w in self._windows()
+            if w.path == str(path) and w.status == "live" and w.view_end_line >= w.view_start_line
+        ]
+        existing_intervals = [Interval(w.view_start_line, w.view_end_line) for w in consolidation_input_windows]
+        result = consolidate_intervals(existing_intervals, actual_view, self.max_lines)
+
+        self._retire_windows(str(path), result.retired)
+        self._mint_consolidated_windows(
             path=str(path),
+            result=result,
+            reached_windows=consolidation_input_windows,
+            call_id=call_id,
             revision=revision,
-            start_line=start_line,
-            end_line=end_line,
             line_count=line_count,
-            view_lines=view_lines,
+            text=text,
+            view=actual_view,
         )
-        self._windows().append(
-            WorkingFileWindow(
-                window_id=call_id,
-                path=str(path),
-                status="live",
-                revision=revision,
-                rendered_output=output,
-                view_start_line=start_line,
-                view_end_line=end_line,
-                requested_end_line=effective_requested_end_line,
-                source_kind="read_lines",
-            )
+
+        output = self._render_read_response(
+            path=path,
+            text=text,
+            revision=revision,
+            line_count=line_count,
+            view=actual_view,
+            requested_end_line=requested_end_line,
+            cap_end_line=cap_end_line,
         )
         return TurnItem(
             call_id=call_id,
@@ -245,11 +283,13 @@ class FileTool(FunctionToolCallback):
                 PermissionError,
                 UnicodeDecodeError,
             ) as exc:
-                live_windows.tombstone_windows_for_path(
-                    self._windows(), str(path), type(exc).__name__
-                )
+                live_windows.tombstone_windows_for_path(self._windows(), str(path), type(exc).__name__)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
 
+        # The write transaction read/wrote the file successfully, so the path is accessible — retire any stale
+        # tombstones before refreshing. refresh skips stale windows, so a tombstone from a prior missing-file
+        # read would otherwise survive on a now-recovered path.
+        self._retire_tombstones_for_path(str(path))
         refreshed_count = live_windows.refresh_windows_for_path(
             self._windows(),
             str(path),
@@ -289,10 +329,11 @@ class FileTool(FunctionToolCallback):
                 PermissionError,
                 UnicodeDecodeError,
             ) as exc:
-                live_windows.tombstone_windows_for_path(
-                    self._windows(), str(path), type(exc).__name__
-                )
+                live_windows.tombstone_windows_for_path(self._windows(), str(path), type(exc).__name__)
                 return _error_item(call_id, f"{type(exc).__name__}: {exc}")
+        # A successful create (or recovered ALREADY_EXISTS read) proves the path is accessible — retire any stale
+        # tombstones before refreshing, since refresh skips stale windows and they would otherwise survive.
+        self._retire_tombstones_for_path(str(path))
         live_windows.refresh_windows_for_path(
             self._windows(),
             str(path),
@@ -303,18 +344,201 @@ class FileTool(FunctionToolCallback):
         )
         return result_item
 
-    def _find_covering_window(
-        self, path: str, requested_start_line: int, requested_end_line: int
-    ) -> WorkingFileWindow | None:
-        for window in self._windows():
-            if window.path != path:
-                continue
-            if not coverage_eligible(window):
-                continue
-            intended_coverage_end = window.requested_end_line or (window.view_start_line + self.max_lines - 1)
-            if window.view_start_line <= requested_start_line and intended_coverage_end >= requested_end_line:
-                return window
-        return None
+    def _build_window_for_interval(
+        self,
+        *,
+        path: str,
+        interval: Interval,
+        window_id: str,
+        revision: str,
+        line_count: int,
+        text: str,
+        origins: list[str],
+    ) -> WorkingFileWindow:
+        end_line, _line_count, view_lines = render_view(
+            text, interval.start, self.max_lines, requested_end_line=interval.end
+        )
+        return WorkingFileWindow(
+            window_id=window_id,
+            path=path,
+            status="live",
+            revision=revision,
+            rendered_output=render_live_window(
+                path=path,
+                revision=revision,
+                start_line=interval.start,
+                end_line=end_line,
+                line_count=line_count,
+                view_lines=view_lines,
+            ),
+            view_start_line=interval.start,
+            view_end_line=end_line,
+            requested_end_line=interval.end,
+            line_count=line_count,
+            origin_call_ids=origins,
+            source_kind="read_lines",
+        )
+
+    def _mint_consolidated_windows(
+        self,
+        *,
+        path: str,
+        result,
+        reached_windows: list[WorkingFileWindow],
+        call_id: str,
+        revision: str,
+        line_count: int,
+        text: str,
+        view: Interval,
+    ) -> None:
+        # consolidate_intervals is pure (intervals only); reconstruct provenance here. The reached windows are
+        # exactly those whose (view_start_line, view_end_line) matches a retired interval — union their origins
+        # with the new call. Unioning over all matches is correct under a transient same-turn duplicate range.
+        retired_ranges = {(i.start, i.end) for i in result.retired}
+        reached_origins = sorted(
+            {
+                origin
+                for w in reached_windows
+                if (w.view_start_line, w.view_end_line) in retired_ranges
+                for origin in w.origin_call_ids
+            }
+        )
+        origins = sorted({call_id, *reached_origins})
+        windows = self._windows()
+        windows.append(
+            self._build_window_for_interval(
+                path=path,
+                interval=result.primary,
+                window_id=call_id,
+                revision=revision,
+                line_count=line_count,
+                text=text,
+                origins=origins,
+            )
+        )
+        # Mark exposure ONLY when the primary's range exactly matches what the read rendered (`view` ==
+        # actual_view). If consolidation extended the primary past the rendered range (it absorbed a window
+        # reaching further, or merged a contiguous neighbor below the request), those extra lines were NOT shown
+        # to the model — marking the whole primary exposed would let a later re-read of the unshown portion
+        # wrongly return REDUNDANT_READ for content the model never saw. Secondaries are never rendered at all, so
+        # they are never marked. Both unshown cases simply stay unexposed until next turn's projection re-seeds
+        # them (cost: a same-turn re-read of that range re-renders instead of REDUNDANT — safe, just not deduped).
+        if result.primary == view:
+            self._mark_exposed(call_id, revision)
+        for secondary in result.secondaries:
+            secondary_id = f"wfw-{uuid4().hex}"
+            windows.append(
+                self._build_window_for_interval(
+                    path=path,
+                    interval=secondary,
+                    window_id=secondary_id,
+                    revision=revision,
+                    line_count=line_count,
+                    text=text,
+                    origins=origins,
+                )
+            )
+
+    def _mint_empty_view_window(
+        self,
+        call_id: str,
+        path: Path,
+        revision: str,
+        *,
+        view_start_line: int,
+        line_count: int,
+    ) -> TurnItem:
+        windows = self._windows()
+        if line_count == 0:
+            # Empty file: retire every prior window for the path (minted on non-empty content).
+            windows[:] = [w for w in windows if w.path != str(path)]
+            view_start_line = 1
+            view_end_line = 0
+        else:
+            # Past-EOF on a non-empty file: do NOT retire other windows; this view sits past content.
+            view_end_line = view_start_line - 1
+        output = render_live_window(
+            path=str(path),
+            revision=revision,
+            start_line=view_start_line,
+            end_line=view_end_line,
+            line_count=line_count,
+            view_lines=[],
+        )
+        windows.append(
+            WorkingFileWindow(
+                window_id=call_id,
+                path=str(path),
+                status="live",
+                revision=revision,
+                rendered_output=output,
+                view_start_line=view_start_line,
+                view_end_line=view_end_line,
+                requested_end_line=view_end_line,
+                line_count=line_count,
+                origin_call_ids=[call_id],
+                source_kind="read_lines",
+            )
+        )
+        self._mark_exposed(call_id, revision)
+        return TurnItem(
+            call_id=call_id,
+            output=output,
+            type="function_call_output",
+            prokaryotes_annotations=_file_tool_annotations(path, _PERSISTENCE_WORKING_FILE),
+        )
+
+    def _render_read_response(
+        self,
+        *,
+        path: Path,
+        text: str,
+        revision: str,
+        line_count: int,
+        view: Interval,
+        requested_end_line: int | None,
+        cap_end_line: int,
+    ) -> str:
+        end_line, _line_count, view_lines = render_view(text, view.start, self.max_lines, requested_end_line=view.end)
+        file_output = render_live_window(
+            path=str(path),
+            revision=revision,
+            start_line=view.start,
+            end_line=end_line,
+            line_count=line_count,
+            view_lines=view_lines,
+        )
+        if requested_end_line is not None and requested_end_line > cap_end_line and line_count > cap_end_line:
+            remaining = min(requested_end_line, line_count) - cap_end_line
+            header = "\n".join(
+                [
+                    (
+                        f"RANGE_TRUNCATED path={path} requested_lines={view.start}-{requested_end_line}"
+                        f" returned_lines={view.start}-{cap_end_line} line_count={line_count}"
+                    ),
+                    (
+                        f"Your requested span exceeded the {self.max_lines}-line per-call cap."
+                        f" The window below covers lines {view.start}-{cap_end_line}."
+                        f" Call `read_lines` with `start_line={cap_end_line + 1}` to page through the"
+                        f" remaining {remaining} lines."
+                    ),
+                ]
+            )
+            return f"{header}\n{file_output}"
+        return file_output
+
+    def _retire_tombstones_for_path(self, path: str) -> None:
+        windows = self._windows()
+        windows[:] = [w for w in windows if not (w.path == path and w.source_kind == "tombstone")]
+
+    def _retire_windows(self, path: str, retired: list[Interval]) -> None:
+        if not retired:
+            return
+        retired_ranges = {(i.start, i.end) for i in retired}
+        windows = self._windows()
+        windows[:] = [
+            w for w in windows if not (w.path == path and (w.view_start_line, w.view_end_line) in retired_ranges)
+        ]
 
     def _windows(self) -> list[WorkingFileWindow]:
         return self._working_file_provider()
@@ -446,22 +670,32 @@ class FileTool(FunctionToolCallback):
         call_id: str,
         covering: WorkingFileWindow,
         path: Path,
-        requested_end_line: int,
-        requested_start_line: int,
+        request: Interval,
+        max_lines: int,
     ) -> TurnItem:
-        intended_coverage_end = covering.requested_end_line or (covering.view_start_line + self.max_lines - 1)
-        output = "\n".join(
-            [
-                f"REDUNDANT_READ path={path} requested_lines={requested_start_line}-{requested_end_line}",
-                (
-                    "An existing live window already covers this span"
-                    f" (rendered lines {covering.view_start_line}-{covering.view_end_line},"
-                    f" intended coverage {covering.view_start_line}-{intended_coverage_end},"
-                    f" revision {covering.revision or ''}). Use that window."
-                    f" To extend coverage, page forward from start_line={intended_coverage_end + 1}."
-                ),
-            ]
-        )
+        # Pure message-building — the caller already appended call_id to covering.origin_call_ids. The variant
+        # depends on why the window covers the request. EOF guidance applies ONLY when the window itself reaches
+        # EOF (view_end_line >= line_count); a window that merely stopped at the per-call cap still has unread
+        # content past it (line_count > cap), so the cap branch must win there even though request.end > line_count.
+        cap = request.start + max_lines - 1
+        fresh_effective_end = min(request.end, covering.line_count, cap)
+        if covering.view_end_line >= covering.line_count and request.end > covering.line_count:
+            body = (
+                f"File ends at line {covering.line_count}; no content exists past that line. The existing window"
+                " already covers up to EOF. Do not page forward past line_count."
+            )
+        elif request.end > cap and covering.line_count > cap:
+            body = (
+                f"An existing live window covers this span up to the per-call cap (line {fresh_effective_end})."
+                f" To extend coverage, page forward from start_line={fresh_effective_end + 1}."
+            )
+        else:
+            body = (
+                "An existing live window already covers this range (rendered lines"
+                f" {covering.view_start_line}-{covering.view_end_line}, revision {covering.revision or ''})."
+                " Use that window."
+            )
+        output = "\n".join([f"REDUNDANT_READ path={path} requested_lines={request.start}-{request.end}", body])
         return TurnItem(
             call_id=call_id,
             output=output,
@@ -480,11 +714,8 @@ class FileTool(FunctionToolCallback):
         view_start_line: int,
         source_kind: WorkingFileSourceKind,
         header_lines: list[str],
-        requested_end_line: int | None = None,
     ) -> TurnItem:
-        end_line, _, view_lines = render_view(
-            current_text, view_start_line, self.max_lines, requested_end_line=requested_end_line
-        )
+        end_line, _, view_lines = render_view(current_text, view_start_line, self.max_lines)
         if line_count == 0:
             body = f"{self.current_view_marker_prefix}: empty file (line_count=0)"
         else:
@@ -494,6 +725,8 @@ class FileTool(FunctionToolCallback):
         output = "\n".join(header_lines + [body])
         # Mint a WorkingFileWindow for the diagnostic — its rendered_output carries the embedded current view; the
         # next reconcile pass normalizes source_kind back to `read_lines` and re-renders against fresh on-disk text.
+        # `requested_end_line` is concrete (the rendered end) so reconcile re-renders a fixed extent — a `None`
+        # would let it auto-expand on file growth and re-introduce overlap.
         self._windows().append(
             WorkingFileWindow(
                 window_id=call_id,
@@ -503,10 +736,14 @@ class FileTool(FunctionToolCallback):
                 rendered_output=output,
                 view_start_line=view_start_line,
                 view_end_line=end_line,
-                requested_end_line=requested_end_line,
+                requested_end_line=end_line,
+                line_count=line_count,
+                origin_call_ids=[call_id],
                 source_kind=source_kind,
             )
         )
+        # The diagnostic output embeds a current view of the file, so the model is shown this content now.
+        self._mark_exposed(call_id, current_revision)
         return TurnItem(
             call_id=call_id,
             output=output,
@@ -674,3 +911,17 @@ class FileTool(FunctionToolCallback):
 
 def _error_item(call_id: str, message: str) -> TurnItem:
     return TurnItem(call_id=call_id, output=f"ERROR {message}", type="function_call_output")
+
+
+def _window_covers_request(window: WorkingFileWindow, request: Interval, max_lines: int) -> bool:
+    """Does `window`'s content satisfy `request` such that a fresh disk read would return no additional lines?
+
+    Equivalent to: would a fresh `read_lines(request.start, request.end)` return its last line at or below
+    `window.view_end_line`? The fresh read's effective end is clamped by the caller-requested end, by the file's
+    `line_count` (EOF), and by the per-call cap `request.start + max_lines - 1`. Coverage runs after the per-read
+    refresh, so `window.line_count` / `view_end_line` are the just-read values.
+    """
+    if request.start < window.view_start_line:
+        return False
+    fresh_effective_end = min(request.end, window.line_count, request.start + max_lines - 1)
+    return fresh_effective_end <= window.view_end_line

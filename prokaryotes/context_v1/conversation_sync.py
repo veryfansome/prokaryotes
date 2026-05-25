@@ -11,11 +11,13 @@ Case A branch divergence and cold rebuild apply a two-gate filter on `working_fi
   target's own turns).
 - `source_call_ids` = file-tool call_ids in the source/donor snapshot's own TurnExecution.items (post-compaction
   tail only — not the parent-snapshot chain).
-- Keep a window if its `path` is in `active_paths` AND (`window_id ∈ kept_call_ids` OR `window_id ∉
-  source_call_ids`). The origin clause's second disjunct is the carryforward bucket — a window whose `call_id`
-  lives nowhere in the source's own turns originated in a compacted ancestor and rode through one or more
-  compactions. Windows from discarded sibling turns (or donor-tail turns past the rebuild target) are in
-  `source_call_ids` but not in `kept_call_ids` and are dropped.
+- Keep a window if its `path` is in `active_paths` AND any origin in `origin_call_ids` is a surviving origin —
+  i.e. (`any(o ∈ kept_call_ids)` OR `any(o ∉ source_call_ids)`). The second disjunct is the carryforward
+  bucket: an origin that lives nowhere in the source's own turns originated in a compacted ancestor and rode
+  through one or more compactions. Note `any(o ∉ source_call_ids)`, not `not any(o ∈ source_call_ids)` — for a
+  merged window with origins `{ancestor, discarded}` only the former keeps it. A window is dropped only when
+  *every* origin is a discarded source origin (in `source_call_ids` but not `kept_call_ids`). `origin_call_ids`
+  generalizes the old `window_id`-only check now that consolidation/fold merges several calls into one window.
 
 The web flow also handles two stream-loss recovery scenarios:
 - Pre-commit (handshake-stamp invariant): managed by the client; the syncer produces a `snapshot_uuid` in the
@@ -774,10 +776,16 @@ def _filter_windows_by_origin(
     kept_call_ids: set[str],
     source_call_ids: set[str],
 ) -> list[WorkingFileWindow]:
-    """Two-set origin filter: keep a window if `window_id ∈ kept_call_ids` OR `window_id ∉ source_call_ids`. The
-    second clause is the carryforward bucket — a window whose call_id appears nowhere in the source's own turns
-    must have originated in a compacted ancestor and ridden forward, so keep it."""
-    return [w for w in windows if w.window_id in kept_call_ids or w.window_id not in source_call_ids]
+    """Two-set origin filter: keep a window if any origin is a surviving origin —
+    `any(o ∈ kept_call_ids)` OR `any(o ∉ source_call_ids)`. The second clause is the carryforward bucket — an
+    origin appearing nowhere in the source's own turns originated in a compacted ancestor and rode forward.
+    (Unused; kept generalized in step with `_filter_windows_by_active_path_and_origin`.)"""
+    return [
+        w
+        for w in windows
+        if any(o in kept_call_ids for o in w.origin_call_ids)
+        or any(o not in source_call_ids for o in w.origin_call_ids)
+    ]
 
 
 def _active_paths_in_turns(turns: dict[str, TurnExecution]) -> set[str]:
@@ -810,16 +818,24 @@ def _filter_windows_by_active_path_and_origin(
     kept_call_ids: set[str],
     source_call_ids: set[str],
 ) -> list[WorkingFileWindow]:
-    """Two-gate filter at Case A divergence and cold rebuild: keep a window if `path ∈ active_paths` AND
-    (`window_id ∈ kept_call_ids` OR `window_id ∉ source_call_ids`).
+    """Two-gate filter at Case A divergence and cold rebuild: keep a window if `path ∈ active_paths` AND any
+    origin is a surviving origin — `any(o ∈ kept_call_ids)` OR `any(o ∉ source_call_ids)`.
 
     The active-path gate drops carryforward windows whose path is no longer touched in the kept turns; the origin
-    gate drops windows minted by discarded sibling/tail turns even when their path remains active.
+    gate drops windows minted by discarded sibling/tail turns even when their path remains active. The origin
+    clause uses `any(o ∉ source_call_ids)` (≥1 carryforward origin), NOT `not any(o ∈ source_call_ids)` (all
+    carryforward) — the two diverge for a merged window with both an ancestor-carryforward and a discarded origin,
+    where we keep on the surviving ancestor origin. A window is dropped only when every origin is a discarded
+    source origin (in `source_call_ids`, not in `kept_call_ids`).
     """
     return [
         w
         for w in windows
-        if w.path in active_paths and (w.window_id in kept_call_ids or w.window_id not in source_call_ids)
+        if w.path in active_paths
+        and (
+            any(o in kept_call_ids for o in w.origin_call_ids)
+            or any(o not in source_call_ids for o in w.origin_call_ids)
+        )
     ]
 
 

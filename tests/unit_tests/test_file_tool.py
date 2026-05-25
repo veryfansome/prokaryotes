@@ -226,7 +226,8 @@ async def test_read_over_cap_with_truncation_returns_range_truncated_live_view(t
     assert f"{cap_end} | line{cap_end}" in result.output
     assert f"{cap_end + 1} | line{cap_end + 1}" not in result.output
     window = windows[-1]
-    assert window.source_kind == "range_truncated"
+    # RANGE_TRUNCATED is now a response shape only; the window it mints is an ordinary read_lines window.
+    assert window.source_kind == "read_lines"
     assert window.view_start_line == 1
     assert window.view_end_line == cap_end
     assert window.requested_end_line == cap_end
@@ -276,9 +277,9 @@ async def test_read_over_cap_with_eof_inside_cap_returns_plain_live_view(tmp_pat
     assert "3 | gamma" in result.output
     window = windows[-1]
     assert window.view_end_line == 3
-    # `requested_end_line` is pinned to the cap, not the original over-cap request, so a later refresh after file
-    # growth cannot expand the window past max_lines.
-    assert window.requested_end_line == FileTool.max_lines
+    # `requested_end_line` is the consolidated interval end (clamped to EOF here), never the original over-cap
+    # request — fixed extents mean a later refresh re-renders to this concrete boundary and no further.
+    assert window.requested_end_line == 3
 
 
 @pytest.mark.asyncio
@@ -292,9 +293,12 @@ async def test_read_over_cap_pinned_requested_end_caps_refresh_after_file_growth
         _read_args(target, start_line=1, end_line=FileTool.max_lines + 100),
         "call_over_cap_grow",
     )
+    # The 2-line file clamps the minted window to its concrete extent (1, 2); requested_end_line is 2, not the cap.
+    assert windows[0].view_end_line == 2
+    assert windows[0].requested_end_line == 2
 
-    # Grow the file beyond the cap; the pinned requested_end_line must prevent the refreshed window from
-    # extending past max_lines, even though the original request was wider.
+    # Grow the file beyond the cap; fixed extents mean the refreshed window re-renders to its concrete boundary
+    # (line 2) and does NOT auto-expand toward max_lines, even though the original request was wider.
     grown_line_count = FileTool.max_lines + 50
     target.write_text("".join(f"L{i}\n" for i in range(1, grown_line_count + 1)), encoding="utf-8")
     await reconcile_working_files(
@@ -305,9 +309,9 @@ async def test_read_over_cap_pinned_requested_end_caps_refresh_after_file_growth
     )
 
     refreshed = windows[0]
-    assert refreshed.view_end_line == FileTool.max_lines
-    assert f"{FileTool.max_lines} | L{FileTool.max_lines}" in refreshed.rendered_output
-    assert f"{FileTool.max_lines + 1} | L{FileTool.max_lines + 1}" not in refreshed.rendered_output
+    assert refreshed.view_end_line == 2
+    assert "2 | L2" in refreshed.rendered_output
+    assert "3 | L3" not in refreshed.rendered_output
 
 
 @pytest.mark.asyncio
@@ -842,7 +846,10 @@ async def test_reconcile_working_files_refreshes_live_windows_after_external_edi
 
     await tool.call(_read_args(target), "call_r")
 
-    target.write_text("v1\nv2\nv3\n", encoding="utf-8")
+    # In-place external edit within the window's fixed extent (still 2 lines). Reconcile re-renders the window to
+    # the new content and revision; the open-ended read minted a concrete (1, 2) extent, so growth past line 2
+    # would not surface (auto-expand was dropped) — see the dedicated fixed-extent tests.
+    target.write_text("v1\nv2-edited\n", encoding="utf-8")
 
     await reconcile_working_files(
         windows,
@@ -852,8 +859,8 @@ async def test_reconcile_working_files_refreshes_live_windows_after_external_edi
     )
 
     refreshed = windows[0]
-    assert refreshed.revision == _hash("v1\nv2\nv3\n")
-    assert "3 | v3" in refreshed.rendered_output
+    assert refreshed.revision == _hash("v1\nv2-edited\n")
+    assert "2 | v2-edited" in refreshed.rendered_output
     assert refreshed.status == "live"
 
 
@@ -887,38 +894,6 @@ async def test_reconcile_working_files_normalizes_conflict_window_without_revisi
 
 
 @pytest.mark.asyncio
-async def test_reconcile_working_files_normalizes_range_truncated_window_without_revision_change(tmp_path: Path):
-    target = tmp_path / "truncated.txt"
-    line_count = FileTool.max_lines + 10
-    target.write_text("".join(f"line{i}\n" for i in range(1, line_count + 1)), encoding="utf-8")
-    windows: list[WorkingFileWindow] = []
-    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
-
-    truncated_result = await tool.call(
-        _read_args(target, start_line=1, end_line=line_count),
-        "call_trunc",
-    )
-    assert truncated_result.output.startswith("RANGE_TRUNCATED ")
-    assert windows[-1].source_kind == "range_truncated"
-
-    await reconcile_working_files(
-        windows,
-        workspace_root=tmp_path,
-        max_file_bytes=FileTool.max_file_bytes,
-        max_lines=FileTool.max_lines,
-    )
-
-    normalized = windows[-1]
-    assert normalized.source_kind == "read_lines"
-    assert normalized.rendered_output.startswith("FILE ")
-    assert "RANGE_TRUNCATED " not in normalized.rendered_output
-    assert "1 | line1" in normalized.rendered_output
-    assert f"{FileTool.max_lines} | line{FileTool.max_lines}" in normalized.rendered_output
-    assert normalized.view_end_line == FileTool.max_lines
-    assert normalized.requested_end_line == FileTool.max_lines
-
-
-@pytest.mark.asyncio
 async def test_reconcile_working_files_normalizes_already_exists_window_without_revision_change(tmp_path: Path):
     target = tmp_path / "exists_again.txt"
     target.write_text("alpha\nbeta\n", encoding="utf-8")
@@ -946,21 +921,21 @@ async def test_reconcile_working_files_normalizes_already_exists_window_without_
 
 @pytest.mark.asyncio
 async def test_read_refreshes_prior_live_windows_for_same_path(tmp_path: Path):
-    # The second read must escape the prior window's intended coverage so it hits disk and refreshes — a covered re-read
-    # short-circuits to REDUNDANT_READ instead.
+    # A disjoint, non-touching second read (gap at line 2) hits disk and refreshes ALL live windows for the path
+    # before consolidating, so the prior window is brought current as a side effect rather than consolidated away.
     target = tmp_path / "read_refresh.txt"
-    target.write_text("old1\nold2\n", encoding="utf-8")
+    target.write_text("old1\nold2\nold3\nold4\nold5\n", encoding="utf-8")
     windows: list[WorkingFileWindow] = []
     tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
 
     first_args = _read_args(target, 1, 1)
     await tool.call(first_args, "call_first")
 
-    target.write_text("new1\nnew2\n", encoding="utf-8")
-    await tool.call(_read_args(target, 2, 2), "call_second")
+    target.write_text("new1\nnew2\nnew3\nnew4\nnew5\n", encoding="utf-8")
+    await tool.call(_read_args(target, 3, 3), "call_second")
 
     refreshed = next(w for w in windows if w.window_id == "call_first")
-    new_rev = _hash("new1\nnew2\n")
+    new_rev = _hash("new1\nnew2\nnew3\nnew4\nnew5\n")
     assert refreshed.revision == new_rev
     assert "1 | new1" in refreshed.rendered_output
     assert "1 | old1" not in refreshed.rendered_output
@@ -1004,9 +979,10 @@ async def test_covered_exact_span_reread_returns_redundant_read(tmp_path: Path):
     second_read = await tool.call(_read_args(target, 2, 3), "call_second")
 
     assert second_read.output.startswith("REDUNDANT_READ ")
+    # Subset coverage: the request fits inside the window's rendered range — point at it, no paging guidance.
     assert "rendered lines 1-3" in second_read.output
-    assert "intended coverage 1-3" in second_read.output
-    assert "page forward from start_line=4" in second_read.output
+    assert "Use that window" in second_read.output
+    assert "page forward" not in second_read.output
     assert second_read.prokaryotes_annotations == {
         "file_tool.path": str(target),
         "file_tool.persistence": "working_file",
@@ -1025,35 +1001,15 @@ async def test_covered_open_ended_reread_of_short_file_returns_redundant_read(tm
     await tool.call(_read_args(target), "call_first")
     first_window = windows[-1]
     assert first_window.view_end_line == 3
-    assert first_window.requested_end_line is None
+    # Open-ended reads now store a concrete extent (clamped to EOF), not None.
+    assert first_window.requested_end_line == 3
 
     second_read = await tool.call(_read_args(target), "call_second")
 
+    # The open-ended re-read clamps past EOF, so coverage holds and the EOF variant fires (no paging guidance).
     assert second_read.output.startswith("REDUNDANT_READ ")
-    assert "rendered lines 1-3" in second_read.output
-    assert "intended coverage 1-200" in second_read.output
-    assert "page forward from start_line=201" in second_read.output
-
-
-@pytest.mark.asyncio
-async def test_next_page_uses_intended_coverage_end_not_view_end(tmp_path: Path):
-    target = tmp_path / "next_page.txt"
-    target.write_text("a\nb\nc\n", encoding="utf-8")
-    windows: list[WorkingFileWindow] = []
-    tool = FileTool(working_file_provider=lambda: windows, workspace_root=tmp_path)
-
-    await tool.call(_read_args(target), "call_first")
-
-    # view_end_line + 1 = 4, small exact span inside intended coverage [1, 200].
-    covered_exact = await tool.call(_read_args(target, 4, 4), "call_view_end_plus_one")
-    assert covered_exact.output.startswith("REDUNDANT_READ ")
-    assert "page forward from start_line=201" in covered_exact.output
-
-    # intended_coverage_end + 1 = 201, escapes coverage.
-    next_page = await tool.call(_read_args(target, 201), "call_intended_end_plus_one")
-    assert not next_page.output.startswith("REDUNDANT_READ ")
-    new_window = next(w for w in windows if w.window_id == "call_intended_end_plus_one")
-    assert new_window.status == "live"
+    assert "File ends at line 3" in second_read.output
+    assert "Do not page forward" in second_read.output
 
 
 @pytest.mark.asyncio
@@ -1066,7 +1022,7 @@ async def test_range_truncated_window_counts_as_stable_coverage(tmp_path: Path):
 
     first_read = await tool.call(_read_args(target, 1, 250), "call_first")
     assert first_read.output.startswith("RANGE_TRUNCATED ")
-    assert windows[-1].source_kind == "range_truncated"
+    assert windows[-1].source_kind == "read_lines"
     assert windows[-1].status == "live"
 
     second_read = await tool.call(_read_args(target, 1, 200), "call_second")
@@ -1287,7 +1243,9 @@ def test_refresh_windows_for_path_handles_multiple_views_into_same_path():
         rendered_output="placeholder",
         view_start_line=1,
         view_end_line=3,
-        requested_end_line=None,
+        requested_end_line=3,
+        line_count=5,
+        origin_call_ids=["c1"],
         source_kind="read_lines",
     )
     win_second = WorkingFileWindow(
@@ -1298,7 +1256,9 @@ def test_refresh_windows_for_path_handles_multiple_views_into_same_path():
         rendered_output="placeholder",
         view_start_line=3,
         view_end_line=5,
-        requested_end_line=None,
+        requested_end_line=5,
+        line_count=5,
+        origin_call_ids=["c2"],
         source_kind="read_lines",
     )
 
@@ -1346,6 +1306,8 @@ def test_refresh_windows_for_path_preserves_exact_requested_range():
         view_start_line=2,
         view_end_line=3,
         requested_end_line=3,
+        line_count=5,
+        origin_call_ids=["c1"],
         source_kind="read_lines",
     )
 
@@ -1370,7 +1332,9 @@ def test_refresh_windows_for_path_returns_zero_for_already_current_items():
         rendered_output="original",
         view_start_line=1,
         view_end_line=2,
-        requested_end_line=None,
+        requested_end_line=2,
+        line_count=2,
+        origin_call_ids=["c1"],
         source_kind="read_lines",
     )
 
@@ -1464,8 +1428,10 @@ async def test_conflict_refreshes_prior_live_windows_for_same_path(tmp_path: Pat
     refreshed = next(w for w in windows if w.window_id == "call_read")
     assert refreshed.revision == rev_b
     assert refreshed.status == "live"
+    # The prior open-ended read minted a fixed (1, 2) extent; it refreshes to current content within that extent
+    # but does not auto-expand to show the grown line 3 (auto-expand was dropped).
     assert "1 | new1" in refreshed.rendered_output
-    assert "3 | new3" in refreshed.rendered_output
+    assert "3 | new3" not in refreshed.rendered_output
 
 
 @pytest.mark.asyncio

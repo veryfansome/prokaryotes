@@ -70,6 +70,8 @@ async def test_summarize_omits_working_file_windows_from_pre_tail_conv():
                 view_start_line=1,
                 view_end_line=3,
                 requested_end_line=3,
+                line_count=3,
+                origin_call_ids=["c1"],
                 source_kind="read_lines",
             )
         ],

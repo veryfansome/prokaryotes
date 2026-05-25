@@ -52,6 +52,22 @@ def _read_args(path: Path, start_line: int) -> str:
     )
 
 
+def _read_window_args(path: Path, start_line: int, end_line: int) -> str:
+    """Exact inclusive read range. Used where a test needs two windows that stay separate under window
+    deduplication: two disjoint, non-touching exact ranges never collapse into one window, whereas open-ended
+    reads of a short file all resolve to the same `[1, line_count]` extent and dedupe to a single window."""
+    return json.dumps(
+        {
+            "action": "read_lines",
+            "path": str(path),
+            "expected_revision": None,
+            "start_line": start_line,
+            "end_line": end_line,
+            "new_text": None,
+        }
+    )
+
+
 def _replace_args(path: Path, expected_revision: str, start_line: int, end_line: int, new_text: str) -> str:
     return json.dumps(
         {
@@ -176,11 +192,15 @@ async def _wait_for_compaction(
 @pytest.mark.asyncio(loop_scope="session")
 async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness, authed_client, request):
     """Two `read_lines` windows held open across an in-tool write and a later external edit; both windows refresh to
-    the current revision."""
+    the current revision.
+
+    The two reads are disjoint, non-touching exact ranges (`[1, 3]` and `[5, 6]`, gap at line 4) so they stay two
+    separate windows under window deduplication — two open-ended reads of this short a file would both resolve to
+    the full `[1, line_count]` extent and the second would dedupe to a REDUNDANT_READ against the first."""
     conversation_uuid = str(uuid4())
-    initial = "one\ntwo\nthree\nfour\n"
-    after_write = "one\nTWO\nTHREE_X\nfour\n"
-    after_external_edit = "one\nTWO\nTHREE_Y\nfour\nfive\n"
+    initial = "one\ntwo\nthree\nfour\nfive\nsix\n"
+    after_write = "one\nTWO\nTHREE_X\nfour\nfive\nsix\n"
+    after_external_edit = "one\nTWO\nTHREE_Y\nfour\nfive\nsix\n"
 
     with TemporaryDirectory(dir=Path.cwd(), prefix=".file-tool-it-") as temp_dir:
         target = Path(temp_dir) / "tracked.txt"
@@ -195,7 +215,9 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
                         stop_reason="tool_use",
                         text_deltas=["Reading the top."],
                         tool_calls=[
-                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                            ToolCallSpec(
+                                arguments=_read_window_args(target, 1, 3), call_id="call-read-1", name="file_tool"
+                            )
                         ],
                         input_tokens=500,
                     ),
@@ -203,7 +225,9 @@ async def test_file_tool_windows_refresh_across_write_and_reconcile(web_harness,
                         stop_reason="tool_use",
                         text_deltas=["Reading the tail."],
                         tool_calls=[
-                            ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")
+                            ToolCallSpec(
+                                arguments=_read_window_args(target, 5, 6), call_id="call-read-2", name="file_tool"
+                            )
                         ],
                         input_tokens=500,
                     ),
@@ -296,10 +320,13 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
     Under the new design, the carry-forward filter drops windows whose `call_id` is in pre_tail `TurnExecution.items`
     (race-safe, no active-path semantics). So this test minted its reads in the **recency tail** — pre-tail windows
     are intentionally dropped per the design (edit/non-read tradeoff documented in the wip doc).
+
+    The two reads are disjoint, non-touching exact ranges (`[1, 3]` and `[5, 6]`, gap at line 4) so they remain two
+    separate windows under window deduplication; two open-ended reads of this short a file would dedupe to one.
     """
     conversation_uuid = str(uuid4())
-    initial = "one\ntwo\nthree\nfour\n"
-    after_external = "one\nTWO\nthree\nfour\nfive\n"
+    initial = "one\ntwo\nthree\nfour\nfive\nsix\n"
+    after_external = "one\nTWO\nthree\nfour\nfive\nsix\n"
 
     with TemporaryDirectory(dir=Path.cwd(), prefix=".file-tool-it-") as temp_dir:
         target = Path(temp_dir) / "tracked.txt"
@@ -333,7 +360,9 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
                         stop_reason="tool_use",
                         text_deltas=["Reading the top."],
                         tool_calls=[
-                            ToolCallSpec(arguments=_read_args(target, 1), call_id="call-read-1", name="file_tool")
+                            ToolCallSpec(
+                                arguments=_read_window_args(target, 1, 3), call_id="call-read-1", name="file_tool"
+                            )
                         ],
                         input_tokens=500,
                     ),
@@ -341,7 +370,9 @@ async def test_file_tool_live_windows_survive_compaction(web_harness, authed_cli
                         stop_reason="tool_use",
                         text_deltas=["Reading the tail."],
                         tool_calls=[
-                            ToolCallSpec(arguments=_read_args(target, 3), call_id="call-read-2", name="file_tool")
+                            ToolCallSpec(
+                                arguments=_read_window_args(target, 5, 6), call_id="call-read-2", name="file_tool"
+                            )
                         ],
                         input_tokens=500,
                     ),

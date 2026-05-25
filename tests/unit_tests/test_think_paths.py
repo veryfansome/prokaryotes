@@ -1,4 +1,8 @@
-"""ThinkTool `paths` parameter — injects matching active working-file windows into the subprompt."""
+"""ThinkTool `paths` parameter — injects matching active working-file windows into the subprompt.
+
+Exercises the `WorkingFileWindow` contract with required `line_count` / `origin_call_ids`. `think.py` itself is
+unchanged; this pins that path-injection still selects live windows under the window shape.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +36,8 @@ def _window(window_id: str, path: str, status: str = "live") -> WorkingFileWindo
         view_start_line=1,
         view_end_line=40,
         requested_end_line=40,
+        line_count=40,
+        origin_call_ids=[window_id],
         source_kind="read_lines",
     )
 

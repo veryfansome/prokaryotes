@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Iterable
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TurnItem(BaseModel):
@@ -68,7 +68,6 @@ _SUMMARY_BLOCK_HEADER_LINES = (
 
 WorkingFileSourceKind = Literal[
     "read_lines",
-    "range_truncated",
     "already_exists",
     "conflict",
     "range_error",
@@ -79,11 +78,15 @@ WorkingFileSourceKind = Literal[
 class WorkingFileWindow(BaseModel):
     """One live window of grounded file context, durable across turns.
 
-    `window_id` is the originating file-tool `call_id` and is stable for the life of the window: refresh,
-    normalization, and tombstoning mutate the existing window in place by `window_id`. `path`, `status`,
-    `revision`, `view_start_line`, `view_end_line`, `requested_end_line`, and `source_kind` are the authoritative
-    semantic fields; `rendered_output` is cached derived state that reconcile rewrites wholesale whenever the
-    window refreshes.
+    `window_id` is the originating file-tool `call_id` for a primary/diagnostic/placeholder window, or a
+    fresh-minted `wfw-*` id for a consolidation secondary or reconcile-fold window. `origin_call_ids` tracks
+    every file-tool call_id the window's content traces back to (stored sorted-and-deduped, always non-empty) and
+    is what the compaction and branch/cold-rebuild filters consult — `window_id` alone no longer identifies
+    provenance once windows merge. `path`, `status`, `revision`, `view_start_line`, `view_end_line`,
+    `requested_end_line`, `line_count`, `origin_call_ids`, and `source_kind` are the authoritative semantic
+    fields; `rendered_output` is cached derived state that reconcile rewrites wholesale whenever the window
+    refreshes. `requested_end_line` is concrete (no `None`): every live-window mint path sets it so reconcile
+    re-renders to a fixed boundary and cannot auto-expand a window into a disjoint neighbor's range.
     """
 
     window_id: str
@@ -93,19 +96,33 @@ class WorkingFileWindow(BaseModel):
     rendered_output: str
     view_start_line: int
     view_end_line: int
-    requested_end_line: int | None = None
+    requested_end_line: int
+    line_count: int
+    origin_call_ids: list[str]
     source_kind: WorkingFileSourceKind
 
+    @field_validator("origin_call_ids")
+    @classmethod
+    def _normalize_origin_call_ids(cls, value: list[str]) -> list[str]:
+        """Enforce the sorted/deduped/non-empty invariant at the schema level rather than trusting every mint
+        path to compute `sorted(set(...))` correctly."""
+        normalized = sorted(set(value))
+        if not normalized:
+            raise ValueError("origin_call_ids must be non-empty")
+        return normalized
 
-_COVERAGE_ELIGIBLE_SOURCE_KINDS: frozenset[WorkingFileSourceKind] = frozenset({"read_lines", "range_truncated"})
+
+_COVERAGE_ELIGIBLE_SOURCE_KINDS: frozenset[WorkingFileSourceKind] = frozenset({"read_lines"})
 
 
 def coverage_eligible(window: WorkingFileWindow) -> bool:
     """Coverage for `REDUNDANT_READ` derives from `source_kind`, not output prefixes.
 
-    Only `read_lines` and `range_truncated` carry stable line content. Diagnostic source_kinds
-    (`already_exists`, `conflict`, `range_error`) embed a current view but their diagnostic state is unstable
-    until reconcile normalizes them. `tombstone` means the path is gone.
+    Only `read_lines` carries stable line content. Diagnostic source_kinds (`already_exists`, `conflict`,
+    `range_error`) embed a current view but their diagnostic state is unstable until reconcile normalizes them;
+    `_do_read_lines` additionally excludes any window that was a diagnostic *before* its per-read refresh (the
+    refresh normalizes them to `read_lines`, so source_kind alone no longer distinguishes them). `tombstone`
+    means the path is gone.
     """
     return window.status == "live" and window.source_kind in _COVERAGE_ELIGIBLE_SOURCE_KINDS
 
@@ -145,14 +162,17 @@ class Conversation(BaseModel):
     def working_files_block(self) -> str | None:
         """Render `working_file_windows` as a single XML-delimited leading user-role block.
 
-        Returns `None` when there are no windows. Closing `</working_files>` literals inside any window's
-        `rendered_output` are escaped to `<\\/working_files>` at projection time; the stored `rendered_output`
-        remains unescaped cached text.
+        Returns `None` when there are no windows. Windows are projected sorted by `(path, view_start_line)` so the
+        block reads in monotonic line order regardless of mint/fold/retire ordering on the backing list — a
+        page-through split mints the primary before its lower-line secondary, and the reconcile fold appends
+        re-minted windows at the end, so storage order is not monotonic. Closing `</working_files>` literals inside
+        any window's `rendered_output` are escaped to `<\\/working_files>` at projection time; the stored
+        `rendered_output` remains unescaped cached text.
         """
         if not self.working_file_windows:
             return None
         sections: list[str] = []
-        for window in self.working_file_windows:
+        for window in sorted(self.working_file_windows, key=lambda w: (w.path, w.view_start_line)):
             header = (
                 f"## Window: {window.path} lines {window.view_start_line}-{window.view_end_line}"
                 f" (status={window.status} source_kind={window.source_kind})"

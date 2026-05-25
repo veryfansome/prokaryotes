@@ -1,4 +1,9 @@
-"""`project_for_llm` working-file emission + historical-output filtering."""
+"""`project_for_llm` working-file emission + historical-output filtering.
+
+Exercises the `WorkingFileWindow` contract with required `line_count` / `origin_call_ids`. `project.py` itself is
+unchanged; this pins that the leading `<working_files>` block and the historical working-file output drop still
+behave under the window shape.
+"""
 
 from __future__ import annotations
 
@@ -41,6 +46,8 @@ def _window(window_id: str, path: str = "/abs/a.py", view_end_line: int = 40) ->
         view_start_line=1,
         view_end_line=view_end_line,
         requested_end_line=view_end_line,
+        line_count=view_end_line,
+        origin_call_ids=[window_id],
         source_kind="read_lines",
     )
 
