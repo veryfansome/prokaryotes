@@ -29,6 +29,10 @@ from prokaryotes.tools_v1.file_tool.live_windows import reconcile_working_files
 from prokaryotes.tools_v1.shell_command import ShellCommandTool
 from prokaryotes.tools_v1.think import ThinkTool
 from prokaryotes.utils_v1 import system_message_utils
+from prokaryotes.utils_v1.context_discovery import (
+    discover_relevant_context_files,
+    render_context_discovery_prompt,
+)
 from prokaryotes.utils_v1.llm_utils import (
     ANTHROPIC_DEFAULT_MODEL,
     COMPACTION_TOKEN_THRESHOLD_PCT,
@@ -173,11 +177,13 @@ class WebHarness(WebBase):
         instruction = "\n".join(
             self._build_instruction_parts(
                 conversation=conversation,
+                historical_turns=historical_turns,
                 latitude=latitude,
                 longitude=longitude,
                 session=session,
                 time_zone=time_zone,
                 tool_callbacks=tool_callbacks,
+                workspace_root=workspace_root,
             )
         )
         projected_items = project_for_llm(conversation, historical_turns=historical_turns)
@@ -222,11 +228,13 @@ class WebHarness(WebBase):
         self,
         *,
         conversation: Conversation,
+        historical_turns: dict[str, TurnExecution],
         latitude: float | None,
         longitude: float | None,
         session: dict,
         time_zone: str | None,
         tool_callbacks: dict[str, FunctionToolCallback],
+        workspace_root: Path,
     ) -> list[str]:
         parts: list[str] = []
         parts.extend(system_message_utils.get_core_instruction_parts(summaries=bool(conversation.ancestor_summaries)))
@@ -237,6 +245,17 @@ class WebHarness(WebBase):
         for name in sorted(tool_callbacks.keys()):
             parts.append("")
             parts.extend(tool_callbacks[name].system_message_parts)
+
+        discovered_groups = discover_relevant_context_files(
+            conversation=conversation,
+            historical_turns=historical_turns,
+            workspace_root=workspace_root,
+        )
+        discovery_lines = render_context_discovery_prompt(discovered_groups)
+        if discovery_lines:
+            parts.append("")
+            parts.extend(discovery_lines)
+
         parts.append("")
         parts.extend(system_message_utils.get_personality_parts())
         parts.append("")

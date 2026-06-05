@@ -1,6 +1,14 @@
-"""Core model contracts for `WorkingFileWindow`, `Conversation.working_files_block()`, and `coverage_eligible`."""
+"""Core model contracts for `WorkingFileWindow`, `Conversation.working_files_block()`, and `coverage_eligible`.
+
+Pins the `WorkingFileWindow` contract: `line_count` and `origin_call_ids` are required, `requested_end_line` is a
+required `int` (no `None`), and `range_truncated` is no longer a valid `source_kind` — the value can no longer be
+constructed, so an enum-rejection test stands in for the old `test_live_range_truncated_eligible`.
+"""
 
 from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
 
 from prokaryotes.conversation_v1.models import (
     Conversation,
@@ -17,7 +25,9 @@ def _window(
     source_kind: str = "read_lines",
     view_start_line: int = 1,
     view_end_line: int = 40,
-    requested_end_line: int | None = 40,
+    requested_end_line: int = 40,
+    line_count: int = 40,
+    origin_call_ids: list[str] | None = None,
     rendered_output: str = "FILE path=/abs/a.py revision=r1 status=live\n",
     revision: str | None = "r1",
 ) -> WorkingFileWindow:
@@ -29,6 +39,8 @@ def _window(
         view_start_line=view_start_line,
         view_end_line=view_end_line,
         requested_end_line=requested_end_line,
+        line_count=line_count,
+        origin_call_ids=origin_call_ids or [window_id],
         rendered_output=rendered_output,
         revision=revision,
     )
@@ -46,9 +58,6 @@ class TestCoverageEligible:
     def test_live_read_lines_eligible(self):
         assert coverage_eligible(_window(source_kind="read_lines"))
 
-    def test_live_range_truncated_eligible(self):
-        assert coverage_eligible(_window(source_kind="range_truncated"))
-
     def test_diagnostic_source_kinds_not_eligible(self):
         for source_kind in ("already_exists", "conflict", "range_error"):
             assert not coverage_eligible(_window(source_kind=source_kind)), source_kind
@@ -58,6 +67,13 @@ class TestCoverageEligible:
 
     def test_stale_status_not_eligible_even_with_read_lines_kind(self):
         assert not coverage_eligible(_window(status="stale", source_kind="read_lines"))
+
+
+class TestSourceKindEnum:
+    def test_range_truncated_is_no_longer_a_valid_source_kind(self):
+        # Dropped from `WorkingFileSourceKind`: RANGE_TRUNCATED is a response shape only; its window is read_lines.
+        with pytest.raises(ValidationError):
+            _window(source_kind="range_truncated")
 
 
 class TestWorkingFilesBlock:

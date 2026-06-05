@@ -36,6 +36,7 @@ from prokaryotes.conversation_v1.models import (
     Conversation,
     ConversationMessage,
     TurnExecution,
+    WorkingFileWindow,
     compute_boundary_hash,
     compute_tail_hash,
 )
@@ -190,7 +191,7 @@ class ConversationCompactor(ConversationSyncer):
 
                     post_snapshot_messages = current.messages[len(snapshot.messages) :]
                     pre_tail_call_ids = _file_tool_call_ids_in(prep.pre_tail_turns)
-                    carried_windows = [w for w in current.working_file_windows if w.window_id not in pre_tail_call_ids]
+                    carried_windows = _carry_forward_windows(current.working_file_windows, pre_tail_call_ids)
                     swapped = Conversation(
                         conversation_uuid=conversation_uuid,
                         snapshot_uuid=child_snapshot_uuid,
@@ -294,6 +295,22 @@ class ConversationCompactor(ConversationSyncer):
                 pending_snapshot_uuid,
                 exc_info=True,
             )
+
+
+def _carry_forward_windows(
+    windows: list[WorkingFileWindow],
+    pre_tail_call_ids: set[str],
+) -> list[WorkingFileWindow]:
+    """The CAS-time working-file carry-forward filter. Keep a window iff at least one of its `origin_call_ids`
+    escapes the pre-tail span — `set(origin_call_ids) - pre_tail_call_ids` is non-empty.
+
+    A surviving origin is a recency-tail / post-snapshot call (present, but never in pre_tail) or a compacted
+    ancestor call (present nowhere in current turns). A window is dropped only when *every* origin is a pre-tail
+    call. `origin_call_ids` generalizes the old `window_id`-only check now that consolidation/fold can merge
+    several calls into one window with a synthetic `wfw-*` id. Extracted from `_cas_swap_child` so the predicate
+    is importable and unit-testable rather than mirrored.
+    """
+    return [w for w in windows if set(w.origin_call_ids) - pre_tail_call_ids]
 
 
 def _file_tool_call_ids_in(turns: dict[str, TurnExecution]) -> set[str]:

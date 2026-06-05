@@ -43,7 +43,7 @@ One external dialogue message: `source_id` (identity *and* ordering key), `autho
 | Model | Role |
 |---|---|
 | `Conversation` | A snapshot: `conversation_uuid`, `snapshot_uuid`, `parent_snapshot_uuid`, `bot_author_id`, `ancestor_summaries`, `raw_message_start_index`, `messages`, `working_file_windows`. |
-| `WorkingFileWindow` | Durable file-tool live-window state: `window_id`, `path`, `status`, `revision`, `view_start_line`, `view_end_line`, `requested_end_line`, `source_kind`, `rendered_output`. See [file_tool/README.md](../file_tool/README.md). |
+| `WorkingFileWindow` | Durable file-tool live-window state: `window_id`, `path`, `status`, `revision`, `view_start_line`, `view_end_line`, `requested_end_line`, `line_count`, `origin_call_ids`, `source_kind`, `rendered_output`. See [file_tool/README.md](../file_tool/README.md). |
 | `ConversationMessage` | External message: `source_id`, `author_id`, `content`, `display_name`, `deleted`, `edited`. |
 | `TurnExecution` | Per-bot-reply tool log: `conversation_uuid`, `bot_message_source_id`, `items`, `completed`. |
 | `TurnItem` | One `function_call` / `function_call_output` record. Carries `prokaryotes_annotations` (file-tool annotations live here). |

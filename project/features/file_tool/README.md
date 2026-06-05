@@ -2,7 +2,7 @@
 
 ## Overview
 
-`FileTool` gives the web harness LLMs structured `read_lines`, `create_file`, `replace_lines`, `insert_lines`, and `delete_lines` actions, with the central invariant that `read_lines` outputs are **live windows**: when the file later changes (model edit, disk edit), the harness refreshes those older windows in place so the next turn sees current file state. Edits use line ranges guarded by `expected_revision`, write records stay frozen as an audit trail, and the compactor blanks live windows on its summarization input so file bodies don't fossilize into summaries.
+`FileTool` gives the web harness LLMs structured `read_lines`, `create_file`, `replace_lines`, `insert_lines`, and `delete_lines` actions, with the central invariant that `read_lines` outputs are **live windows**: when the file later changes (model edit, disk edit), the harness refreshes those older windows in place so the next turn sees current file state. Windows for a given resolved path are also kept **deduplicated** — overlapping or contiguous reads consolidate into a non-overlapping cover, so repeated and overlapping reads don't pile up as duplicate windows for the same lines. Edits use line ranges guarded by `expected_revision`, write records stay frozen as an audit trail, and the compactor blanks live windows on its summarization input so file bodies don't fossilize into summaries.
 
 Wired into the Anthropic and OpenAI web harnesses; not yet registered in the script or eval harnesses.
 
@@ -24,6 +24,7 @@ Live windows are `WorkingFileWindow` entries on `Conversation.working_file_windo
 - `rendered_output`
 - `revision`
 - `view_end_line`
+- `line_count`
 - `source_kind` (diagnostic source_kinds normalize back to `read_lines` after reconcile)
 
 That mutation happens when:
@@ -42,6 +43,14 @@ FILE path=/workspace/app.py revision=abc123 status=live lines=10-14 line_count=4
 13 |
 14 | print(greet("world"))
 ```
+
+### Window Consolidation
+
+For each resolved path, the windows are kept as a **non-overlapping cover** — reconcile folds any overlap at turn start, and each non-redundant read consolidates the windows its range reaches (read and diagnostic alike) so they no longer overlap. This handles the symlink trio (`CLAUDE.md` / `AGENTS.md` / `README.md` resolving to one path), re-reads of short or over-cap files, and partial-overlap reads — all of which previously minted duplicate windows.
+
+A successful `read_lines` that isn't a coverage hit consolidates: every existing window for the path that **overlaps or touches** the new range (transitively) is merged with it into one interval, and any window disjoint from the new range is left untouched. The interval containing the new call's requested range becomes the **primary** (`window_id = call_id`); if the merged span exceeds `max_lines` it splits, and the leftover intervals become **secondaries** (`window_id = wfw-<uuid>`). The primary and all secondaries share one `origin_call_ids` set — the union of the new call and every absorbed window's origins — and are re-rendered from the freshly-read file text; the absorbed windows are retired. Adjacent ranges the model paged through (`[1, 200]` then `[201, 400]`) merge only when the merged span fits `max_lines`; otherwise the result is two **contiguous** windows — the old one retired and re-minted as the lower secondary.
+
+Reconcile's fold pass re-establishes the cover at turn start. Mid-turn, a write/create can mint a diagnostic window that transiently overlaps a read window; neither a disjoint read nor a coverage-hit read heals it, but the next turn's fold collapses it. Consolidation is greedy and anchored on the new call's start — it deduplicates and keeps windows contiguous, not minimal-cardinality. The pure interval algorithm lives in `intervals.py`.
 
 ### Edit Records
 
@@ -90,14 +99,16 @@ Live-window state lives on `Conversation.working_file_windows` as `WorkingFileWi
 
 | Field | Meaning |
 |---|---|
-| `window_id` | Stable identifier minted from the originating file-tool `call_id` |
+| `window_id` | Window identifier, unique within `working_file_windows`. The originating `call_id` for a primary / diagnostic / empty-view window; a fresh `wfw-<uuid>` for a consolidation secondary or a reconcile-fold window. No longer a reliable provenance key once windows merge — use `origin_call_ids`. |
 | `path` | Resolved absolute path for the file |
 | `status` | `live` or `stale` |
 | `revision` | SHA-256 of the current file text |
 | `view_start_line` | 1-based first line of the rendered view |
 | `view_end_line` | 1-based inclusive last line of the rendered view |
-| `requested_end_line` | Optional inclusive end line for an exact-span `read_lines`; omitted for open-ended paging reads |
-| `source_kind` | One of `read_lines`, `range_truncated`, `already_exists`, `conflict`, `range_error`, `tombstone` |
+| `requested_end_line` | Required, concrete inclusive end line the window claims to cover (its consolidated boundary). Reconcile re-renders to this fixed extent and never auto-expands the window into a neighbor's range. |
+| `line_count` | File's line count at the window's mint/refresh revision. Feeds the coverage check's EOF clamp. |
+| `origin_call_ids` | Sorted, deduped, non-empty list of every file-tool `call_id` the window's content traces back to — the new read plus every absorbed prior window. What the compaction and branch/cold-rebuild filters consult. |
+| `source_kind` | One of `read_lines`, `already_exists`, `conflict`, `range_error`, `tombstone`. RANGE_TRUNCATED is a response shape only; the window it mints is `read_lines`. |
 | `rendered_output` | Cached derived text — what projection emits inside the leading `<working_files>` block |
 
 `WorkingFileWindow` is part of `Conversation` storage and round-trips through Redis and Elasticsearch (as `working_file_windows_json`). Projection emits a leading user-role `<working_files trust="file-content">…</working_files>` block from these windows (see [conversation/README.md — Background-context blocks](../conversation/README.md#background-context-blocks)).
@@ -107,7 +118,7 @@ Live-window state lives on `Conversation.working_file_windows` as `WorkingFileWi
 - `file_tool.path` — the resolved absolute path the call acted on. Branch divergence and cold rebuild read this off kept `TurnExecution.items` to derive active paths.
 - `file_tool.persistence` — `"working_file"` for read-like outputs whose durable relevance is on `working_file_windows`, `"history"` for frozen `CREATED` / `EDITED` records. Projection drops historical `function_call_output`s annotated `working_file` (and their paired `function_call`s) on later turns; `history` items ride forward as ordinary transcript.
 
-`REDUNDANT_READ` carries `file_tool.persistence="working_file"` for projection suppression but does **not** allocate a new `WorkingFileWindow` — it points the model at an existing covering window.
+`REDUNDANT_READ` carries `file_tool.persistence="working_file"` for projection suppression but does **not** allocate a new `WorkingFileWindow` — it points the model at an existing covering window. The redundant call is still recorded as provenance: its `call_id` is appended to the covering window's `origin_call_ids`, so a surviving recency-tail read keeps anchoring a window whose only other origin may be a compacted/pre-tail call.
 
 ### Reconciliation
 
@@ -122,10 +133,12 @@ await reconcile_working_files(
 )
 ```
 
-That pass:
+That pass, per distinct live path:
 
-- refreshes every live window whose on-disk revision has changed
-- normalizes diagnostic source_kinds (`range_truncated`, `already_exists`, `conflict`, `range_error`) back to `read_lines` once the underlying file is readable again
+- refreshes every live window whose on-disk revision has changed, re-rendering its view and updating `line_count`
+- normalizes diagnostic source_kinds (`already_exists`, `conflict`, `range_error`) back to `read_lines` once the underlying file is readable again
+- retires obsolete past-EOF placeholders — an empty-view window whose `view_start_line` is now within the file's `line_count`
+- **folds** any overlap among a path's live windows into a non-overlapping cover (a no-op when already disjoint), so the per-path invariant holds before any tool call runs
 - tombstones windows whose paths are gone or no longer safely readable (`status="stale"`, `source_kind="tombstone"`)
 
 This is what lets the next turn see current file state even when the previous turn did not itself perform the edit, and what guarantees the `REDUNDANT_READ` coverage check inside `FileTool` runs against post-reconcile state.
@@ -185,13 +198,25 @@ General conventions:
 
 When an exact-span request is wider than `FileTool.max_lines` and the file actually has content past the cap, the call succeeds partially and returns a `RANGE_TRUNCATED` diagnostic plus a live window covering the first `FileTool.max_lines` lines of the requested span, with explicit paging guidance for the remainder. When the requested span is wider than the cap but EOF falls within the cap (so nothing was clipped), the call returns an ordinary `FILE` view instead.
 
-Before performing disk I/O, `read_lines` checks whether the requested span is already fully covered by a coverage-eligible window for the same path. Coverage is evaluated against the window's **intended coverage end** — `WorkingFileWindow.requested_end_line` when set, otherwise `view_start_line + FileTool.max_lines - 1` — so an open-ended read whose `view_end_line` was clipped at EOF still recognizes follow-up reads of the same intended span as covered. When a covering window exists, the tool returns a short `REDUNDANT_READ` diagnostic that names the rendered range, intended coverage, the covering window's revision, and the `start_line` to page from to escape coverage. Coverage eligibility is derived from `source_kind`: `read_lines` and `range_truncated` count as stable coverage; the transient diagnostic source_kinds (`already_exists`, `conflict`, `range_error`) do not — their state is unstable until reconcile normalizes them on the next turn. Tombstones (`source_kind="tombstone"`) are also ineligible.
+`read_lines` reads disk **first**, refreshes every live window for the path against that fresh content, and only then checks coverage — so the decision always runs against current file state, correct even when the file grew or shrank mid-turn. A request is **covered** when an existing window starts at or before the request and a fresh disk read would return no lines past the window's `view_end_line` (the fresh read's effective end is clamped by the requested end, by `line_count` for EOF, and by the per-call cap `start_line + FileTool.max_lines - 1`). This single extent check unifies the old exact-match / subset / EOF / cap cases. A covered request returns a short `REDUNDANT_READ` diagnostic — one of three variants (EOF / per-call cap / subset) depending on which clamp made coverage hold, with paging guidance only where paging would actually surface unread lines — and mints no window.
+
+Coverage eligibility is narrow:
+
+- only `read_lines` windows count (RANGE_TRUNCATED mints a `read_lines` window; the transient `already_exists` / `conflict` / `range_error` diagnostics and `tombstone`s do not)
+- a window that was a **diagnostic before this read's refresh** is excluded — its id is snapshotted pre-refresh, because the refresh normalizes it to `read_lines`; a pre-existing diagnostic must fold through consolidation (recording this call's provenance), not short-circuit
+- the window's current content must have actually been **shown to the model this turn** (the exposure gate, below)
+
+A coverage miss falls through to consolidation — except an empty file or a past-EOF read, which short-circuits to an empty-view placeholder first (see Behavior details). Consolidation may still retire and merge the reached windows.
+
+#### Exposure gate
+
+The leading `<working_files>` projection is built once at turn start and never rebuilt mid-turn, and a `REDUNDANT_READ` is only a pointer — so a window whose content the refresh silently advanced to the current revision but never *re-rendered* to the model (a sibling refreshed by a disjoint read, or an in-place external change between two reads) must not grant `REDUNDANT_READ`, or the model would act on content it was never shown. `FileTool` keeps a turn-local `window_id → shown-revision` map, seeded at construction from the reconciled (about-to-be-projected) windows and updated only by model-facing renders — never by refresh; coverage requires `shown-revision == window.revision`. The cost is bounded over-conservatism: a same-turn re-read of a consolidation-extended primary or a split-off secondary (neither rendered whole) re-renders instead of deduping, and self-heals next turn when projection re-seeds the map.
 
 Behavior details:
 
-- empty file: returns `FILE ... status=live line_count=0`
-- start line past EOF: returns a header with no numbered body
-- exact-span `read_lines` calls preserve that same requested span on later live-window refreshes; for over-cap requests the effective span is pinned at `start_line + FileTool.max_lines - 1` so refreshes cannot grow the window past the cap on file growth
+- empty file: returns `FILE ... status=live line_count=0`; the coverage-miss path retires prior windows and mints a `(1, 0)` placeholder
+- start line past EOF on a non-empty file: mints an empty-view placeholder `(start_line, start_line - 1)` and leaves other windows untouched
+- windows are **fixed-extent**: every window stores a concrete `requested_end_line` (its consolidated boundary), so reconcile re-renders to that boundary and never auto-expands on file growth. To see beyond a window the model issues a new `read_lines` that triggers a fresh consolidation. (This drops the old open-ended auto-expand-on-growth behavior; a separate `refresh_intent` field is the path back if it's ever needed.)
 - file too large: returns an error item
 - `read_lines` path is resolved relative to the workspace root if not absolute
 
@@ -252,8 +277,8 @@ Common function-call output shapes:
 | `ALREADY_EXISTS ...` + current view | Create collided with existing file |
 | `CONFLICT ...` + current view | Revision mismatch during write |
 | `RANGE_ERROR ...` + current view | Invalid line range for current file |
-| `RANGE_TRUNCATED ...` + current view | `read_lines` exact span exceeded the per-call cap and content was clipped; window covers the first `FileTool.max_lines` lines with paging guidance for the remainder |
-| `REDUNDANT_READ ...` | `read_lines` requested span was already fully covered by an existing live window; diagnostic points at that window instead of re-rendering the file |
+| `RANGE_TRUNCATED ...` + current view | `read_lines` exact span exceeded the per-call cap and content was clipped; window covers the first `FileTool.max_lines` lines with paging guidance for the remainder. Response shape only — the minted window is `source_kind="read_lines"` and consolidates like any other read. |
+| `REDUNDANT_READ ...` | `read_lines` requested span was already fully covered by an existing live window; diagnostic points at that window instead of re-rendering. Three variants (EOF / per-call cap / subset). Fires more often under the unified extent check; mints no window but appends the call to the covering window's `origin_call_ids`. |
 | `FILE path=... status=stale [...]` | Tombstoned live window |
 | `ERROR ...` | Validation or filesystem failure with no tracked recovery state |
 
@@ -278,8 +303,9 @@ await reconcile_working_files(
 
 This is the point where:
 
-- older live windows pick up external edits (revision changed → re-render)
-- transient diagnostic source_kinds (`range_truncated`, `already_exists`, `conflict`, `range_error`) normalize back to `read_lines` against fresh on-disk text
+- older live windows pick up external edits (revision changed → re-render, `line_count` updated)
+- transient diagnostic source_kinds (`already_exists`, `conflict`, `range_error`) normalize back to `read_lines` against fresh on-disk text
+- overlapping windows for a path **fold** into a non-overlapping cover, and obsolete past-EOF placeholders are retired
 - inaccessible files are tombstoned (`status="stale"`, `source_kind="tombstone"`)
 
 ### 2. Tool Registration
@@ -293,7 +319,7 @@ file_tool = FileTool(
 )
 ```
 
-The `working_file_provider` is called by `FileTool` on every action so same-turn calls see prior windows minted earlier in the same turn — the tool mutates the list in place, no `_pending_result_items` bridge needed.
+The `working_file_provider` is called by `FileTool` on every action so same-turn calls see prior windows minted earlier in the same turn — the tool mutates the list in place, no `_pending_result_items` bridge needed. Constructing `FileTool` here — **after** reconcile, **before** projection — is also what makes the exposure gate correct: it seeds its turn-local `window_id → shown-revision` map from the reconciled windows that are about to be projected (see [Exposure gate](#exposure-gate)).
 
 ### 3. Tool Guidance to the Model
 
@@ -312,7 +338,7 @@ That guidance tells the model to:
 
 Provider SDKs may batch multiple tool calls in one round. Because `working_file_provider` returns the live `conversation.working_file_windows` list and `FileTool` mutates it in place, a later file-tool call in the same round sees windows minted by earlier calls — covering patterns like read → edit → read-another-range within one model turn.
 
-Because live windows mutate earlier `function_call_output` items in place, provider-side prompt caches can lose reuse when a refreshed file window sits inside the cached prefix. In practice that means editing a tracked file may turn the next turn back into fresh input-token billing until a new stable prefix forms. Unchanged files do not churn cache state because windows are only re-rendered when the file revision changes or a transient diagnostic normalizes back into an ordinary `FILE ...` view.
+The durable file context is re-projected each turn as the leading `<working_files>` block (historical `read_lines` `function_call_output`s are filtered out — see [Tracked Metadata](#tracked-metadata)), so provider-side prompt caches can lose reuse when a tracked file changes: the block's content shifts and invalidates the cached prefix from that point on. In practice that means editing a tracked file may turn the next turn back into fresh input-token billing until a new stable prefix forms. Unchanged files do not churn cache state because windows are only re-rendered when the file revision changes or a transient diagnostic normalizes back into an ordinary `FILE ...` view.
 
 ---
 
@@ -358,7 +384,7 @@ There are two coordination layers:
 
 The in-process lock prevents same-worker races before operations enter the thread pool. The OS-level advisory lock protects cooperating readers and writers across processes on the same host.
 
-Writers that bypass `file_tool` are outside that contract. Shell commands, editors, and unrelated processes that do not participate in these locks are observed only on the next non-covered `read_lines` call for that path (a covered re-read short-circuits to `REDUNDANT_READ` without touching disk) or on the next turn's reconciliation pass.
+Writers that bypass `file_tool` are outside that contract. Shell commands, editors, and unrelated processes that do not participate in these locks are observed on the next `read_lines` call for that path — which always reads disk and refreshes the path's windows before checking coverage, so even a span an existing window covers renders the changed content rather than hiding it behind `REDUNDANT_READ` (the exposure gate keeps a silently-refreshed window from short-circuiting) — or on the next turn's reconciliation pass.
 
 ### Text and Newline Semantics
 
@@ -398,27 +424,21 @@ Live windows are mutable; if their bodies fossilized into a summary, the summary
 
 ### Carrying Working Files into the New Tail
 
-When compaction creates a child `Conversation` snapshot, `_cas_swap_child` carries `working_file_windows` forward from the **live Redis snapshot at CAS time** (`current.working_file_windows`, not the deep-copy snapshot taken at compaction start), filtered to drop windows whose `window_id` (== originating file-tool `call_id`) appears in any `pre_tail` `TurnExecution.items`:
+When compaction creates a child `Conversation` snapshot, `_cas_swap_child` carries `working_file_windows` forward from the **live Redis snapshot at CAS time** (`current.working_file_windows`, not the deep-copy snapshot taken at compaction start), via `_carry_forward_windows`. The filter is keyed on `origin_call_ids`, not `window_id` — consolidation and fold can merge several calls (and synthetic `wfw-*` ids) into one window, so a single id no longer identifies provenance. **Keep a window iff at least one of its `origin_call_ids` escapes the pre-tail span:**
 
 ```python
 pre_tail_call_ids = _file_tool_call_ids_in(prep.pre_tail_turns)
-carried_windows = [
-    w for w in current.working_file_windows
-    if w.window_id not in pre_tail_call_ids
-]
+carried_windows = _carry_forward_windows(current.working_file_windows, pre_tail_call_ids)
+# keeps w iff set(w.origin_call_ids) - pre_tail_call_ids is non-empty
 ```
 
-Three keep-buckets survive:
+A **surviving origin** is any origin not in the pre-tail: a recency-tail call, a post-snapshot call finalized during in-flight summarization (race-safe — `pre_tail_turns` is loaded in `_prepare_compaction` well before CAS and the filter never reads post-snapshot turns), or a compacted-ancestor call that appears in no current turn at all (carryforward). A window is dropped only when **every** origin is a pre-tail call.
 
-- windows minted by **recency-tail turns** (call_id in recency-tail TurnExecutions)
-- windows minted by **post-snapshot turns** finalized during in-flight summarization — race-safe by construction, since `pre_tail_turns` was loaded in `_prepare_compaction` well before CAS and the filter never reads post-snapshot TurnExecutions
-- **carryforward** windows whose call_ids live in no current `TurnExecution.items` at all (they originated in a compacted ancestor and rode through prior compactions)
-
-The behavioral tradeoff: a window minted in the pre-tail is dropped even when a recency-tail turn touches the same path via edit/REDUNDANT_READ (which refreshes the existing window without minting a new one). The model can re-read for that range if it still needs it — the deliberate cost of a simple, race-safe filter. The alternative, per-window bot-source provenance, would keep the window but reintroduce the anchor machinery first-class working files removed.
+The behavioral tradeoff is narrower than before. A recency-tail call now anchors a pre-tail-minted window whenever it adds provenance — a re-read that consolidates the window, or a `REDUNDANT_READ` whose `call_id` is appended to the covering window's origins. A bare edit refreshes content without touching `origin_call_ids`, so it does not anchor; if every origin stays pre-tail the window is dropped and the model can re-read. A merged window can carry a pre-tail origin alongside a surviving one and is kept whole — accepted benign over-retention (the window re-renders against live disk content every reconcile, so the carried lines are current, not stale branch state).
 
 ### Branch Divergence
 
-Case A branch divergence (and cold rebuild) apply a two-gate filter to `working_file_windows`: keep a window if its path is active in the kept turns AND (its `window_id` is in shared-prefix TurnExecutions OR its `window_id` is in no `TurnExecution` reachable from the source snapshot — the carryforward bucket). Active paths come from `file_tool.path` annotations on the kept turns' file-tool outputs, which cover every call shape including edits and REDUNDANT_READs that don't mint a new window. See [conversation/README.md — Branches and Snapshots](../conversation/README.md#branches-and-snapshots).
+Case A branch divergence (and cold rebuild) apply a two-gate filter to `working_file_windows`: keep a window if its path is active in the kept turns AND any of its `origin_call_ids` is a **surviving origin** — `any(o ∈ kept_call_ids)` OR `any(o ∉ source_call_ids)` (the carryforward bucket: an origin in no source-reachable `TurnExecution` came from a compacted ancestor). The second disjunct is `any(o ∉ source_call_ids)`, **not** `not any(o ∈ source_call_ids)` — a merged window carrying both an ancestor-carryforward origin and a discarded-sibling origin is kept on the surviving ancestor. A window is dropped only when every origin is a discarded source origin (in `source_call_ids`, not `kept_call_ids`). Active paths come from `file_tool.path` annotations on the kept turns' file-tool outputs, which cover every call shape including edits and REDUNDANT_READs. See [conversation/README.md — Branches and Snapshots](../conversation/README.md#branches-and-snapshots).
 
 ### Client Relabeling After Compaction
 
@@ -436,7 +456,7 @@ The browser UI formats `file_tool` activity entries into concise summaries (`Rea
 
 ## Testing
 
-Unit coverage lives in `tests/unit_tests/test_file_tool*.py`, `test_working_file_models.py`, `test_reconcile_working_files.py`, `test_compaction_pre_tail_filter.py`, and `test_origin_filter.py`. Tier B end-to-end coverage is in `tests/integration_tests/tier_b/test_file_tool_flow.py`; UI-side formatting is in `tests/ui_tests/file_tool_ui.test.js`. Tier A passes with FileTool enabled on both Anthropic and OpenAI web harnesses.
+Unit coverage lives in `tests/unit_tests/test_file_tool*.py` — including `test_file_tool_window_dedup.py`, which covers interval consolidation, the unified coverage check and exposure gate, the reconcile fold, and the generalized compaction / branch-divergence origin filters (it absorbed the old `test_compaction_pre_tail_filter.py` and `test_origin_filter.py`, which were removed) — plus `test_working_file_models.py` and `test_reconcile_working_files.py`. Tier B end-to-end coverage is in `tests/integration_tests/tier_b/test_file_tool_flow.py`; UI-side formatting is in `tests/ui_tests/file_tool_ui.test.js`. Tier A passes with FileTool enabled on both Anthropic and OpenAI web harnesses.
 
 ---
 
@@ -447,6 +467,7 @@ Unit coverage lives in `tests/unit_tests/test_file_tool*.py`, `test_working_file
 - Large files require paging or fallback tooling. Only 200 lines are rendered per view and files over 1 MB are rejected.
 - Script and eval harnesses do not currently expose FileTool.
 - A `WorkingFileWindow` carried forward through compaction can lag one refresh cycle if the file changed between compaction CAS and the next turn. The next turn's `reconcile_working_files` repairs it.
+- Consolidation deduplicates overlapping/contiguous windows but does not cap the **number** of windows: a model that reads many disjoint ranges of a long file still accumulates one window per disjoint range. A per-path window-count cap is deferred.
 - Cleanup for stale `pending` compaction children is deferred to later recovery/sweeper work. That is not a FileTool correctness gap, but it is related infrastructure.
 
 ---
@@ -455,16 +476,17 @@ Unit coverage lives in `tests/unit_tests/test_file_tool*.py`, `test_working_file
 
 | File | Role |
 |---|---|
-| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` class. Read/create/edit dispatch, redundant-read coverage check, `WorkingFileWindow` minting and in-place refresh; delegates locked file I/O to `reads.py`, refresh/tombstone helpers to `live_windows.py`, path sandboxing to `paths.py`. |
-| `prokaryotes/tools_v1/file_tool/live_windows.py` | `refresh_windows_for_path`, `tombstone_windows_for_path`, `reconcile_working_files` — operate on `Conversation.working_file_windows`. |
+| `prokaryotes/tools_v1/file_tool/__init__.py` | `FileTool` class. Read/create/edit dispatch, the unified coverage check + turn-local exposure map, interval consolidation of windows (via `intervals.py`), `WorkingFileWindow` minting and in-place refresh; delegates locked file I/O to `reads.py`, refresh/fold/tombstone helpers to `live_windows.py`, path sandboxing to `paths.py`. |
+| `prokaryotes/tools_v1/file_tool/intervals.py` | Pure interval consolidation — `Interval`, `ConsolidationResult`, `consolidate_intervals`. No I/O; computes the post-read non-overlapping cover for one path. |
+| `prokaryotes/tools_v1/file_tool/live_windows.py` | `refresh_windows_for_path`, `fold_windows_for_path` (turn-start overlap fold), `tombstone_windows_for_path`, `reconcile_working_files` — operate on `Conversation.working_file_windows`. |
 | `prokaryotes/tools_v1/file_tool/paths.py` | Workspace sandboxing — `_resolve_path`, `_open_text_file_no_follow`, `_raise_if_file_too_large`, `FileToolFileTooLargeError`. |
 | `prokaryotes/tools_v1/file_tool/reads.py` | Locked-read primitives (`_locked_read_text`, `_read_text_under_file_tool_lock`) and the shared per-path `asyncio.Lock` registry. |
 | `prokaryotes/tools_v1/file_tool/rendering.py` | `render_create_record`, `render_edit_record`, `render_live_window`, `render_tombstone`, `render_view`, line-edit text mutation, and the `CURRENT_VIEW_MARKER_PREFIX` constant. |
 | `prokaryotes/tools_v1/file_tool/validation.py` | Payload field validation for `read_lines`, `create_file`, and the write actions. |
-| `prokaryotes/conversation_v1/models.py` | `WorkingFileWindow`, `Conversation.working_file_windows`, `Conversation.working_files_block()`, `coverage_eligible()`. |
+| `prokaryotes/conversation_v1/models.py` | `WorkingFileWindow` (required `line_count` and `origin_call_ids`, concrete `requested_end_line`, `origin_call_ids` validator), `Conversation.working_file_windows`, `Conversation.working_files_block()`, `coverage_eligible()`. |
 | `prokaryotes/conversation_v1/project.py` | `project_for_llm` — emits the leading `<working_files>` block and filters historical `file_tool.persistence="working_file"` outputs (and their paired calls). |
 | `prokaryotes/harness_v1/web.py` | Web-harness `FileTool` registration, `working_file_provider` wiring (`lambda: conversation.working_file_windows`), and turn-start `reconcile_working_files`. |
-| `prokaryotes/context_v1/compaction.py` | `_file_tool_call_ids_in` and the pre_tail call-id filter inside `_cas_swap_child` that carries forward `working_file_windows` to the child snapshot. |
+| `prokaryotes/context_v1/compaction.py` | `_file_tool_call_ids_in` and `_carry_forward_windows` — the pre-tail origin filter `_cas_swap_child` uses to carry `working_file_windows` forward to the child snapshot. |
 | `prokaryotes/context_v1/conversation_sync.py` | `_active_paths_in_turns`, `_filter_windows_by_active_path_and_origin` — Case A divergence and cold-rebuild two-gate filter on `working_file_windows`. |
 | `prokaryotes/search_v1/conversations.py` | `working_file_windows_json` persistence; `conversation_from_doc` / `working_file_windows_from_doc`. |
 | `scripts/static/ui.js` | Client-side rendering of `file_tool` activity entries |
